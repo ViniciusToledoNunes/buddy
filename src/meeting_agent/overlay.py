@@ -4,7 +4,7 @@ import asyncio
 import queue
 import threading
 
-from .events import EventBus, SuggestionEvent
+from .events import EventBus, SuggestionBatchEvent, SuggestionEvent
 
 
 class SuggestionOverlay:
@@ -19,6 +19,12 @@ class SuggestionOverlay:
     def push(self, event: SuggestionEvent) -> None:
         try:
             self.messages.put_nowait(event)
+
+    def push_batch(self, event: SuggestionBatchEvent) -> None:
+        if event.suggestions:
+            self.push(event.suggestions[0])
+        else:
+            self.push(SuggestionEvent("LISTENING", "Buddy is updating as the conversation changes."))
         except queue.Full:
             try:
                 self.messages.get_nowait()
@@ -81,6 +87,8 @@ async def overlay_bridge(overlay: SuggestionOverlay, bus: EventBus, stop: asynci
                 continue
             if isinstance(event, SuggestionEvent):
                 overlay.push(event)
+            elif isinstance(event, SuggestionBatchEvent):
+                overlay.push_batch(event)
     finally:
         bus.unsubscribe(events)
         overlay.stop()
