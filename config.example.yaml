@@ -1,0 +1,46 @@
+language: en                 # en, pt, or auto
+asr_mode: auto               # auto, cloud-fast, local-gpu, local-cpu
+llm_provider: auto           # auto, openai, anthropic, ollama, disabled
+save_audio: false
+meetings_dir: meetings
+
+audio:
+  sample_rate: 24000
+  chunk_ms: 100
+  system_device: default     # WASAPI output, PipeWire sink, or macOS system audio
+  microphone_device: default
+  queue_seconds: 12
+
+asr:
+  cloud_model: gpt-live-transcribe
+  local_model_en: tiny.en
+  local_model_multilingual: base
+  compute_type: int8
+  beam_size: 1
+  vad_threshold: 0.012
+  min_speech_ms: 250
+  silence_ms: 600
+  max_segment_seconds: 12
+
+copilot:
+  enabled: true
+  automatic_suggestions: true
+  suggestion_cooldown_seconds: 20
+  context_minutes: 5
+  output_language: en
+  openai_model: gpt-5-mini
+  anthropic_model: claude-sonnet-4-5
+  ollama_model: qwen3:4b
+
+hotkeys:
+  toggle_meeting: ctrl+alt+m
+  suggest_now: ctrl+alt+space
+
+ui:
+  refresh_hz: 8
+  overlay: false
+
+benchmark:
+  source: C:\Users\vinic\Videos\trr01.mp4
+  seconds: 60
+  models: [tiny.en, base.en, distil-small.en]
