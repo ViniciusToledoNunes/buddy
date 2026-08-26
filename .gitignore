@@ -1,0 +1,16 @@
+.env
+config.yaml
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+meetings/*
+!meetings/.gitkeep
+.meeting-agent/
+benchmark-results.json
+tools/
+models/
+.DS_Store
+Thumbs.db

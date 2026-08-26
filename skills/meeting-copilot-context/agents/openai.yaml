@@ -1,0 +1,14 @@
+interface:
+  display_name: "Meeting Copilot Context"
+  short_description: "Connect meeting talk to project evidence"
+  default_prompt: "Use $meeting-copilot-context to relate the live meeting to this project."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "meeting-copilot"
+      description: "Bounded access to live and saved Meeting Copilot context"
+      transport: "stdio"
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,2 @@
+{"speaker":"REMOTE","text":"Can we enable the invoice migration directly in production tomorrow?","final":true,"timestamp":"2026-08-26T15:00:00+00:00"}
+{"speaker":"ME","text":"I need to check whether reconciliation and rollback are covered.","final":true,"timestamp":"2026-08-26T15:00:05+00:00"}
