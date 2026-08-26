@@ -33,7 +33,12 @@ class CopilotConfig(BaseModel):
     enabled: bool = True
     automatic_suggestions: bool = True
     suggestion_cooldown_seconds: int = Field(20, ge=5)
+    suggestion_refresh_seconds: float = Field(6.0, ge=0.05, le=300)
+    suggestion_debounce_seconds: float = Field(1.5, ge=0.01, le=30)
     context_minutes: int = Field(5, ge=1, le=30)
+    semantic_memory_enabled: bool = True
+    semantic_memory_max_meetings: int = Field(50, ge=1, le=500)
+    semantic_memory_matches: int = Field(3, ge=1, le=10)
     output_language: str = "en"
     openai_model: str = "gpt-5-mini"
     anthropic_model: str = "claude-sonnet-4-5"

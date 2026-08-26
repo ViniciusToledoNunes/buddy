@@ -11,7 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .config import Settings
-from .events import EventBus, StatusEvent, SuggestionEvent, TranscriptEvent
+from .events import Event, EventBus, StatusEvent, SuggestionBatchEvent, SuggestionEvent, TranscriptEvent
 
 
 KIND_ICON = {"COMMENT": "💡", "QUESTION": "❓", "RISK": "⚠", "CONNECTION": "🔗", "ACTION": "✅"}
@@ -27,6 +27,25 @@ class LiveUI:
         self.suggestions: deque[SuggestionEvent] = deque(maxlen=5)
         self.statuses: dict[str, StatusEvent] = {}
         self.latency = 0.0
+
+    def apply_event(self, event: Event) -> None:
+        if isinstance(event, TranscriptEvent):
+            key = (event.speaker, event.utterance_id)
+            if event.final:
+                self.partials.pop(key, None)
+                stamp = datetime.fromisoformat(event.timestamp).astimezone().strftime("%H:%M:%S")
+                self.lines.append((stamp, event.speaker, event.text))
+                if event.latency_seconds is not None:
+                    self.latency = event.latency_seconds
+            else:
+                self.partials[key] = event.text
+        elif isinstance(event, SuggestionBatchEvent):
+            self.suggestions.clear()
+            self.suggestions.extend(event.suggestions[:5])
+        elif isinstance(event, SuggestionEvent):
+            self.suggestions.appendleft(event)
+        elif isinstance(event, StatusEvent):
+            self.statuses[event.component] = event
 
     def _render(self) -> Group:
         transcript = Table.grid(expand=True)
@@ -71,20 +90,7 @@ class LiveUI:
                 while not stop.is_set():
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=refresh)
-                        if isinstance(event, TranscriptEvent):
-                            key = (event.speaker, event.utterance_id)
-                            if event.final:
-                                self.partials.pop(key, None)
-                                stamp = datetime.fromisoformat(event.timestamp).astimezone().strftime("%H:%M:%S")
-                                self.lines.append((stamp, event.speaker, event.text))
-                                if event.latency_seconds is not None:
-                                    self.latency = event.latency_seconds
-                            else:
-                                self.partials[key] = event.text
-                        elif isinstance(event, SuggestionEvent):
-                            self.suggestions.appendleft(event)
-                        elif isinstance(event, StatusEvent):
-                            self.statuses[event.component] = event
+                        self.apply_event(event)
                     except TimeoutError:
                         pass
                     live.update(self._render())

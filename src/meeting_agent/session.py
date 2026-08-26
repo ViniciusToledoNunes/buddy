@@ -16,6 +16,7 @@ from .audio import AudioCapture, AudioFrame
 from .config import Settings, project_root
 from .copilot import CopilotWorker, choose_provider
 from .events import EventBus, StatusEvent
+from .memory import MeetingMemoryIndex
 from .overlay import SuggestionOverlay, overlay_bridge
 from .storage import AudioArchiver, MeetingStorage, audio_archive_worker, storage_worker
 from .ui import LiveUI
@@ -75,7 +76,15 @@ async def run_session(settings: Settings) -> Path:
         "reason": selection.reason,
     })
     provider = choose_provider(settings, local_asr=selection.mode.startswith("local"))
-    copilot = CopilotWorker(settings, provider, bus, snapshot_path=storage.directory / "copilot.json")
+    memory_index = MeetingMemoryIndex(storage.directory.parent, settings.copilot.semantic_memory_max_meetings)
+    copilot = CopilotWorker(
+        settings,
+        provider,
+        bus,
+        snapshot_path=storage.directory / "copilot.json",
+        memory_index=memory_index,
+        current_meeting_id=storage.directory.name,
+    )
     external_stop = asyncio.Event()
     asr_stop = asyncio.Event()
     consumer_stop = asyncio.Event()

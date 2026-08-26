@@ -34,6 +34,13 @@ class SuggestionEvent:
 
 
 @dataclass(slots=True)
+class SuggestionBatchEvent:
+    revision: int
+    suggestions: list[SuggestionEvent]
+    timestamp: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class StatusEvent:
     component: str
     state: str
@@ -41,7 +48,7 @@ class StatusEvent:
     timestamp: str = field(default_factory=utc_now)
 
 
-Event = TranscriptEvent | SuggestionEvent | StatusEvent
+Event = TranscriptEvent | SuggestionEvent | SuggestionBatchEvent | StatusEvent
 
 
 class EventBus:

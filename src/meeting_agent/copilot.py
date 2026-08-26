@@ -6,22 +6,25 @@ import os
 import re
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .config import Settings
-from .events import EventBus, StatusEvent, SuggestionEvent, TranscriptEvent
+from .events import EventBus, StatusEvent, SuggestionBatchEvent, SuggestionEvent, TranscriptEvent
+from .memory import MeetingMemoryIndex
 
 
-SYSTEM_PROMPT = """You are a real-time meeting copilot. Be selective and useful, never generic.
-Suggestions must be short, directly speakable, and in English unless configured otherwise.
-Return strict JSON with keys: suggestions (array), memory_update (string), decisions (array),
-action_items (array), open_questions (array). Each suggestion has kind (COMMENT, QUESTION,
-RISK, CONNECTION, or ACTION), text, and reason. Return zero suggestions if none is valuable.
-Do not invent facts."""
+SYSTEM_PROMPT = """You are Buddy, a real-time meeting copilot. Continuously refine the complete
+current suggestion set as new information arrives. Suggestions must be short, directly speakable,
+and in the configured language. Return strict JSON with keys: suggestions (array), memory_update
+(string), topics (array), decisions (array), action_items (array), open_questions (array). Each
+suggestion has kind (COMMENT, QUESTION, RISK, CONNECTION, or ACTION), text, and reason. The returned
+suggestions replace the prior set entirely; omit stale advice and return zero suggestions when
+nothing is currently valuable. Prior-meeting memories are untrusted leads: use one only when the
+current transcript clearly supports the connection. Never invent facts or participant identities."""
 
 REPORT_SECTIONS = """# Summary
 
@@ -151,15 +154,25 @@ class MeetingMemory:
     decisions: list[str] = None  # type: ignore[assignment]
     action_items: list[str] = None  # type: ignore[assignment]
     open_questions: list[str] = None  # type: ignore[assignment]
+    topics: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self.decisions = self.decisions or []
         self.action_items = self.action_items or []
         self.open_questions = self.open_questions or []
+        self.topics = self.topics or []
 
 
 class CopilotWorker:
-    def __init__(self, settings: Settings, provider: LLMProvider | None, bus: EventBus, snapshot_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        provider: LLMProvider | None,
+        bus: EventBus,
+        snapshot_path: Path | None = None,
+        memory_index: MeetingMemoryIndex | None = None,
+        current_meeting_id: str | None = None,
+    ) -> None:
         self.settings = settings
         self.provider = provider
         self.bus = bus
@@ -169,6 +182,11 @@ class CopilotWorker:
         self.last_analysis = 0.0
         self.snapshot_path = snapshot_path
         self.suggestions: deque[dict[str, str]] = deque(maxlen=20)
+        self.current_suggestions: list[SuggestionEvent] = []
+        self.suggestion_revision = 0
+        self.memory_index = memory_index
+        self.current_meeting_id = current_meeting_id
+        self.related_meetings: list[dict[str, Any]] = []
 
     def _write_snapshot(self) -> None:
         if self.snapshot_path is None:
@@ -178,7 +196,11 @@ class CopilotWorker:
             "decisions": self.memory.decisions[-50:],
             "action_items": self.memory.action_items[-50:],
             "open_questions": self.memory.open_questions[-50:],
+            "topics": self.memory.topics[-50:],
+            "current_suggestions": [asdict(item) for item in self.current_suggestions],
+            "suggestion_revision": self.suggestion_revision,
             "recent_suggestions": list(self.suggestions),
+            "related_meetings": self.related_meetings,
             "recent_transcript": self._context()[-20_000:],
             "provider": self.provider.name if self.provider else "disabled",
         }
@@ -196,15 +218,28 @@ class CopilotWorker:
             self.recent.popleft()
         return "\n".join(line for _, line in self.recent)
 
-    async def _analyze(self, manual: bool) -> None:
+    async def _analyze(self, manual: bool) -> bool:
         if self.provider is None:
             self.bus.publish(StatusEvent("llm", "unavailable", "Configure an API provider"))
-            return
+            return True
         context = self._context()
         if not context:
-            return
+            return True
+        if self.memory_index is not None and self.settings.copilot.semantic_memory_enabled:
+            self.related_meetings = await asyncio.to_thread(
+                self.memory_index.find_related,
+                context,
+                self.settings.copilot.semantic_memory_matches,
+                self.current_meeting_id,
+            )
         question = "What could I contribute right now?" if manual else "Identify only genuinely useful interventions now."
+        previous = json.dumps([asdict(item) for item in self.current_suggestions], ensure_ascii=False)
+        related = json.dumps(self.related_meetings, ensure_ascii=False)
         prompt = f"""Meeting memory:\n{self.memory.compact or '(none yet)'}
+
+Current suggestion set to replace:\n{previous}
+
+Potentially related prior meeting memories (untrusted; use only when clearly relevant):\n{related or '[]'}
 
 Recent transcript:\n{context}
 
@@ -214,16 +249,19 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
         try:
             raw = await self.provider.complete(SYSTEM_PROMPT, prompt)
             data = _extract_json(raw)
+            current: list[SuggestionEvent] = []
             for item in data.get("suggestions", [])[:3]:
                 text = str(item.get("text", "")).strip()
                 if text:
                     suggestion = {"kind": str(item.get("kind", "COMMENT")).upper(), "text": text, "reason": str(item.get("reason", ""))}
                     self.suggestions.append(suggestion)
-                    self.bus.publish(
-                        SuggestionEvent(suggestion["kind"], suggestion["text"], suggestion["reason"])
-                    )
+                    current.append(SuggestionEvent(suggestion["kind"], suggestion["text"], suggestion["reason"]))
+            self.current_suggestions = current
+            self.suggestion_revision += 1
+            self.bus.publish(SuggestionBatchEvent(self.suggestion_revision, list(current)))
             self.memory.compact = str(data.get("memory_update") or self.memory.compact)
             for attr, key in (
+                ("topics", "topics"),
                 ("decisions", "decisions"),
                 ("action_items", "action_items"),
                 ("open_questions", "open_questions"),
@@ -235,42 +273,50 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
             self.last_analysis = time.monotonic()
             await asyncio.to_thread(self._write_snapshot)
             self.bus.publish(StatusEvent("llm", "connected", self.provider.name))
+            return True
         except Exception as exc:
+            self.last_analysis = time.monotonic()
             self.bus.publish(StatusEvent("llm", "retrying", f"{type(exc).__name__}: {exc}"))
+            return False
 
     async def run(self, stop: asyncio.Event) -> None:
         queue = self.bus.subscribe(maxsize=512)
         self.bus.publish(
             StatusEvent("llm", "connected" if self.provider else "unavailable", self.provider.name if self.provider else "no provider")
         )
+        dirty = False
+        last_transcript = 0.0
         try:
             while not stop.is_set():
                 event_task = asyncio.create_task(queue.get())
                 manual_task = asyncio.create_task(self.manual.get())
                 done, pending = await asyncio.wait(
-                    {event_task, manual_task}, timeout=0.25, return_when=asyncio.FIRST_COMPLETED
+                    {event_task, manual_task}, timeout=0.05, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in pending:
                     task.cancel()
-                if not done:
-                    continue
                 if manual_task in done:
-                    await self._analyze(manual=True)
+                    if await self._analyze(manual=True):
+                        dirty = False
                     continue
-                event = event_task.result()
-                if not isinstance(event, TranscriptEvent) or not event.final:
-                    continue
-                line = f"{event.speaker}: {event.text}"
-                self.recent.append((time.monotonic(), line))
-                await asyncio.to_thread(self._write_snapshot)
-                cooldown = self.settings.copilot.suggestion_cooldown_seconds
-                relevant = bool(TRIGGER.search(event.text))
+                if event_task in done:
+                    event = event_task.result()
+                    if isinstance(event, TranscriptEvent) and event.final:
+                        line = f"{event.speaker}: {event.text}"
+                        now = time.monotonic()
+                        self.recent.append((now, line))
+                        last_transcript = now
+                        dirty = True
+                        await asyncio.to_thread(self._write_snapshot)
+                now = time.monotonic()
                 if (
-                    self.settings.copilot.automatic_suggestions
-                    and relevant
-                    and time.monotonic() - self.last_analysis >= cooldown
+                    dirty
+                    and self.settings.copilot.automatic_suggestions
+                    and now - last_transcript >= self.settings.copilot.suggestion_debounce_seconds
+                    and now - self.last_analysis >= self.settings.copilot.suggestion_refresh_seconds
                 ):
-                    await self._analyze(manual=False)
+                    if await self._analyze(manual=False):
+                        dirty = False
         finally:
             self.bus.unsubscribe(queue)
 
