@@ -21,7 +21,7 @@ from .doctor import run_doctor
 from .session import STATE_FILE, _hotkey, _state_process_alive, read_state, request_stop, run_session
 
 
-app = typer.Typer(no_args_is_help=True, help="Low-latency cross-platform Meeting Copilot")
+app = typer.Typer(no_args_is_help=True, help="Buddy - your cross-platform, project-aware meeting copilot")
 console = Console()
 
 
@@ -78,15 +78,15 @@ def start() -> None:
     """Start an explicit foreground meeting session."""
     settings = load_settings()
     selection = select_asr(settings)
-    console.print("[bold red]RECORDING / TRANSCRIBING[/bold red]")
+    console.print("[bold red]BUDDY - RECORDING / TRANSCRIBING[/bold red]")
     console.print(f"ASR: {selection.mode} / {selection.model} / {selection.compute_type} ({selection.reason})")
-    console.print(f"Stop: meeting-agent stop or {settings.hotkeys.toggle_meeting}; suggest: {settings.hotkeys.suggest_now}")
+    console.print(f"Stop: buddy stop or {settings.hotkeys.toggle_meeting}; suggest: {settings.hotkeys.suggest_now}")
     try:
         directory = asyncio.run(run_session(settings))
         console.print(f"Meeting saved to [bold]{directory}[/bold]")
     except KeyboardInterrupt:
         request_stop()
-        console.print("Stopping…")
+        console.print("Stopping...")
     except Exception as exc:
         console.print(f"[red]Cannot start:[/red] {type(exc).__name__}: {exc}")
         raise typer.Exit(1)
@@ -106,7 +106,7 @@ def status() -> None:
     """Show current session status."""
     state = read_state()
     if not state or not _state_process_alive(state):
-        console.print("[dim]STOPPED — no capture is active.[/dim]")
+        console.print("[dim]STOPPED - no capture is active.[/dim]")
         return
     console.print_json(json.dumps(state))
 

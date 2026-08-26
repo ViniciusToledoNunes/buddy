@@ -13,7 +13,7 @@ SpeakerFilter = Literal["all", "ME", "REMOTE"]
 
 
 class MeetingRepository:
-    """Bounded, path-safe access to Meeting Copilot's persisted context."""
+    """Bounded, path-safe access to Buddy's persisted meeting context."""
 
     def __init__(self, meetings_dir: Path, runtime_dir: Path) -> None:
         self.meetings_dir = meetings_dir.expanduser().resolve()

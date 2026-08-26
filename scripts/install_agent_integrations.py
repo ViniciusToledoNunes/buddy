@@ -33,7 +33,7 @@ def copy_skill(source: Path, destination: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Install Meeting Copilot skill and MCP registrations")
+    parser = argparse.ArgumentParser(description="Install Buddy skill and MCP registrations")
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--client", action="append", choices=("codex", "claude"), default=[])
     args = parser.parse_args()
@@ -47,10 +47,10 @@ def main() -> int:
     messages: list[str] = []
     if "codex" in clients:
         copy_skill(source, Path.home() / ".codex" / "skills" / source.name)
-        messages.append(configure("codex", ["mcp", "add", "meeting-copilot", "--", *server_args], "meeting-copilot"))
+        messages.append(configure("codex", ["mcp", "add", "buddy", "--", *server_args], "buddy"))
     if "claude" in clients:
         copy_skill(source, Path.home() / ".claude" / "skills" / source.name)
-        messages.append(configure("claude", ["mcp", "add", "--scope", "user", "meeting-copilot", "--", *server_args], "meeting-copilot"))
+        messages.append(configure("claude", ["mcp", "add", "--scope", "user", "buddy", "--", *server_args], "buddy"))
     for message in messages:
         print(message)
     return 0

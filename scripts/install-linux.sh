@@ -5,6 +5,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if (3, 12) <= sys.version_info < (3, 15) else "Buddy requires Python 3.12-3.14")'
+
 "$PYTHON_BIN" -m venv "$REPO_ROOT/.venv"
 "$REPO_ROOT/.venv/bin/python" -m pip install --upgrade pip
 "$REPO_ROOT/.venv/bin/python" -m pip install -e "$REPO_ROOT[dev]"
@@ -14,4 +16,4 @@ if ! command -v pw-record >/dev/null 2>&1 && ! command -v pw-cat >/dev/null 2>&1
     echo "PipeWire capture client missing. Install your distribution's pipewire audio client package." >&2
 fi
 "$REPO_ROOT/.venv/bin/python" -m meeting_agent.cli doctor
-echo "Installed. On Wayland, configure a desktop global shortcut if pynput cannot register one."
+echo "Buddy installed. On Wayland, configure a desktop global shortcut if pynput cannot register one."

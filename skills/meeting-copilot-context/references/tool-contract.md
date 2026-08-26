@@ -1,4 +1,4 @@
-# Meeting Copilot MCP tool contract
+# Buddy MCP tool contract
 
 The server is local and uses stdio. It exposes only the configured meetings directory and runtime control flags.
 
@@ -17,6 +17,6 @@ Start with small windows. Increase `minutes` or `max_events` only when the answe
 
 - `request_suggestion`: asks the already-running copilot for a new suggestion.
 - `stop_meeting`: requests immediate capture stop and report generation.
-- `start_meeting(confirmed)`: requires both `confirmed=true` and the administrator-set `MEETING_COPILOT_ALLOW_MCP_START=true`. Explicit user recording consent is still required.
+- `start_meeting(confirmed)`: requires both `confirmed=true` and the administrator-set `BUDDY_ALLOW_MCP_START=true`. Explicit user recording consent is still required.
 
 These tools return `accepted: false` with a reason when the precondition is not met. Read tools may return an `error` object with a stable code and message. Do not work around either response by touching runtime files directly.

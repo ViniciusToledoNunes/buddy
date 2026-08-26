@@ -15,15 +15,15 @@ from .context import MeetingRepository, SpeakerFilter
 def create_server(repository: MeetingRepository | None = None) -> MCPServer:
     repo = repository or MeetingRepository.from_settings(load_settings())
     server = MCPServer(
-        "Meeting Copilot",
-        version="0.2.0",
+        "Buddy - Meeting Copilot",
+        version="0.3.0",
         instructions=(
-            "Read live or saved Meeting Copilot transcripts and connect them to the host agent's project context. "
+            "Read live or saved Buddy transcripts and connect them to the host agent's project context. "
             "Never infer identities beyond ME and REMOTE. Recording must only be started after explicit user consent."
         ),
     )
 
-    @server.tool(description="Return whether Meeting Copilot is recording and its current session metadata.")
+    @server.tool(description="Return whether Buddy is recording and its current session metadata.")
     def meeting_status() -> dict[str, Any]:
         return repo.status()
 
@@ -66,11 +66,14 @@ def create_server(repository: MeetingRepository | None = None) -> MCPServer:
 
     @server.tool(description="Start recording only after explicit confirmation and administrator opt-in.")
     def start_meeting(confirmed: bool = False) -> dict[str, Any]:
-        allowed = os.getenv("MEETING_COPILOT_ALLOW_MCP_START", "").lower() in {"1", "true", "yes"}
+        allowed = any(
+            os.getenv(name, "").lower() in {"1", "true", "yes"}
+            for name in ("BUDDY_ALLOW_MCP_START", "MEETING_COPILOT_ALLOW_MCP_START")
+        )
         if not confirmed:
             return {"accepted": False, "reason": "explicit confirmation is required"}
         if not allowed:
-            return {"accepted": False, "reason": "MCP start is disabled; set MEETING_COPILOT_ALLOW_MCP_START=true"}
+            return {"accepted": False, "reason": "MCP start is disabled; set BUDDY_ALLOW_MCP_START=true"}
         if repo.status()["active"]:
             return {"accepted": False, "reason": "a meeting is already active"}
         kwargs: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
@@ -81,7 +84,7 @@ def create_server(repository: MeetingRepository | None = None) -> MCPServer:
         process = subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "start"], **kwargs)
         return {"accepted": True, "pid": process.pid}
 
-    @server.resource("meeting://status", description="Current Meeting Copilot state as JSON.")
+    @server.resource("meeting://status", description="Current Buddy state as JSON.")
     def status_resource() -> str:
         return json.dumps(repo.status(), ensure_ascii=False)
 

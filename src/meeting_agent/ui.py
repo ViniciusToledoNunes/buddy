@@ -59,7 +59,7 @@ class LiveUI:
         status.append(f"\nSaved incrementally: {self.meeting_dir}", style="dim")
         return Group(
             Panel(transcript, title="LIVE TRANSCRIPT", border_style="blue"),
-            Panel(suggestions, title="COPILOT", border_style="magenta"),
+            Panel(suggestions, title="BUDDY", border_style="magenta"),
             Panel(status, title="STATUS", border_style="red"),
         )
 

@@ -5,6 +5,7 @@ from meeting_agent.mcp_server import create_server
 
 
 async def test_mcp_surface_and_safe_defaults(tmp_path, monkeypatch):
+    monkeypatch.delenv("BUDDY_ALLOW_MCP_START", raising=False)
     monkeypatch.delenv("MEETING_COPILOT_ALLOW_MCP_START", raising=False)
     server = create_server(MeetingRepository(tmp_path / "meetings", tmp_path / "runtime"))
     async with Client(server) as client:

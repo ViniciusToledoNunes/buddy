@@ -1,96 +1,134 @@
-# Meeting Copilot
+# Buddy - Meeting Copilot
 
-A low-latency, explicitly activated meeting transcription and project-aware LLM copilot for Windows, Linux, and macOS. It captures system output and microphone as separate streams, labels them `REMOTE` and `ME`, writes every transcript event incrementally, and keeps capture/ASR independent from disk and LLM failures.
+Buddy é um copiloto de reuniões multiplataforma, ativado explicitamente, que transcreve áudio do sistema e microfone em fluxos separados e conecta a conversa ao contexto real dos seus projetos por meio de Codex ou Claude.
 
-The included `meeting-copilot-context` skill and local MCP server let Codex or Claude combine bounded meeting context with the code, documentation, git history, and research tools already available to the host agent. The server itself cannot browse arbitrary project files.
+Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, salva a transcrição incrementalmente e mantém captura, ASR, armazenamento, interface e LLM isolados para que uma falha não derrube toda a sessão.
 
-## Current machine result
+## O que o Buddy faz hoje
 
-This installation was diagnosed and benchmarked on 2026-08-26:
+- Captura separada do microfone (`ME`) e do áudio reproduzido pelo computador (`REMOTE`).
+- Transcrição local com `faster-whisper`/CTranslate2 em CPU ou GPU compatível.
+- Transcrição opcional pela API Realtime da OpenAI, somente com opt-in explícito para envio de áudio.
+- Sugestões automáticas ou manuais durante a reunião, com memória compacta de decisões, ações e perguntas.
+- Relatório final em Markdown e transcrição incremental em texto e JSONL.
+- TUI em tempo real, overlay opcional e atalhos globais.
+- Benchmark local para escolher modelo e backend de ASR adequados à máquina.
+- Servidor MCP local para consultar status, transcrição ao vivo, reuniões salvas, buscas e contexto do copiloto.
+- Skill `meeting-copilot-context` para Codex e Claude relacionarem a reunião com código, documentação, git e pesquisa externa.
+- Controles seguros: começa parado, `start` via MCP fica desabilitado por padrão e caminhos fora de `meetings_dir` são rejeitados.
 
-- Windows 11 Pro, Intel Core i5-1135G7 (4 cores / 8 threads), 15.74 GB RAM.
-- Intel Iris Xe; no NVIDIA GPU, VRAM, CUDA runtime, or `nvidia-smi`.
-- Python 3.14.3 works with the current native wheels. No second Python was installed.
-- FFmpeg 9.0 is installed through WinGet. The agent detects its installation even when the current terminal PATH is stale.
-- Default output: Realtek speakers; default input: Intel Smart Sound microphone.
-- Two WASAPI loopback endpoints were detected and opened successfully.
-- OpenAI authentication is now configured in the ignored, ACL-restricted `.env`. Initial media tests were local-only, and cloud audio upload remains explicitly disabled.
+## Compatibilidade
 
-The selected local fallback is `faster-whisper` + CTranslate2, CPU `int8`, model `base.en`. Results for the first 60 seconds of `C:\Users\vinic\Videos\trr01.mp4`:
-
-| Backend | Model | Device | Compute | Audio | Processing | RTF | Approx. 3 s inference | Process RAM peak | VRAM |
-|---|---|---|---|---:|---:|---:|---:|---:|---:|
-| faster-whisper | tiny.en | CPU | int8 | 60.0 s | 1.51 s | 0.025 | 0.84 s | 292 MB | N/A |
-| faster-whisper | base.en | CPU | int8 | 60.0 s | 2.17 s | 0.036 | 0.69 s | 379 MB | N/A |
-| faster-whisper | distil-small.en | CPU | int8 | 60.0 s | 4.91 s | 0.082 | 2.31 s | 552 MB | N/A |
-| whisper.cpp b4938 | base.en-q5_1 | CPU | q5_1 | 60.0 s | 4.37 s | 0.073 | 1.73 s | 175 MB | N/A |
-
-The portable [whisper.cpp release](https://github.com/ggml-org/whisper.cpp/releases) and official [q5_1 model](https://huggingface.co/ggerganov/whisper.cpp) were installed locally as a quantized control. It used less RAM, but its per-turn CLI latency (including model startup) was substantially higher. The persistent faster-whisper `base.en` remains selected. The live playback test produced final turns about 1.41–1.73 seconds after speech ended (600 ms end-of-turn VAD plus 0.81–1.13 seconds inference). `benchmark-results.json` is read by `asr_mode: auto`; rerunning the benchmark can change the model selection based on this machine's measurements.
-
-## Platform support
-
-| Platform | System audio | Microphone | Requirement |
+| Plataforma | Áudio do sistema | Microfone | Estado |
 |---|---|---|---|
-| Windows 10/11 | WASAPI loopback | WASAPI | No native helper |
-| Linux | PipeWire sink capture | PipeWire source | `pw-record` or `pw-cat`; Wayland may need a desktop shortcut |
-| macOS 15+ | ScreenCaptureKit | ScreenCaptureKit | Xcode Command Line Tools and Screen Recording/Microphone permissions |
+| Windows 10/11 | WASAPI loopback | WASAPI | Validado em hardware real |
+| Linux desktop | PipeWire sink capture | PipeWire source | Implementado; requer validação no hardware alvo |
+| macOS 15+ | ScreenCaptureKit | ScreenCaptureKit | Implementado; requer validação no hardware alvo |
 
-The Windows backend has been hardware-tested on the machine described below. Linux and macOS adapters, installers, command construction, and failure diagnostics are included; they still require end-to-end validation on each target machine and audio setup.
+O repositório contém código, dependências Python, instaladores, configuração de exemplo, skill, servidor MCP, testes e documentação. Ele não contém nem deve conter:
 
-## Architecture
+- chaves de API ou `.env` pessoal;
+- gravações e reuniões salvas;
+- modelos de ASR, que são baixados no primeiro uso;
+- FFmpeg, PipeWire, Python ou Xcode Command Line Tools, que são dependências do sistema;
+- identificadores de dispositivos de outra máquina.
 
-```text
-WASAPI loopback ── capture thread ── bounded queue ─┐
-                                                    ├─ ASR workers ─ Transcript Event Bus
-Microphone ─────── capture thread ── bounded queue ─┘                 ├─ live TUI / overlay
-                                                                      ├─ incremental storage
-                                                                      └─ trigger + rolling memory ─ LLM
+Portanto, o Buddy pode ser instalado em qualquer máquina **dentro da matriz suportada**, desde que os pré-requisitos do sistema sejam atendidos. Consulte [portabilidade e pré-requisitos](docs/PORTABILITY.md) antes de migrar.
+
+## Instalação rápida
+
+Clone o projeto:
+
+```sh
+git clone https://github.com/ViniciusToledoNunes/buddy.git
+cd buddy
 ```
-
-Each capture source owns a blocking platform-adapter thread. Queue insertion is non-blocking and drops the oldest frame under sustained backpressure. ASR, TUI, storage, optional WAV archival, and Copilot are independent workers. An unavailable LLM never stops transcription; a disk error is reported and retried outside the capture thread. Device failures trigger rediscovery and reconnect. VAD prevents inference during silence, and the local runtime reserves CPU cores for capture.
-
-The OpenAI cloud backend follows the current [Realtime transcription guide](https://developers.openai.com/api/docs/guides/realtime-transcription): a transcription WebSocket session, 24 kHz PCM chunks, server VAD, delta events, completed events, and `item_id`-based partial replacement. The current recommended model is `gpt-live-transcribe`; `gpt-4o-mini-transcribe` remains configurable as a fallback.
-
-## Install and run
 
 Windows PowerShell:
 
 ```powershell
-cd C:\Users\vinic\Projects\meeting-copilot
 .\scripts\install-windows.ps1
 .\.venv\Scripts\Activate.ps1
-meeting-agent doctor
-meeting-agent devices
-meeting-agent start
+buddy doctor
+buddy devices
+buddy start
 ```
 
-Linux or macOS:
+Linux:
 
 ```sh
-./scripts/install-linux.sh   # Linux with PipeWire
-./scripts/install-macos.sh   # macOS 15+
+./scripts/install-linux.sh
+. .venv/bin/activate
+buddy doctor
+buddy devices
+buddy start
 ```
 
-The installer creates `.venv`, installs the package, copies the skill to both `~/.codex/skills/meeting-copilot-context` and `~/.claude/skills/meeting-copilot-context` when those clients are present, and registers the local `meeting-copilot` stdio MCP server. Existing MCP entries with that name are preserved rather than overwritten.
+macOS 15+:
 
-While running:
-
-- `Ctrl+Alt+Space`: analyze the current context immediately.
-- `Ctrl+Alt+M`: stop this session.
-- From another PowerShell: `meeting-agent stop`.
-
-Other commands:
-
-```powershell
-meeting-agent benchmark
-meeting-agent status
-meeting-agent config
-meeting-agent hotkeys
+```sh
+./scripts/install-macos.sh
+. .venv/bin/activate
+buddy doctor
+buddy devices
+buddy start
 ```
 
-`meeting-agent hotkeys` is an idle listener that lets `Ctrl+Alt+M` start a session when the main process is not already running. It must remain running; it can later be placed in Windows Startup or Task Scheduler if desired.
+Os comandos antigos `meeting-agent` e `meeting-agent-mcp` continuam disponíveis como aliases de compatibilidade.
 
-Each run is stored under `meetings/YYYY-MM-DD_HHMMSS/`:
+## Durante a reunião
+
+- `Ctrl+Alt+Space`: pede uma sugestão imediatamente.
+- `Ctrl+Alt+M`: encerra a sessão.
+- `buddy stop`: encerra a sessão a partir de outro terminal.
+- `buddy status`: informa se existe captura ativa.
+
+Outros comandos:
+
+```sh
+buddy benchmark
+buddy config
+buddy devices
+buddy doctor
+buddy hotkeys
+```
+
+As sugestões aparecem na TUI. Com `ui.overlay: true`, também aparecem em uma janela sempre visível. Sugestões produzidas pela skill aparecem na conversa do Codex ou Claude.
+
+## Codex e Claude
+
+Os instaladores copiam a skill para `~/.codex/skills/meeting-copilot-context` e `~/.claude/skills/meeting-copilot-context`, quando os clientes estão disponíveis, e registram o MCP local com o nome `buddy`.
+
+Depois da instalação, reinicie o cliente e experimente:
+
+```text
+Use $meeting-copilot-context para relacionar os últimos cinco minutos da reunião com este projeto.
+Use $meeting-copilot-context para verificar no código o risco que acabou de ser mencionado.
+Use $meeting-copilot-context para transformar a última reunião em próximos passos do projeto.
+```
+
+O MCP fornece somente contexto de reunião com limites definidos. A leitura do projeto é feita pelas ferramentas nativas do agente, mantendo uma fronteira clara de acesso.
+
+## Arquitetura
+
+```text
+System audio -> platform capture -> bounded queue --+
+                                                   +-> ASR -> event bus -> TUI / overlay
+Microphone  -> platform capture -> bounded queue --+                 +-> incremental storage
+                                                                     +-> triggers / memory -> LLM
+
+Saved meetings <-> local MCP <-> Codex or Claude <-> current project / docs / git / web
+```
+
+Backends de captura:
+
+- Windows: WASAPI loopback via `soundcard`.
+- Linux: PipeWire via `pw-record`/`pw-cat`.
+- macOS: helper Swift compilado localmente usando ScreenCaptureKit.
+
+## Arquivos gerados
+
+Cada sessão fica em `meetings/YYYY-MM-DD_HHMMSS/`:
 
 ```text
 transcript.txt
@@ -100,74 +138,50 @@ metadata.json
 copilot.json
 ```
 
-`transcript.jsonl` contains partial/final events with timestamp, source speaker, utterance ID, and observed latency. With `save_audio: false` (the default), streamed audio is discarded. If enabled, the independent archive worker creates `audio_me.wav` and `audio_remote.wav`.
+Com `save_audio: false`, padrão do projeto, o áudio é descartado após o processamento. Quando habilitado, são criados `audio_me.wav` e `audio_remote.wav`.
 
-## Cloud ASR and Copilot providers
+## Provedores e privacidade
 
-Copy the example without committing it:
+Copie `.env.example` para `.env` e preencha somente os provedores desejados. OpenAI, Anthropic e Ollama são opcionais; a transcrição local funciona sem chave.
 
-```powershell
-Copy-Item .env.example .env
-notepad .env
-```
-
-OpenAI LLM suggestions only need:
-
-```dotenv
-OPENAI_API_KEY=...
-```
-
-Anthropic uses `ANTHROPIC_API_KEY`. Explicit local Ollama uses `llm_provider: ollama` and `OLLAMA_BASE_URL`; it is never auto-selected while local CPU ASR is running because transcription has priority.
-
-Cloud audio requires two deliberate settings. This prevents the mere presence of a key from uploading meeting audio:
+O simples fato de existir uma chave não permite upload de áudio. Para usar ASR em nuvem são necessárias as duas configurações:
 
 ```yaml
 asr_mode: cloud-fast
 ```
 
 ```dotenv
-OPENAI_API_KEY=...
-MEETING_AGENT_ALLOW_CLOUD_AUDIO=true
+BUDDY_ALLOW_CLOUD_AUDIO=true
 ```
 
-Set `language: en`, `pt`, or `auto`. An explicit language reduces latency and ambiguity. Never put keys in YAML or source files; `.env` is ignored by Git.
+Iniciar por MCP também exige `BUDDY_ALLOW_MCP_START=true` e `confirmed=true` na chamada. Verifique consentimento dos participantes, legislação local e políticas corporativas antes de gravar ou transmitir conteúdo.
 
-## Privacy and consent
+Os nomes antigos das variáveis `MEETING_AGENT_*` e `MEETING_COPILOT_ALLOW_MCP_START` continuam aceitos para compatibilidade.
 
-The program starts stopped and records only after `meeting-agent start` or the configured listener hotkey. The TUI shows `RECORDING / TRANSCRIBING` prominently and `stop` ends capture before report generation. Verify participant consent, local recording law, and corporate policy before capturing a meeting or sending audio/transcripts to an external service.
+## Resultado nesta máquina
 
-MCP access is local. Read tools cap transcript windows and reject paths outside `meetings_dir`. Starting through MCP is disabled unless the administrator explicitly sets `MEETING_COPILOT_ALLOW_MCP_START=true`, and the tool still requires `confirmed=true`. API keys remain in the ignored `.env`; installers and skills never copy them.
+Validado em 2026-08-26 no Windows 11 Pro, Intel Core i5-1135G7, 16 GB de RAM, Intel Iris Xe e sem CUDA. O backend selecionado foi `faster-whisper base.en`, CPU `int8`, com RTF aproximado de `0.036` para uma amostra de 60 segundos e latência final observada de aproximadamente 1,4 a 1,7 segundo após o fim da fala.
 
-## Codex and Claude usage
+Resultados variam por máquina. Execute `buddy benchmark` para medir o ambiente alvo.
 
-After installation, restart the client so it discovers the skill and MCP server. Examples:
+## Limitações atuais
 
-```text
-Use $meeting-copilot-context to connect the last five minutes of this meeting to the current project.
-Use $meeting-copilot-context to find evidence for the migration risk just mentioned.
-Use $meeting-copilot-context to turn the latest saved meeting into project follow-ups.
-```
+- `ME` e `REMOTE` representam fontes físicas, não pessoas individuais.
+- Não há diarização ou identificação de cada participante remoto.
+- Linux e macOS ainda precisam de testes end-to-end em máquinas reais antes de serem considerados validados.
+- O Buddy ainda não possui aplicativo desktop completo, bandeja do sistema ou instalador assinado.
+- Integrações com calendário, plataformas de reunião, Jira, GitHub ou CRM ainda não são automáticas.
+- A busca histórica é textual; ainda não há memória semântica vetorial entre reuniões.
 
-The skill first reads a bounded transcript window, extracts concrete terms, then uses the host agent's normal project tools. It never assumes that `REMOTE` identifies a particular participant.
+Veja o [roadmap de capacidades](docs/ROADMAP.md) para as próximas evoluções possíveis.
 
-## Moving to another computer
+## Desenvolvimento
 
-Copy or clone this repository, run the platform installer, and create a new local `.env`. Do not copy API keys inside the skill or commit them. Saved meetings can be copied separately if historical context should move with the installation. Device IDs are machine-specific, so leave them as `default` initially and run `meeting-agent doctor` and `meeting-agent devices` after migration.
-
-## Known limitations
-
-- Source labels are based on the two physical streams, not diarization among remote participants. Loud speakers can leak acoustically into a laptop microphone; a headset is strongly recommended.
-- Local faster-whisper emits final turns, not true word-by-word partials. Cloud Realtime supports both partial and final events.
-- The OpenAI Realtime path was implemented against current official documentation but was not live-tested because no key/cloud-audio opt-in was available.
-- LLM suggestions and semantic final reports require a configured provider. Without one, transcription continues and `summary.md` is still created with all required headings.
-- Starting from a global hotkey while fully stopped requires the `meeting-agent hotkeys` listener to be running.
-- macOS uses a locally compiled ScreenCaptureKit helper and currently requires macOS 15 or newer.
-- Linux system-audio capture depends on the desktop's PipeWire graph and permissions; selecting an explicit node may be necessary on unusual setups.
-
-## Development
-
-```powershell
-.\scripts\setup.ps1
-.\.venv\Scripts\Activate.ps1
+```sh
+python -m venv .venv
+# Windows: .\.venv\Scripts\python -m pip install -e ".[dev]"
+# Linux/macOS: .venv/bin/python -m pip install -e ".[dev]"
 pytest -q
 ```
+
+O projeto requer Python 3.12, 3.13 ou 3.14. Antes de publicar alterações, execute os testes e valide a skill com o script `quick_validate.py` do `skill-creator`.
