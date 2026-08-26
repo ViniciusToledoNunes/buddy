@@ -39,7 +39,7 @@ def select_asr(settings: Settings) -> ASRSelection:
             raise RuntimeError("cloud-fast requires OPENAI_API_KEY")
         if not cloud_audio_allowed():
             raise RuntimeError(
-                "cloud-fast requires explicit consent: set MEETING_AGENT_ALLOW_CLOUD_AUDIO=true in .env"
+                "cloud-fast requires explicit consent: set BUDDY_ALLOW_CLOUD_AUDIO=true in .env"
             )
         return ASRSelection("cloud-fast", settings.asr.cloud_model, "OpenAI", "PCM16", "explicit config")
     if requested == "local-gpu":

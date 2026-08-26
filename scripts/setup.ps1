@@ -9,4 +9,4 @@ if (-not (Test-Path -LiteralPath ".venv\Scripts\python.exe")) {
 & ".venv\Scripts\python.exe" -m pip install --upgrade pip
 & ".venv\Scripts\python.exe" -m pip install -e ".[dev]"
 Write-Host "Ready. Run: .\.venv\Scripts\Activate.ps1"
-Write-Host "Then: meeting-agent doctor"
+Write-Host "Then: buddy doctor"

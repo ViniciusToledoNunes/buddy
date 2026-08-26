@@ -13,7 +13,11 @@ from .base import ThreadedAudioCapture
 
 def helper_path() -> str | None:
     bundled = Path(__file__).resolve().parents[3] / ".venv" / "bin" / "meeting-audio-macos"
-    for candidate in (os.getenv("MEETING_AGENT_MACOS_HELPER"), shutil.which("meeting-audio-macos"), str(bundled)):
+    for candidate in (
+        os.getenv("BUDDY_MACOS_HELPER") or os.getenv("MEETING_AGENT_MACOS_HELPER"),
+        shutil.which("meeting-audio-macos"),
+        str(bundled),
+    ):
         if candidate and Path(candidate).expanduser().exists():
             return str(Path(candidate).expanduser())
     return None

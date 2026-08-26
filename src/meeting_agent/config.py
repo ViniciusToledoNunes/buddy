@@ -72,7 +72,7 @@ class Settings(BaseModel):
     @model_validator(mode="after")
     def cloud_requires_opt_in(self) -> "Settings":
         # Merely having a key does not transmit audio: auto selects cloud only when
-        # MEETING_AGENT_ALLOW_CLOUD_AUDIO is explicitly true.
+        # BUDDY_ALLOW_CLOUD_AUDIO is explicitly true (legacy variable also works).
         return self
 
 
@@ -81,7 +81,7 @@ def project_root() -> Path:
 
 
 def config_path() -> Path:
-    override = os.getenv("MEETING_AGENT_CONFIG")
+    override = os.getenv("BUDDY_CONFIG") or os.getenv("MEETING_AGENT_CONFIG")
     return Path(override).expanduser().resolve() if override else project_root() / "config.yaml"
 
 
@@ -96,4 +96,7 @@ def load_settings(path: Path | None = None) -> Settings:
 
 
 def cloud_audio_allowed() -> bool:
-    return os.getenv("MEETING_AGENT_ALLOW_CLOUD_AUDIO", "").lower() in {"1", "true", "yes"}
+    return any(
+        os.getenv(name, "").lower() in {"1", "true", "yes"}
+        for name in ("BUDDY_ALLOW_CLOUD_AUDIO", "MEETING_AGENT_ALLOW_CLOUD_AUDIO")
+    )

@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "meeting-copilot"
-version = "0.2.0"
-description = "Low-latency cross-platform meeting transcription and project-aware copilot"
+name = "buddy-meeting-copilot"
+version = "0.3.0"
+description = "Buddy - a cross-platform, project-aware meeting copilot"
 requires-python = ">=3.12,<3.15"
 dependencies = [
   "faster-whisper>=1.2.1,<2",
@@ -27,6 +27,8 @@ dependencies = [
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2"]
 
 [project.scripts]
+buddy = "meeting_agent.cli:app"
+buddy-mcp = "meeting_agent.mcp_server:main"
 meeting-agent = "meeting_agent.cli:app"
 meeting-agent-mcp = "meeting_agent.mcp_server:main"
 

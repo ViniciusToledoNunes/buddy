@@ -1,11 +1,11 @@
 ---
 name: meeting-copilot-context
-description: "Analyze a live or saved Meeting Copilot transcript and connect concrete discussion points, questions, decisions, risks, and action items to evidence in the current codebase, documentation, or git history. Use when the user asks what to contribute in a meeting, wants meeting-aware project research, or wants follow-up analysis from a Meeting Copilot session. Do not use merely to start recording."
+description: "Analyze a live or saved Buddy - Meeting Copilot transcript and connect concrete discussion points, questions, decisions, risks, and action items to evidence in the current codebase, documentation, or git history. Use when the user asks what to contribute in a meeting, wants meeting-aware project research, or wants follow-up analysis from a Buddy session. Do not use merely to start recording."
 ---
 
-# Meeting Copilot Context
+# Buddy Meeting Context
 
-Use the `meeting-copilot` MCP tools for meeting data and the host agent's native tools for project or web research.
+Use the `buddy` MCP tools for meeting data and the host agent's native tools for project or web research.
 
 ## Safety boundary
 

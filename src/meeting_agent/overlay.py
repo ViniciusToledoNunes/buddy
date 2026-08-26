@@ -36,13 +36,13 @@ class SuggestionOverlay:
         import tkinter as tk
 
         root = tk.Tk()
-        root.title("Meeting Copilot")
+        root.title("Buddy - Meeting Copilot")
         root.attributes("-topmost", True)
         root.geometry("430x150+20+20")
         root.configure(bg="#111827")
         label = tk.Label(
             root,
-            text="Meeting Copilot ready\nCtrl+Alt+Space: suggest now",
+            text="Buddy is ready\nCtrl+Alt+Space: suggest now",
             justify="left",
             anchor="nw",
             wraplength=400,
