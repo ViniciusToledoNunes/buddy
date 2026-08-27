@@ -10,6 +10,7 @@ from mcp.server.mcpserver import MCPServer
 
 from .config import load_settings
 from .context import MeetingRepository, SpeakerFilter
+from .memory import MeetingMemoryIndex
 
 
 def create_server(repository: MeetingRepository | None = None) -> MCPServer:
@@ -48,6 +49,18 @@ def create_server(repository: MeetingRepository | None = None) -> MCPServer:
             return {"query": query, "results": repo.search(query, limit)}
         except ValueError as exc:
             return {"error": {"code": "invalid_query", "message": str(exc)}}
+
+    memory_index = MeetingMemoryIndex(repo.meetings_dir)
+
+    @server.tool(
+        description=(
+            "Find prior meetings related to a topic using structured memory only "
+            "(summaries, topics, decisions, actions, questions). Raw transcripts are never returned."
+        )
+    )
+    def find_related_meetings(query: str, limit: int = 3, exclude_meeting_id: str = "") -> dict[str, Any]:
+        results = memory_index.find_related(query, limit, exclude_meeting_id or None)
+        return {"query": query, "results": results}
 
     @server.tool(description="Read compact decisions, actions, questions, and recent suggestions for a meeting.")
     def get_copilot_context(meeting_id: str = "latest") -> dict[str, Any]:
