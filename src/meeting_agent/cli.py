@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 
 import typer
-from pynput import keyboard
 from rich.console import Console
 from rich.table import Table
 
@@ -141,6 +140,11 @@ def hotkeys() -> None:
         child = subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "start"], creationflags=flags)
 
     console.print(f"Hotkey listener active: {settings.hotkeys.toggle_meeting} starts/stops. Ctrl+C exits listener.")
+    try:
+        from pynput import keyboard
+    except Exception as exc:  # a headless host has no global hotkey backend
+        console.print(f"[red]Hotkeys unavailable on this host: {exc}[/red]")
+        raise typer.Exit(code=1)
     listener = keyboard.GlobalHotKeys({_hotkey(settings.hotkeys.toggle_meeting): toggle})
     listener.start()
     try:
