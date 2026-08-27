@@ -25,8 +25,16 @@ asr:
 copilot:
   enabled: true
   automatic_suggestions: true
-  suggestion_cooldown_seconds: 20
+  # Buddy re-evaluates the whole suggestion set whenever new speech arrives.
+  # debounce: quiet time after the last final utterance before analysing.
+  # refresh: minimum gap between two analyses, so a fast talker cannot flood the provider.
+  suggestion_debounce_seconds: 1.5
+  suggestion_refresh_seconds: 6.0
   context_minutes: 5
+  # Cross-meeting recall over structured memory only; raw transcripts are never indexed.
+  semantic_memory_enabled: true
+  semantic_memory_max_meetings: 50
+  semantic_memory_matches: 3
   output_language: en
   openai_model: gpt-5-mini
   anthropic_model: claude-sonnet-4-5
