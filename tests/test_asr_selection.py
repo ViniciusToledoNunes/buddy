@@ -50,3 +50,23 @@ def test_explicit_gpu_request_fails_loudly_without_hardware():
 
 def test_multilingual_model_is_used_for_non_english():
     assert select_asr(Settings(language="pt")).model == Settings().asr.local_model_multilingual
+
+
+def test_vad_calibration_survives_a_speaker_who_is_already_talking():
+    from meeting_agent.asr.local import calibrate_threshold
+
+    # Every calibration frame is loud speech; the gate must still sit below it.
+    speech = [0.20, 0.28, 0.19, 0.06, 0.32, 0.23, 0.23, 0.15, 0.28, 0.24]
+    for speaker in ("ME", "REMOTE"):
+        threshold = calibrate_threshold(speech, speaker, 0.012)
+        assert threshold <= 0.012 * 8
+        # Most of that speech has to clear the gate, or the stream stays mute.
+        assert sum(level >= threshold for level in speech) >= 8
+
+
+def test_vad_calibration_on_silence_keeps_the_configured_floor():
+    from meeting_agent.asr.local import calibrate_threshold
+
+    silence = [0.0002, 0.0003, 0.0003, 0.0004, 0.0002, 0.0003, 0.0002, 0.0004, 0.0003, 0.0002]
+    assert calibrate_threshold(silence, "ME", 0.012) == 0.012
+    assert calibrate_threshold(silence, "REMOTE", 0.012) == 0.012

@@ -70,7 +70,9 @@ class LiveUI:
 
         status = Text("● RECORDING / TRANSCRIBING", style="bold red")
         status.append(f"   latency {self.latency:.2f}s" if self.latency else "")
-        for component in ("audio-remote", "audio-me", "asr-local", "asr-cloud-remote", "asr-cloud-me", "llm", "storage"):
+        # "hotkeys" belongs here: on Wayland pynput cannot register a global shortcut,
+        # and recording continues, so the warning is the only sign the keys are dead.
+        for component in ("audio-remote", "audio-me", "asr-local", "asr-cloud-remote", "asr-cloud-me", "hotkeys", "llm", "storage"):
             event = self.statuses.get(component)
             if event:
                 color = "green" if event.state in {"connected", "ok"} else "yellow"

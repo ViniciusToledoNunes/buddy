@@ -84,3 +84,14 @@ def _plain(ui: LiveUI) -> str:
     console = Console(width=100, record=True, file=io.StringIO())
     console.print(ui._render())
     return console.export_text()
+
+
+def test_render_warns_when_global_hotkeys_could_not_register():
+    ui = LiveUI(Settings(), EventBus(), "meetings/now")
+    ui.apply_event(StatusEvent("hotkeys", "warning", "this platform is not supported"))
+
+    console = Console(file=io.StringIO(), width=200)
+    console.print(ui._render())
+    output = console.file.getvalue()
+
+    assert "hotkeys: warning" in output
