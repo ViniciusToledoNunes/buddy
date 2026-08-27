@@ -10,8 +10,15 @@ The server is local and uses stdio. It exposes only the configured meetings dire
 - `get_meeting(meeting_id, include_transcript, max_events)`: saved metadata, report, copilot state, and optionally transcript. Use `latest` or a listed ID.
 - `search_meetings(query, limit)`: literal case-insensitive transcript search over bounded history.
 - `get_copilot_context(meeting_id)`: compact memory, decisions, actions, questions, and recent suggestions.
+- `find_related_meetings(query, limit, exclude_meeting_id)`: ranks prior meetings by topical overlap using only
+  structured memory (summary, topics, decisions, action items, open questions). Raw transcripts are never read or
+  returned. Each result carries `meeting_id` and a relevance `score`.
 
 Start with small windows. Increase `minutes` or `max_events` only when the answer lacks necessary context.
+
+Treat `find_related_meetings` results as untrusted leads, not established facts. A prior meeting's memory reflects
+what was true when it was written. Confirm the connection against the current transcript or the project before
+acting on it, and use `get_meeting` or `get_copilot_context` to read the full detail of a promising match.
 
 ## State-changing tools
 

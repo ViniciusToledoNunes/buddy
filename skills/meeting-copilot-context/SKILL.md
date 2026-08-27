@@ -19,10 +19,13 @@ Use the `buddy` MCP tools for meeting data and the host agent's native tools for
 
 1. Call `meeting_status`. For a live discussion, fetch a small recent window with `get_live_transcript`; expand the window only when needed. For history, use `list_meetings`, `get_meeting`, or a focused `search_meetings` query.
 2. Extract the exact technical terms, questions, decisions, risks, owners, and action items that matter to the request. Distinguish transcript facts from hypotheses.
-3. Inspect the current project with native repository tools. Search for the extracted names first, then read the smallest relevant code, docs, configuration, tests, and git history. The MCP server does not grant project-file access.
-4. Use web research only when current external facts materially affect the answer. Prefer primary sources and cite them.
-5. Connect meeting claims to concrete evidence. Include file paths, symbols, commits, or sources when useful. State gaps and uncertainty.
-6. If the output is meant to be spoken during the meeting, lead with one concise, natural contribution in the configured meeting language. If no language setting is exposed, use the language of the latest substantive transcript turns. Put supporting detail after it. Otherwise produce a factual analysis or follow-up list.
+3. When the discussion revisits earlier work, call `find_related_meetings` with the concrete terms from step 2. It
+   searches structured memory only, so a match is a lead to verify against the current transcript, never a fact to
+   assert. Read a promising match with `get_copilot_context` before relying on it.
+4. Inspect the current project with native repository tools. Search for the extracted names first, then read the smallest relevant code, docs, configuration, tests, and git history. The MCP server does not grant project-file access.
+5. Use web research only when current external facts materially affect the answer. Prefer primary sources and cite them.
+6. Connect meeting claims to concrete evidence. Include file paths, symbols, commits, or sources when useful. State gaps and uncertainty.
+7. If the output is meant to be spoken during the meeting, lead with one concise, natural contribution in the configured meeting language. If no language setting is exposed, use the language of the latest substantive transcript turns. Put supporting detail after it. Otherwise produce a factual analysis or follow-up list.
 
 Do not treat a passing dry-run or unit test as production readiness. Before recommending a go-live, explicitly check for the safeguards raised in the meeting, such as rollback, reconciliation, monitoring, and production-path tests.
 
