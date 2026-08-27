@@ -131,13 +131,6 @@ def choose_provider(settings: Settings, local_asr: bool) -> LLMProvider | None:
     return None
 
 
-TRIGGER = re.compile(
-    r"\?|\b(decide|decision|deadline|due|risk|issue|problem|blocked|owner|action item|"
-    r"what do you think|your opinion|validate|production|incident|responsible|follow.?up)\b",
-    re.IGNORECASE,
-)
-
-
 def _extract_json(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if text.startswith("```"):

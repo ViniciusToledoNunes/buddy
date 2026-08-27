@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "pytest-cov>=6,<8"]
 
 [project.scripts]
 buddy = "meeting_agent.cli:app"
@@ -38,3 +38,26 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["meeting_agent"]
+# Omitted modules need real audio hardware, a display server, a downloaded Whisper
+# model, or a live host to execute. They are verified by `buddy doctor` and by the
+# manual platform checklist in docs/PORTABILITY.md, not by the automated gate.
+omit = [
+  "*/meeting_agent/asr/cloud.py",
+  "*/meeting_agent/asr/local.py",
+  "*/meeting_agent/benchmark.py",
+  "*/meeting_agent/capture/*",
+  "*/meeting_agent/cli.py",
+  "*/meeting_agent/doctor.py",
+  "*/meeting_agent/session.py",
+  "*/meeting_agent/system.py",
+]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.:",
+]

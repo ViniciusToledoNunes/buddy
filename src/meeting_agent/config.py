@@ -32,7 +32,6 @@ class ASRConfig(BaseModel):
 class CopilotConfig(BaseModel):
     enabled: bool = True
     automatic_suggestions: bool = True
-    suggestion_cooldown_seconds: int = Field(20, ge=5)
     suggestion_refresh_seconds: float = Field(6.0, ge=0.05, le=300)
     suggestion_debounce_seconds: float = Field(1.5, ge=0.01, le=30)
     context_minutes: int = Field(5, ge=1, le=30)
