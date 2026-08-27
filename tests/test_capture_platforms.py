@@ -1,5 +1,12 @@
+import sys
+
 from meeting_agent.capture import linux
 from meeting_agent.config import AudioConfig
+
+
+def _script(source: str) -> list[str]:
+    """A stand-in capture command that behaves identically on every CI platform."""
+    return [sys.executable, "-c", source]
 
 
 def test_pipewire_system_capture_command(monkeypatch):
@@ -31,20 +38,24 @@ def test_pipewire_microphone_capture_does_not_read_the_sink(monkeypatch):
 def test_capture_probe_reports_a_rejected_command(monkeypatch):
     monkeypatch.setattr(linux.shutil, "which", lambda name: "/bin/false")
     monkeypatch.setattr(
-        linux, "pipewire_command",
-        lambda speaker, config: ["/bin/sh", "-c", "echo 'unrecognized option' >&2; exit 1"],
+        linux,
+        "pipewire_command",
+        lambda speaker, config: _script("import sys; print('unrecognized option', file=sys.stderr); sys.exit(1)"),
     )
-    working, detail = linux.capture_probe("REMOTE", AudioConfig(), seconds=2.0)
+    working, detail = linux.capture_probe("REMOTE", AudioConfig(), seconds=10.0)
     assert working is False
     assert "unrecognized option" in detail
 
 
 def test_capture_probe_reports_a_stream_that_produces_audio(monkeypatch):
     monkeypatch.setattr(
-        linux, "pipewire_command",
-        lambda speaker, config: ["/bin/sh", "-c", "head -c 4096 /dev/zero; sleep 5"],
+        linux,
+        "pipewire_command",
+        lambda speaker, config: _script(
+            "import sys, time; sys.stdout.buffer.write(bytes(4096)); sys.stdout.buffer.flush(); time.sleep(30)"
+        ),
     )
-    working, detail = linux.capture_probe("ME", AudioConfig(), seconds=0.5)
+    working, detail = linux.capture_probe("ME", AudioConfig(), seconds=3.0)
     assert working is True
     assert "4096 bytes" in detail
 
