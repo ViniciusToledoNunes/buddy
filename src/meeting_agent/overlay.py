@@ -3,52 +3,59 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+from contextlib import suppress
 
 from .events import EventBus, SuggestionBatchEvent, SuggestionEvent
 
 
+PLACEHOLDER = "Buddy is listening\nCtrl+Alt+Space: suggest now"
+
+
+def format_batch(event: SuggestionBatchEvent, limit: int = 3) -> str:
+    """Render a whole suggestion set; an empty set clears stale advice from the overlay."""
+    if not event.suggestions:
+        return PLACEHOLDER
+    return "\n\n".join(f"{item.kind}\n{item.text}" for item in event.suggestions[:limit])
+
+
 class SuggestionOverlay:
     def __init__(self) -> None:
-        self.messages: queue.Queue[SuggestionEvent | None] = queue.Queue(maxsize=20)
+        self.messages: queue.Queue[str | None] = queue.Queue(maxsize=20)
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:
         self.thread = threading.Thread(target=self._run_tk, name="suggestion-overlay", daemon=True)
         self.thread.start()
 
-    def push(self, event: SuggestionEvent) -> None:
+    def _put(self, message: str | None) -> None:
         try:
-            self.messages.put_nowait(event)
+            self.messages.put_nowait(message)
+        except queue.Full:
+            with suppress(queue.Empty):
+                self.messages.get_nowait()
+            with suppress(queue.Full):
+                self.messages.put_nowait(message)
+
+    def push(self, event: SuggestionEvent) -> None:
+        self._put(f"{event.kind}\n{event.text}")
 
     def push_batch(self, event: SuggestionBatchEvent) -> None:
-        if event.suggestions:
-            self.push(event.suggestions[0])
-        else:
-            self.push(SuggestionEvent("LISTENING", "Buddy is updating as the conversation changes."))
-        except queue.Full:
-            try:
-                self.messages.get_nowait()
-            except queue.Empty:
-                pass
-            self.messages.put_nowait(event)
+        self._put(format_batch(event))
 
     def stop(self) -> None:
-        try:
-            self.messages.put_nowait(None)
-        except queue.Full:
-            pass
+        self._put(None)
 
-    def _run_tk(self) -> None:
+    def _run_tk(self) -> None:  # pragma: no cover - requires a display server
         import tkinter as tk
 
         root = tk.Tk()
         root.title("Buddy - Meeting Copilot")
         root.attributes("-topmost", True)
-        root.geometry("430x150+20+20")
+        root.geometry("430x220+20+20")
         root.configure(bg="#111827")
         label = tk.Label(
             root,
-            text="Buddy is ready\nCtrl+Alt+Space: suggest now",
+            text=PLACEHOLDER,
             justify="left",
             anchor="nw",
             wraplength=400,
@@ -63,11 +70,11 @@ class SuggestionOverlay:
         def poll() -> None:
             try:
                 while True:
-                    event = self.messages.get_nowait()
-                    if event is None:
+                    message = self.messages.get_nowait()
+                    if message is None:
                         root.destroy()
                         return
-                    label.configure(text=f"{event.kind}\n{event.text}")
+                    label.configure(text=message)
             except queue.Empty:
                 pass
             root.after(150, poll)
@@ -85,10 +92,10 @@ async def overlay_bridge(overlay: SuggestionOverlay, bus: EventBus, stop: asynci
                 event = await asyncio.wait_for(events.get(), 0.25)
             except TimeoutError:
                 continue
-            if isinstance(event, SuggestionEvent):
-                overlay.push(event)
-            elif isinstance(event, SuggestionBatchEvent):
+            if isinstance(event, SuggestionBatchEvent):
                 overlay.push_batch(event)
+            elif isinstance(event, SuggestionEvent):
+                overlay.push(event)
     finally:
         bus.unsubscribe(events)
         overlay.stop()

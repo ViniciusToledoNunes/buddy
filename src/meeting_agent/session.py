@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 
 import psutil
-from pynput import keyboard
 
 from .asr import LocalModelPool, run_cloud_asr, run_local_asr, select_asr
 from .audio import AudioCapture, AudioFrame
@@ -158,8 +157,11 @@ async def run_session(settings: Settings) -> Path:
     def suggest_from_hotkey() -> None:
         loop.call_soon_threadsafe(copilot.suggest_now)
 
-    hotkeys: keyboard.GlobalHotKeys | None = None
+    # Imported lazily: pynput requires a display server, so a headless host must still record.
+    hotkeys = None
     try:
+        from pynput import keyboard
+
         hotkeys = keyboard.GlobalHotKeys(
             {
                 _hotkey(settings.hotkeys.toggle_meeting): stop_from_hotkey,
