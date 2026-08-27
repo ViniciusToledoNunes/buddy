@@ -14,8 +14,10 @@ def pipewire_command(speaker: str, config) -> list[str]:
     if not binary:
         raise RuntimeError("PipeWire capture tool not found (install pipewire-audio-client-libraries)")
     configured = config.microphone_device if speaker == "ME" else config.system_device
+    # pw-cat (pw-record is a symlink to it) has no --raw option: it writes raw PCM
+    # whenever the destination is "-", and rejects the unknown flag outright.
     command = [
-        binary, "--record", "--raw", f"--rate={config.sample_rate}", "--channels=1", "--format=f32",
+        binary, "--record", f"--rate={config.sample_rate}", "--channels=1", "--format=f32",
         f"--latency={config.chunk_ms}ms",
     ]
     if configured != "default":
@@ -33,6 +35,17 @@ class LinuxAudioCapture(ThreadedAudioCapture):
         super().__init__(*args, **kwargs)
         self.process: subprocess.Popen[bytes] | None = None
 
+    def _stderr_tail(self) -> str:
+        """Why the child died. pw-record reports rejected options only on stderr, so
+        without this the retry loop repeats a generic end-of-stream message forever."""
+        process = self.process
+        if process is None or process.stderr is None:
+            return "no detail"
+        if process.poll() is None:
+            return "no output from a running stream"
+        message = process.stderr.read().decode("utf-8", "replace").strip()
+        return message.splitlines()[0] if message else "no detail"
+
     def _run(self) -> None:
         frames = max(1, int(self.config.sample_rate * self.config.chunk_ms / 1000))
         byte_count = frames * np.dtype("<f4").itemsize
@@ -45,7 +58,7 @@ class LinuxAudioCapture(ThreadedAudioCapture):
                 while not self.stop_event.is_set():
                     data = self.process.stdout.read(byte_count)
                     if len(data) != byte_count:
-                        raise RuntimeError("PipeWire stream ended")
+                        raise RuntimeError(f"PipeWire stream ended: {self._stderr_tail()}")
                     self._emit(np.frombuffer(data, dtype="<f4"), sequence)
                     sequence += 1
             except Exception as exc:
@@ -93,15 +106,43 @@ def list_devices() -> dict[str, object]:
     }
 
 
+def capture_probe(speaker: str, config, seconds: float = 0.6) -> tuple[bool, str]:
+    """Run the real capture command briefly. A binary that exists on PATH proves
+    nothing: the command it is invoked with still has to be one PipeWire accepts."""
+    try:
+        command = pipewire_command(speaker, config)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (OSError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    try:
+        stdout, stderr = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+    if stdout:
+        return True, f"captured {len(stdout)} bytes in {seconds:.1f}s"
+    message = stderr.decode("utf-8", "replace").strip().splitlines()
+    return False, message[0] if message else "captured no audio data"
+
+
 def probe(config) -> list[dict[str, str]]:
     binary = shutil.which("pw-record") or shutil.which("pw-cat")
     if not binary:
         return [{"name": "PipeWire audio", "state": "failed", "detail": "pw-record/pw-cat not found"}]
     try:
-        detail = f"{binary}; {len(_pipewire_nodes())} audio node(s) visible"
-        return [
-            {"name": "System audio (PipeWire)", "state": "ok", "detail": detail},
-            {"name": "Microphone (PipeWire)", "state": "ok", "detail": detail},
-        ]
+        context = f"{binary}; {len(_pipewire_nodes())} audio node(s) visible"
     except Exception as exc:
         return [{"name": "PipeWire audio", "state": "warning", "detail": str(exc)}]
+    checks = []
+    for name, speaker in (("System audio (PipeWire)", "REMOTE"), ("Microphone (PipeWire)", "ME")):
+        working, detail = capture_probe(speaker, config)
+        checks.append({
+            "name": name,
+            "state": "ok" if working else "failed",
+            "detail": f"{context}; {detail}",
+        })
+    return checks

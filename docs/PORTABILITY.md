@@ -39,6 +39,9 @@ Requisitos:
 - PipeWire ativo na sessão do usuário.
 - `pw-record` ou `pw-cat` disponível no `PATH`.
 - Python e suporte do desktop para os atalhos desejados.
+- `python3-venv`, `python3-dev` e um compilador C: no Linux o `pynput` puxa o
+  `evdev`, que não publica wheels e precisa ser compilado. O `install-linux.sh`
+  verifica isso antes de criar o venv.
 
 Verificação prévia:
 
@@ -57,6 +60,16 @@ buddy devices
 ```
 
 Em Wayland, atalhos globais podem precisar ser configurados no próprio ambiente gráfico. O nó PipeWire de saída também pode precisar ser escolhido explicitamente em configurações incomuns.
+
+`buddy doctor` executa uma captura real e curta em cada fluxo, então `System audio`
+e `Microphone` só ficam `ok` quando o PipeWire de fato entregou bytes. O fluxo
+REMOTE lê o monitor do sink padrão (`stream.capture.sink`), portanto captura o que
+está *tocando*; escolha o sink correto em `audio.system_device` se houver mais de um.
+
+Validado em Ubuntu 24.04 (PipeWire 1.0.5, X11, Python 3.12.3): ME e REMOTE são
+gravados em paralelo e transcritos separadamente. Em Wayland o `pynput` não
+registra o atalho global; a sessão continua gravando e o painel STATUS mostra
+`hotkeys: warning`.
 
 ## macOS 15 ou mais recente
 
