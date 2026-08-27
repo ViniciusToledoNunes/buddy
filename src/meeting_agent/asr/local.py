@@ -15,6 +15,22 @@ from ..events import EventBus, StatusEvent, TranscriptEvent
 from .selection import ASRSelection
 
 
+# A calibration window is only a noise-floor estimate, so it must never gate the
+# stream above speech level: anyone already talking one second into the session
+# would otherwise stay silent for the whole meeting.
+MAX_ADAPTIVE_THRESHOLD_FACTOR = 8.0
+
+
+def calibrate_threshold(calibration: list[float], speaker: str, configured_floor: float) -> float:
+    """Noise floor for a speaker, taken from the quiet end of the calibration window."""
+    quiet = float(np.percentile(calibration, 20))
+    margin = 2.5 if speaker == "ME" else 1.5
+    return min(
+        max(configured_floor, quiet * margin),
+        configured_floor * MAX_ADAPTIVE_THRESHOLD_FACTOR,
+    )
+
+
 def resample_linear(samples: np.ndarray, source_rate: int, target_rate: int = 16_000) -> np.ndarray:
     if source_rate == target_rate or samples.size == 0:
         return samples.astype(np.float32, copy=False)
@@ -150,9 +166,8 @@ async def run_local_asr(
             if len(calibration) < max(5, 1000 // frame_ms):
                 calibration.append(rms)
                 if len(calibration) == max(5, 1000 // frame_ms):
-                    adaptive_threshold = max(
-                        settings.asr.vad_threshold,
-                        float(np.percentile(calibration, 95)) * (2.5 if frame.speaker == "ME" else 1.5),
+                    adaptive_threshold = calibrate_threshold(
+                        calibration, frame.speaker, settings.asr.vad_threshold
                     )
                     bus.publish(StatusEvent(f"vad-{frame.speaker.lower()}", "calibrated", f"threshold={adaptive_threshold:.4f}"))
                 continue
