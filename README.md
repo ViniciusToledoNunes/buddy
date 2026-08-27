@@ -1,5 +1,7 @@
 # Buddy - Meeting Copilot
 
+[![CI](https://github.com/ViniciusToledoNunes/buddy/actions/workflows/ci.yml/badge.svg)](https://github.com/ViniciusToledoNunes/buddy/actions/workflows/ci.yml)
+
 Buddy é um copiloto de reuniões multiplataforma, ativado explicitamente, que transcreve áudio do sistema e microfone em fluxos separados e conecta a conversa ao contexto real dos seus projetos por meio de Codex ou Claude.
 
 Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, salva a transcrição incrementalmente e mantém captura, ASR, armazenamento, interface e LLM isolados para que uma falha não derrube toda a sessão.
@@ -9,11 +11,16 @@ Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, 
 - Captura separada do microfone (`ME`) e do áudio reproduzido pelo computador (`REMOTE`).
 - Transcrição local com `faster-whisper`/CTranslate2 em CPU ou GPU compatível.
 - Transcrição opcional pela API Realtime da OpenAI, somente com opt-in explícito para envio de áudio.
-- Sugestões automáticas ou manuais durante a reunião, com memória compacta de decisões, ações e perguntas.
+- Sugestões contínuas: qualquer fala nova reavalia o conjunto inteiro e substitui o painel, em vez de empilhar
+  conselhos antigos. Quando o assunto se resolve, o painel é esvaziado.
+- Memória entre reuniões: o Buddy recupera reuniões anteriores relacionadas usando apenas memória estruturada
+  (resumo, tópicos, decisões, ações, perguntas). Transcrições brutas nunca são indexadas nem enviadas ao provedor.
+- Memória compacta da reunião atual com decisões, ações e perguntas em aberto.
 - Relatório final em Markdown e transcrição incremental em texto e JSONL.
 - TUI em tempo real, overlay opcional e atalhos globais.
 - Benchmark local para escolher modelo e backend de ASR adequados à máquina.
-- Servidor MCP local para consultar status, transcrição ao vivo, reuniões salvas, buscas e contexto do copiloto.
+- Servidor MCP local para consultar status, transcrição ao vivo, reuniões salvas, buscas, contexto do copiloto e
+  reuniões anteriores relacionadas (`find_related_meetings`).
 - Skill `meeting-copilot-context` para Codex e Claude relacionarem a reunião com código, documentação, git e pesquisa externa.
 - Controles seguros: começa parado, `start` via MCP fica desabilitado por padrão e caminhos fora de `meetings_dir` são rejeitados.
 
@@ -168,10 +175,12 @@ Resultados variam por máquina. Execute `buddy benchmark` para medir o ambiente 
 
 - `ME` e `REMOTE` representam fontes físicas, não pessoas individuais.
 - Não há diarização ou identificação de cada participante remoto.
-- Linux e macOS ainda precisam de testes end-to-end em máquinas reais antes de serem considerados validados.
+- Linux e macOS rodam na CI, mas ainda precisam de teste end-to-end com áudio real antes de serem considerados
+  validados. Captura, ASR e o helper Swift dependem de hardware e não entram no gate automatizado.
 - O Buddy ainda não possui aplicativo desktop completo, bandeja do sistema ou instalador assinado.
 - Integrações com calendário, plataformas de reunião, Jira, GitHub ou CRM ainda não são automáticas.
-- A busca histórica é textual; ainda não há memória semântica vetorial entre reuniões.
+- A memória entre reuniões usa sobreposição de termos ponderada, não embeddings vetoriais; sinônimos e paráfrases
+  ainda não são reconhecidos.
 
 Veja o [roadmap de capacidades](docs/ROADMAP.md) para as próximas evoluções possíveis.
 
@@ -181,7 +190,17 @@ Veja o [roadmap de capacidades](docs/ROADMAP.md) para as próximas evoluções p
 python -m venv .venv
 # Windows: .\.venv\Scripts\python -m pip install -e ".[dev]"
 # Linux/macOS: .venv/bin/python -m pip install -e ".[dev]"
-pytest -q
+pytest -q --cov --cov-fail-under=80
 ```
 
-O projeto requer Python 3.12, 3.13 ou 3.14. Antes de publicar alterações, execute os testes e valide a skill com o script `quick_validate.py` do `skill-creator`.
+O projeto requer Python 3.12, 3.13 ou 3.14.
+
+A CI roda em `ubuntu-latest` (3.12 e 3.13), `windows-latest` e `macos-15`. Ela executa os testes com cobertura,
+verifica que todo módulo compila e que os módulos da plataforma atual importam, valida a sintaxe do helper Swift em
+`native/macos/MeetingAudioCapture.swift` e confirma que a CLI inicia.
+
+O gate de cobertura de 80% cobre o núcleo independente de hardware: copiloto, memória, MCP, TUI, overlay,
+armazenamento, configuração e seleção de ASR. Captura de áudio, ASR, benchmark, `doctor`, CLI e sessão dependem de
+dispositivos reais e são verificados por `buddy doctor` e pela checklist em [docs/PORTABILITY.md](docs/PORTABILITY.md).
+
+Antes de publicar alterações, execute os testes e valide a skill com o script `quick_validate.py` do `skill-creator`.
