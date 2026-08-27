@@ -95,3 +95,22 @@ def test_render_warns_when_global_hotkeys_could_not_register():
     output = console.file.getvalue()
 
     assert "hotkeys: warning" in output
+
+
+def test_an_unlisted_status_component_is_still_rendered():
+    """A component missing from the ordered list used to be invisible, which is how
+    a dead copilot went unnoticed for the last 13 minutes of a real meeting."""
+    ui = LiveUI(Settings(), EventBus(), "meeting")
+    ui.apply_event(StatusEvent("copilot", "degraded", "snapshot not saved"))
+
+    assert "copilot: degraded" in _plain(ui)
+
+
+def test_known_components_keep_their_order():
+    ui = LiveUI(Settings(), EventBus(), "meeting")
+    ui.apply_event(StatusEvent("storage", "ok"))
+    ui.apply_event(StatusEvent("audio-me", "connected"))
+
+    rendered = _plain(ui)
+
+    assert rendered.index("audio-me") < rendered.index("storage")

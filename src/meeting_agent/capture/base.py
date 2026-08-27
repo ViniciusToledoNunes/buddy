@@ -14,6 +14,38 @@ from ..events import EventBus, StatusEvent
 Speaker = Literal["ME", "REMOTE"]
 
 
+class CaptureStreamLost(RuntimeError):
+    """Raised to force the capture retry loop to re-resolve its device."""
+
+
+class SilenceWatchdog:
+    """Detects a capture stream that stays open but stops carrying audio.
+
+    Plugging a headset makes Windows hand the jack to the headset and disable the
+    internal endpoint. That endpoint stays valid and keeps returning digital
+    silence, so nothing ever raises and the retry loop never re-resolves the
+    device. Only the silence itself reveals the failure.
+    """
+
+    def __init__(self, timeout_seconds: float = 20.0, floor: float = 1e-5) -> None:
+        self.timeout_seconds = timeout_seconds
+        self.floor = floor
+        self.last_sound = 0.0
+
+    def reset(self, now: float) -> None:
+        self.last_sound = now
+
+    def observe(self, samples: np.ndarray, now: float) -> bool:
+        """Return True once the stream has carried nothing but silence for too long."""
+        if samples.size and float(np.max(np.abs(samples))) > self.floor:
+            self.last_sound = now
+            return False
+        if self.timeout_seconds <= 0:
+            return False
+        return now - self.last_sound >= self.timeout_seconds
+
+
+
 @dataclass(slots=True)
 class AudioFrame:
     speaker: Speaker

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -52,3 +53,36 @@ def test_request_stop_only_signals_a_live_session(tmp_path, monkeypatch):
     (tmp_path / "state.json").write_text(json.dumps(_state(os.getpid(), _own_start_time())), encoding="utf-8")
     assert request_stop() is True
     assert (tmp_path / "stop.flag").exists()
+
+
+async def test_consumer_failures_are_described_instead_of_swallowed():
+    """gather(return_exceptions=True) hid a crashed copilot task until the snapshot
+    file on disk was the only evidence."""
+
+    async def boom():
+        raise PermissionError("copilot.json is locked")
+
+    async def fine():
+        return None
+
+    tasks = [
+        asyncio.create_task(boom(), name="copilot"),
+        asyncio.create_task(fine(), name="ui"),
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    failures = session_module.describe_consumer_failures(tasks, results)
+
+    assert failures == ["copilot: PermissionError: copilot.json is locked"]
+
+
+async def test_a_cancelled_consumer_is_not_a_failure():
+    async def forever():
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(forever(), name="ui")
+    await asyncio.sleep(0)
+    task.cancel()
+    results = await asyncio.gather(task, return_exceptions=True)
+
+    assert session_module.describe_consumer_failures([task], results) == []

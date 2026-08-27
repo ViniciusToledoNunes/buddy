@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -168,3 +169,117 @@ async def test_manual_request_is_deduplicated():
     worker.suggest_now()
 
     assert worker.manual.qsize() == 1
+
+
+class SlowProvider(LLMProvider):
+    name = "slow"
+
+    def __init__(self, delay: float = 0.4) -> None:
+        self.delay = delay
+        self.started = 0
+        self.finished = 0
+
+    async def complete(self, system: str, prompt: str) -> str:
+        self.started += 1
+        await asyncio.sleep(self.delay)
+        self.finished += 1
+        return json.dumps({"suggestions": [], "memory_update": "slow", "topics": [], "decisions": [], "action_items": [], "open_questions": []})
+
+
+def _continuous_settings(**overrides):
+    copilot = {"suggestion_refresh_seconds": 0.05, "suggestion_debounce_seconds": 0.01}
+    copilot.update(overrides)
+    return Settings.model_validate({"copilot": copilot})
+
+
+async def test_transcript_keeps_flowing_while_an_analysis_is_in_flight():
+    """A blocking analysis stalls transcript ingestion, so the copilot's own context
+    falls behind the meeting exactly when the conversation is most active."""
+    bus = EventBus()
+    provider = SlowProvider(delay=0.4)
+    worker = CopilotWorker(_continuous_settings(), provider, bus)
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop))
+    await asyncio.sleep(0)
+
+    bus.publish(TranscriptEvent("REMOTE", "first line", True, "u1"))
+    await asyncio.sleep(0.15)
+    assert provider.started == 1 and provider.finished == 0  # analysis is in flight
+
+    bus.publish(TranscriptEvent("REMOTE", "second line while thinking", True, "u2"))
+    await asyncio.sleep(0.15)
+
+    stop.set()
+    await task
+    assert "second line while thinking" in worker._context()
+
+
+async def test_only_one_analysis_runs_at_a_time():
+    bus = EventBus()
+    provider = SlowProvider(delay=0.3)
+    worker = CopilotWorker(_continuous_settings(), provider, bus)
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop))
+    await asyncio.sleep(0)
+
+    for index in range(5):
+        bus.publish(TranscriptEvent("REMOTE", f"line {index}", True, f"u{index}"))
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.15)
+
+    assert provider.started == 1
+
+    stop.set()
+    await task
+
+
+async def test_snapshot_failure_reports_status_and_keeps_the_worker_alive(tmp_path, monkeypatch):
+    """os.replace can fail transiently on Windows; that used to kill the copilot task
+    silently and end suggestions for the rest of the meeting."""
+    bus = EventBus()
+    output = bus.subscribe()
+    worker = CopilotWorker(Settings(), None, bus, snapshot_path=tmp_path / "copilot.json")
+    monkeypatch.setattr(worker, "_write_snapshot", _explode)
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop))
+    await asyncio.sleep(0)
+
+    bus.publish(TranscriptEvent("REMOTE", "still recording", True, "u1"))
+    await asyncio.sleep(0.15)
+
+    assert not task.done()
+    stop.set()
+    await task
+
+    events = _drain(output)
+    assert any(isinstance(e, StatusEvent) and e.component == "copilot" and e.state == "degraded" for e in events)
+    assert "still recording" in worker._context()
+
+
+def _explode(*_args, **_kwargs):
+    raise PermissionError("file is locked by another process")
+
+
+def test_snapshot_write_retries_a_locked_destination(tmp_path, monkeypatch):
+    snapshot = tmp_path / "copilot.json"
+    worker = CopilotWorker(Settings(), None, EventBus(), snapshot_path=snapshot)
+    attempts = {"count": 0}
+    real_replace = type(snapshot).replace
+
+    def flaky(self, target):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("locked")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(type(snapshot), "replace", flaky)
+    worker._write_snapshot()
+
+    assert attempts["count"] == 2
+    assert json.loads(snapshot.read_text(encoding="utf-8"))["provider"] == "disabled"
+    assert not snapshot.with_suffix(".json.tmp").exists()
+
+
+async def test_provider_timeout_comes_from_configuration():
+    settings = Settings.model_validate({"copilot": {"request_timeout_seconds": 90}})
+    assert settings.copilot.request_timeout_seconds == 90

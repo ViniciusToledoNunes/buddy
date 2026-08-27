@@ -6,6 +6,7 @@ import os
 import re
 import time
 from collections import deque
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -53,13 +54,14 @@ class LLMProvider:
 class OpenAIProvider(LLMProvider):
     name = "openai"
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, timeout: float = 45.0) -> None:
         self.model = model
+        self.timeout = timeout
 
     async def complete(self, system: str, prompt: str) -> str:
         headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
         payload = {"model": self.model, "instructions": system, "input": prompt}
-        async with httpx.AsyncClient(timeout=25) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -76,8 +78,9 @@ class OpenAIProvider(LLMProvider):
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, timeout: float = 45.0) -> None:
         self.model = model
+        self.timeout = timeout
 
     async def complete(self, system: str, prompt: str) -> str:
         headers = {
@@ -90,7 +93,7 @@ class AnthropicProvider(LLMProvider):
             "system": system,
             "messages": [{"role": "user", "content": prompt}],
         }
-        async with httpx.AsyncClient(timeout=25) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -100,8 +103,9 @@ class AnthropicProvider(LLMProvider):
 class OllamaProvider(LLMProvider):
     name = "ollama"
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, timeout: float = 120.0) -> None:
         self.model = model
+        self.timeout = timeout
         self.base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 
     async def complete(self, system: str, prompt: str) -> str:
@@ -111,7 +115,7 @@ class OllamaProvider(LLMProvider):
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             "options": {"temperature": 0.2},
         }
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
             response.raise_for_status()
             return response.json().get("message", {}).get("content", "")
@@ -121,13 +125,14 @@ def choose_provider(settings: Settings, local_asr: bool) -> LLMProvider | None:
     requested = settings.llm_provider
     if requested == "disabled" or not settings.copilot.enabled:
         return None
+    timeout = settings.copilot.request_timeout_seconds
     if requested in {"auto", "openai"} and os.getenv("OPENAI_API_KEY"):
-        return OpenAIProvider(settings.copilot.openai_model)
+        return OpenAIProvider(settings.copilot.openai_model, timeout)
     if requested in {"auto", "anthropic"} and os.getenv("ANTHROPIC_API_KEY"):
-        return AnthropicProvider(settings.copilot.anthropic_model)
+        return AnthropicProvider(settings.copilot.anthropic_model, timeout)
     # A local LLM is never auto-selected while CPU ASR has absolute priority.
     if requested == "ollama":
-        return OllamaProvider(settings.copilot.ollama_model)
+        return OllamaProvider(settings.copilot.ollama_model, timeout)
     return None
 
 
@@ -199,7 +204,26 @@ class CopilotWorker:
         }
         temporary = self.snapshot_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(self.snapshot_path)
+        # On Windows the rename fails while another process holds the file open, so a
+        # reader glancing at copilot.json must not cost us the snapshot.
+        for attempt in range(3):
+            try:
+                temporary.replace(self.snapshot_path)
+                return
+            except OSError:
+                if attempt == 2:
+                    temporary.unlink(missing_ok=True)
+                    raise
+                time.sleep(0.1)
+
+    async def _save_snapshot(self) -> None:
+        """Persist the snapshot; losing it must never end the suggestions."""
+        try:
+            await asyncio.to_thread(self._write_snapshot)
+        except Exception as exc:
+            self.bus.publish(
+                StatusEvent("copilot", "degraded", f"snapshot not saved: {type(exc).__name__}: {exc}")
+            )
 
     def suggest_now(self) -> None:
         if self.manual.empty():
@@ -264,7 +288,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                     if value not in values:
                         values.append(str(value))
             self.last_analysis = time.monotonic()
-            await asyncio.to_thread(self._write_snapshot)
+            await self._save_snapshot()
             self.bus.publish(StatusEvent("llm", "connected", self.provider.name))
             return True
         except Exception as exc:
@@ -279,6 +303,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
         )
         dirty = False
         last_transcript = 0.0
+        analysis: asyncio.Task[bool] | None = None
         try:
             while not stop.is_set():
                 event_task = asyncio.create_task(queue.get())
@@ -288,9 +313,12 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                 )
                 for task in pending:
                     task.cancel()
+                analysis, dirty = self._collect_analysis(analysis, dirty)
                 if manual_task in done:
-                    if await self._analyze(manual=True):
-                        dirty = False
+                    # An explicit request outranks an automatic refresh already running.
+                    if analysis is not None:
+                        analysis.cancel()
+                    analysis = asyncio.create_task(self._analyze(manual=True))
                     continue
                 if event_task in done:
                     event = event_task.result()
@@ -300,18 +328,38 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                         self.recent.append((now, line))
                         last_transcript = now
                         dirty = True
-                        await asyncio.to_thread(self._write_snapshot)
+                        await self._save_snapshot()
                 now = time.monotonic()
                 if (
-                    dirty
+                    analysis is None
+                    and dirty
                     and self.settings.copilot.automatic_suggestions
                     and now - last_transcript >= self.settings.copilot.suggestion_debounce_seconds
                     and now - self.last_analysis >= self.settings.copilot.suggestion_refresh_seconds
                 ):
-                    if await self._analyze(manual=False):
-                        dirty = False
+                    # Runs in the background: the meeting keeps moving while the model thinks.
+                    analysis = asyncio.create_task(self._analyze(manual=False))
         finally:
+            if analysis is not None:
+                analysis.cancel()
+                with suppress(asyncio.CancelledError):
+                    await analysis
             self.bus.unsubscribe(queue)
+
+    def _collect_analysis(
+        self, analysis: asyncio.Task[bool] | None, dirty: bool
+    ) -> tuple[asyncio.Task[bool] | None, bool]:
+        """Fold a finished background analysis back into the loop state."""
+        if analysis is None or not analysis.done():
+            return analysis, dirty
+        try:
+            if analysis.result():
+                dirty = False
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            self.bus.publish(StatusEvent("llm", "retrying", f"{type(exc).__name__}: {exc}"))
+        return None, dirty
 
     async def final_report(self, transcript: str) -> str:
         if not transcript.strip():

@@ -10,6 +10,10 @@ audio:
   system_device: default     # WASAPI output, PipeWire sink, or macOS system audio
   microphone_device: default
   queue_seconds: 12
+  # A stream carrying only digital silence for this long is treated as lost and the
+  # device is re-resolved. This is what recovers capture when a headset takes the
+  # jack and Windows leaves the old endpoint valid but mute. 0 disables the check.
+  silence_reconnect_seconds: 20
 
 asr:
   cloud_model: gpt-live-transcribe
@@ -30,6 +34,8 @@ copilot:
   # refresh: minimum gap between two analyses, so a fast talker cannot flood the provider.
   suggestion_debounce_seconds: 1.5
   suggestion_refresh_seconds: 6.0
+  # A reasoning model with a full meeting prompt regularly needs more than 25s.
+  request_timeout_seconds: 45
   context_minutes: 5
   # Cross-meeting recall over structured memory only; raw transcripts are never indexed.
   semantic_memory_enabled: true

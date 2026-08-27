@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import time
 import warnings
 
 import numpy as np
 import soundcard as sc
 
-from .base import ThreadedAudioCapture
+from .base import CaptureStreamLost, SilenceWatchdog, ThreadedAudioCapture
 
 warnings.filterwarnings("once", message="data discontinuity in recording")
 
@@ -32,23 +33,55 @@ def pick_device(speaker: str, configured: str):
     return device
 
 
+def default_device_id(speaker: str) -> str | None:
+    """Identity of the endpoint Windows would select right now, or None if unknown."""
+    try:
+        device = sc.default_speaker() if speaker == "REMOTE" else sc.default_microphone()
+    except Exception:
+        return None
+    return None if device is None else str(device.id)
+
+
 class WindowsAudioCapture(ThreadedAudioCapture):
-    """Resilient WASAPI loopback/microphone capture."""
+    """Resilient WASAPI loopback/microphone capture.
+
+    The endpoint is resolved once per connection, so a default-device change in the
+    middle of a meeting -- plugging in a headset is the common one -- must force a
+    reconnect. Windows does not raise for either failure mode: the abandoned
+    endpoint simply returns digital silence, so both a changed default and a stream
+    that went quiet are treated as a lost stream.
+    """
 
     def _run(self) -> None:
         frames = max(1, int(self.config.sample_rate * self.config.chunk_ms / 1000))
         configured = self.config.microphone_device if self.speaker == "ME" else self.config.system_device
+        follows_default = configured == "default"
+        frames_per_check = max(1, int(2000 / max(1, self.config.chunk_ms)))
+        watchdog = SilenceWatchdog(self.config.silence_reconnect_seconds)
         sequence = 0
         while not self.stop_event.is_set():
             try:
                 device = pick_device(self.speaker, configured)
+                selected = default_device_id(self.speaker) if follows_default else None
                 self._status("connected", device.name)
+                watchdog.reset(time.monotonic())
                 with device.recorder(
                     samplerate=self.config.sample_rate, channels=1, blocksize=min(frames, 2048)
                 ) as recorder:
                     while not self.stop_event.is_set():
-                        self._emit(np.asarray(recorder.record(numframes=frames)), sequence)
+                        samples = np.asarray(recorder.record(numframes=frames))
+                        self._emit(samples, sequence)
                         sequence += 1
+                        now = time.monotonic()
+                        if watchdog.observe(samples, now):
+                            raise CaptureStreamLost(
+                                f"{device.name} went silent for "
+                                f"{self.config.silence_reconnect_seconds}s; re-resolving the device"
+                            )
+                        if follows_default and sequence % frames_per_check == 0:
+                            current = default_device_id(self.speaker)
+                            if current is not None and current != selected:
+                                raise CaptureStreamLost(f"default device changed from {device.name}")
             except Exception as exc:
                 self._status("retrying", f"{type(exc).__name__}: {exc}")
                 self.stop_event.wait(1.0)

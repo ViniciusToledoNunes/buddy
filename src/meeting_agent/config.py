@@ -15,6 +15,9 @@ class AudioConfig(BaseModel):
     system_device: str = "default"
     microphone_device: str = "default"
     queue_seconds: int = Field(12, ge=2, le=120)
+    # A capture stream that carries only digital silence for this long is treated as
+    # lost and the device is re-resolved. 0 disables the check.
+    silence_reconnect_seconds: float = Field(20.0, ge=0, le=600)
 
 
 class ASRConfig(BaseModel):
@@ -35,6 +38,8 @@ class CopilotConfig(BaseModel):
     suggestion_refresh_seconds: float = Field(6.0, ge=0.05, le=300)
     suggestion_debounce_seconds: float = Field(1.5, ge=0.01, le=30)
     context_minutes: int = Field(5, ge=1, le=30)
+    # A reasoning model with a full meeting prompt regularly needs more than 25s.
+    request_timeout_seconds: float = Field(45.0, ge=5, le=300)
     semantic_memory_enabled: bool = True
     semantic_memory_max_meetings: int = Field(50, ge=1, le=500)
     semantic_memory_matches: int = Field(3, ge=1, le=10)

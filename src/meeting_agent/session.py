@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import threading
 from contextlib import suppress
 from datetime import datetime
@@ -25,6 +26,19 @@ RUNTIME_DIR = project_root() / ".meeting-agent"
 STATE_FILE = RUNTIME_DIR / "state.json"
 STOP_FILE = RUNTIME_DIR / "stop.flag"
 SUGGEST_FILE = RUNTIME_DIR / "suggest.flag"
+
+
+def describe_consumer_failures(tasks: list[asyncio.Task], results: list[object]) -> list[str]:
+    """Name the consumers that died mid-meeting.
+
+    gather(return_exceptions=True) discards those exceptions, so a copilot killed by
+    a single failed snapshot write ended a meeting's suggestions with no visible sign.
+    """
+    failures: list[str] = []
+    for task, result in zip(tasks, results):
+        if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+            failures.append(f"{task.get_name()}: {type(result).__name__}: {result}")
+    return failures
 
 
 def _hotkey(value: str) -> str:
@@ -205,7 +219,12 @@ async def run_session(settings: Settings) -> Path:
         await asyncio.gather(*asr_tasks, return_exceptions=True)
         await asyncio.sleep(0.1)
         consumer_stop.set()
-        await asyncio.gather(*consumer_tasks, return_exceptions=True)
+        consumer_results = await asyncio.gather(*consumer_tasks, return_exceptions=True)
+        failures = describe_consumer_failures(consumer_tasks, consumer_results)
+        if failures:
+            storage.metadata["consumer_failures"] = failures
+            for failure in failures:
+                print(f"Buddy subsystem failed during the meeting: {failure}", file=sys.stderr)
         watcher.cancel()
         with suppress(asyncio.CancelledError):
             await watcher

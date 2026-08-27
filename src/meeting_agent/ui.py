@@ -16,6 +16,22 @@ from .events import Event, EventBus, StatusEvent, SuggestionBatchEvent, Suggesti
 
 KIND_ICON = {"COMMENT": "💡", "QUESTION": "❓", "RISK": "⚠", "CONNECTION": "🔗", "ACTION": "✅"}
 
+# Ordered for reading; anything else a component reports is appended rather than
+# dropped, so a new or failing subsystem can never go unnoticed again.
+ORDERED_COMPONENTS = (
+    "audio-remote",
+    "audio-me",
+    "asr-local",
+    "asr-cloud-remote",
+    "asr-cloud-me",
+    "hotkeys",
+    "llm",
+    "copilot",
+    "storage",
+)
+HEALTHY_STATES = {"connected", "ok", "calibrated"}
+BROKEN_STATES = {"failed", "degraded", "stopped"}
+
 
 class LiveUI:
     def __init__(self, settings: Settings, bus: EventBus, meeting_dir: str) -> None:
@@ -72,10 +88,16 @@ class LiveUI:
         status.append(f"   latency {self.latency:.2f}s" if self.latency else "")
         # "hotkeys" belongs here: on Wayland pynput cannot register a global shortcut,
         # and recording continues, so the warning is the only sign the keys are dead.
-        for component in ("audio-remote", "audio-me", "asr-local", "asr-cloud-remote", "asr-cloud-me", "hotkeys", "llm", "storage"):
+        extra = tuple(sorted(set(self.statuses) - set(ORDERED_COMPONENTS)))
+        for component in ORDERED_COMPONENTS + extra:
             event = self.statuses.get(component)
             if event:
-                color = "green" if event.state in {"connected", "ok"} else "yellow"
+                if event.state in HEALTHY_STATES:
+                    color = "green"
+                elif event.state in BROKEN_STATES:
+                    color = "bold red"
+                else:
+                    color = "yellow"
                 status.append(f"   {component}: {event.state}", style=color)
         status.append(f"\nSaved incrementally: {self.meeting_dir}", style="dim")
         return Group(
