@@ -16,11 +16,13 @@ import httpx
 
 from .config import Settings, anthropic_client_options
 from .events import (
+    InvestigationEvent,
     EventBus,
     StatusEvent,
     SuggestionBatchEvent,
     SuggestionEvent,
     TranscriptEvent,
+    utc_now,
 )
 from .memory import MeetingMemoryIndex
 from .project import ProjectIndex
@@ -259,6 +261,8 @@ class CopilotWorker:
         memory_index: MeetingMemoryIndex | None = None,
         current_meeting_id: str | None = None,
         project_index: ProjectIndex | None = None,
+        investigator: Any | None = None,
+        investigations_path: Path | None = None,
     ) -> None:
         self.settings = settings
         self.provider = provider
@@ -280,7 +284,12 @@ class CopilotWorker:
         # byte-identical between refreshes; a changed prefix means a cache miss.
         self._project_block = "(no matching project files)"
         self._static_context: str | None = None
-        self.usage: dict[str, int] = {}
+        self.usage: dict[str, dict[str, int]] = {"panel": {}, "investigation": {}}
+        self.investigator = investigator
+        self.investigations_path = investigations_path
+        self.investigations: deque[dict[str, str]] = deque(maxlen=20)
+        self._investigated: set[str] = set()
+        self._investigation_tasks: set[asyncio.Task[None]] = set()
 
     def _write_snapshot(self) -> None:
         if self.snapshot_path is None:
@@ -296,6 +305,7 @@ class CopilotWorker:
             "recent_suggestions": list(self.suggestions),
             "related_meetings": self.related_meetings,
             "usage": self.usage,
+            "investigations": list(self.investigations),
             "project_matches": [
                 {"path": match["path"], "score": match["score"]} for match in self.project_matches
             ],
@@ -334,6 +344,56 @@ class CopilotWorker:
         while self.recent and self.recent[0][0] < cutoff:
             self.recent.popleft()
         return "\n".join(line for _, line in self.recent)
+
+    def _spawn_investigations(self) -> None:
+        """Send unanswered questions to the investigator, in the background.
+
+        The reflex loop already names what it could not settle: its open questions are
+        the trigger, so nothing extra has to guess when research is warranted.
+        """
+        if self.investigator is None or not self.settings.copilot.investigation_enabled:
+            return
+        self._investigation_tasks = {task for task in self._investigation_tasks if not task.done()}
+        capacity = self.settings.copilot.investigations_in_flight - len(self._investigation_tasks)
+        for question in self.memory.open_questions[-5:]:
+            if capacity <= 0:
+                break
+            if question in self._investigated:
+                continue
+            self._investigated.add(question)
+            task = asyncio.create_task(self._investigate(question))
+            self._investigation_tasks.add(task)
+            capacity -= 1
+
+    async def _investigate(self, question: str) -> None:
+        self.bus.publish(StatusEvent("investigator", "working", question[:70]))
+        try:
+            answer = await self.investigator.investigate(question, self._context())
+        except Exception as exc:
+            self.bus.publish(StatusEvent("investigator", "failed", f"{type(exc).__name__}: {exc}"))
+            return
+        usage = getattr(self.investigator, "last_usage", None)
+        if usage:
+            self.usage["investigation"] = add_usage(self.usage["investigation"], usage)
+        if not answer:
+            self.bus.publish(StatusEvent("investigator", "ready", "no answer within the turn limit"))
+            return
+        entry = {"timestamp": utc_now(), "question": question, "text": answer}
+        self.investigations.append(entry)
+        self.bus.publish(InvestigationEvent(question, answer))
+        self.bus.publish(StatusEvent("investigator", "ready", ""))
+        await asyncio.to_thread(self._append_investigation, entry)
+        await self._save_snapshot()
+
+    def _append_investigation(self, entry: dict[str, str]) -> None:
+        if self.investigations_path is None:
+            return
+        try:
+            self.investigations_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.investigations_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"\n## {entry['timestamp']}\n\n**{entry['question']}**\n\n{entry['text']}\n")
+        except OSError as exc:
+            self.bus.publish(StatusEvent("investigator", "degraded", f"not saved: {exc}"))
 
     async def _static_prefix(self) -> str:
         """The project map and every prior meeting's memory.
@@ -437,7 +497,8 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                     if value not in values:
                         values.append(str(value))
             if self.provider.last_usage:
-                self.usage = add_usage(self.usage, self.provider.last_usage)
+                self.usage["panel"] = add_usage(self.usage["panel"], self.provider.last_usage)
+            self._spawn_investigations()
             self.last_analysis = time.monotonic()
             await self._save_snapshot()
             self.bus.publish(StatusEvent("llm", "connected", self.provider.name))
@@ -500,6 +561,8 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                 analysis.cancel()
                 with suppress(asyncio.CancelledError):
                     await analysis
+            for task in self._investigation_tasks:
+                task.cancel()
             self.bus.unsubscribe(queue)
 
     def _collect_analysis(

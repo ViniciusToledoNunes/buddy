@@ -55,6 +55,14 @@ copilot:
   project_context_matches: 3
   # Every prior meeting's structured memory goes in the cached prefix.
   prior_meetings_in_context: 20
+  # The investigator runs a tool loop in the background when the panel raises a
+  # question it could not answer. Answers land in their own panel, 30-60s later.
+  investigation_enabled: true
+  investigation_model: gpt-5.4
+  investigation_reasoning_effort: low
+  investigation_max_turns: 8
+  investigation_timeout_seconds: 180
+  investigations_in_flight: 1
   ollama_model: qwen3:4b
 
 hotkeys:

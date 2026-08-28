@@ -5,6 +5,7 @@ from rich.console import Console
 
 from meeting_agent.config import Settings
 from meeting_agent.events import (
+    InvestigationEvent,
     EventBus,
     StatusEvent,
     SuggestionBatchEvent,
@@ -114,3 +115,17 @@ def test_known_components_keep_their_order():
     rendered = _plain(ui)
 
     assert rendered.index("audio-me") < rendered.index("storage")
+
+
+def test_an_investigation_gets_its_own_persistent_panel():
+    """An investigation costs a tool loop to produce, so a six-second panel refresh must
+    not wipe it off the screen."""
+    ui = LiveUI(Settings(), EventBus(), "meeting")
+    ui.apply_event(InvestigationEvent("Does it reconnect?", "windows.py:81 re-resolves the device."))
+    ui.apply_event(SuggestionBatchEvent(revision=9, suggestions=[SuggestionEvent("RISK", "Something else")]))
+
+    rendered = _plain(ui)
+
+    assert "Does it reconnect?" in rendered
+    assert "windows.py:81" in rendered
+    assert "Something else" in rendered

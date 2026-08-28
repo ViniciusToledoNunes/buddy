@@ -41,6 +41,19 @@ class SuggestionBatchEvent:
 
 
 @dataclass(slots=True)
+class InvestigationEvent:
+    """An answer the investigator went and checked.
+
+    It costs a tool loop to produce, so it holds its own place on screen instead of
+    competing with a panel that is replaced every few seconds.
+    """
+
+    question: str
+    text: str
+    timestamp: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class StatusEvent:
     component: str
     state: str
@@ -48,7 +61,7 @@ class StatusEvent:
     timestamp: str = field(default_factory=utc_now)
 
 
-Event = TranscriptEvent | SuggestionEvent | SuggestionBatchEvent | StatusEvent
+Event = TranscriptEvent | SuggestionEvent | SuggestionBatchEvent | InvestigationEvent | StatusEvent
 
 
 class EventBus:

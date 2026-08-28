@@ -16,8 +16,12 @@ Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, 
 - **Contexto largo e cacheado.** O prefixo do prompt carrega o mapa do repositório inteiro (cada arquivo com uma
   linha de resumo) e a memória estruturada de todas as reuniões anteriores. Como isso não muda durante a reunião,
   o *prompt caching* funciona: medido em 53% do input vindo do cache já no segundo refresh.
-- **Investigação profunda via Codex/Claude.** Perguntas que exigem ler o código de verdade vão pela skill
-  `meeting-copilot-context` e pelo MCP, usando as ferramentas nativas do agente.
+- **Investigador autônomo.** Quando o painel levanta uma pergunta que não consegue responder do que já sabe, o
+  Buddy dispara sozinho uma pesquisa em segundo plano com ferramentas reais — busca no projeto, leitura de
+  arquivo, histórico do git e reuniões anteriores. A resposta chega em ~10s no painel `INVESTIGATION`, cita
+  `caminho:linha` e é gravada em `investigations.md`. O painel continua atualizando enquanto isso.
+- **Investigação manual via Codex/Claude.** A skill `meeting-copilot-context` e o MCP continuam disponíveis
+  para quando você quiser perguntar diretamente.
 - Memória entre reuniões: o Buddy recupera reuniões anteriores relacionadas usando apenas memória estruturada
   (resumo, tópicos, decisões, ações, perguntas). Transcrições brutas nunca são indexadas nem enviadas ao provedor.
 - Memória compacta da reunião atual com decisões, ações e perguntas em aberto.
@@ -154,10 +158,18 @@ Com `save_audio: false`, padrão do projeto, o áudio é descartado após o proc
 
 ## Modelos
 
-| Onde | Quando | Como | Papel |
-|---|---|---|---|
-| Painel do Buddy | contínuo | `gpt-5.4-mini` (ou `claude-haiku-4-5`) | mantém sugestões vivas durante a fala |
-| Codex / Claude | sob demanda | skill + MCP | lê o código e responde citando `caminho:linha` |
+| Camada | Quando | Modelo | Ferramentas | Papel |
+|---|---|---|---|---|
+| Reflexo | a cada ~10s | `gpt-5.4-mini` | nenhuma | mantém o painel vivo a partir do contexto pré-carregado |
+| Investigador | quando o reflexo levanta uma pergunta | `gpt-5.4` | busca, leitura, git, reuniões | vai verificar antes de afirmar |
+| Codex / Claude | quando você pede | skill + MCP | nativas do agente | investigação manual |
+
+O reflexo não pesquisa por uma razão de latência: um tool loop custa um turno de modelo por ferramenta, e o
+painel atualiza a cada ~10s. Por isso a pesquisa roda **em segundo plano** e sem bloquear — um assunto de
+reunião dura minutos, então uma resposta que chega 10 a 40 segundos depois ainda é útil.
+
+Adicionar um conector novo (Jira, BigQuery) é registrar um schema e um handler no `ToolRegistry`; o loop que
+os executa não muda.
 
 O provedor é configurável (`llm_provider`): `openai`, `anthropic` ou `ollama`. Com `auto`, a OpenAI vem primeiro
 quando há chave, para usar a conta que já tem saldo.

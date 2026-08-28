@@ -16,8 +16,9 @@ explícito.
 - **Painel contínuo com contexto largo.** O prefixo do prompt carrega o mapa do repositório inteiro e a memória
   de todas as reuniões anteriores, cacheado; o ranqueador escolhe apenas os trechos detalhados. Provedor
   configurável (OpenAI, Anthropic ou Ollama). Transcrição é sempre local: áudio nunca sai da máquina.
-- **Investigação profunda delegada.** Perguntas que exigem ler o código vão pela skill + MCP no Codex/Claude,
-  que já têm ferramentas melhores do que um tool loop próprio pagaria para reimplementar.
+- **Investigador autônomo.** As perguntas em aberto que o reflexo já produz viram o gatilho de uma pesquisa em
+  segundo plano com ferramentas locais, sem bloquear o painel. Conectores externos (Jira, BigQuery) entram pelo
+  `ToolRegistry` sem tocar no loop.
 
 ## Próximos passos recomendados
 
@@ -40,7 +41,8 @@ explícito.
 - Criptografia em repouso para a memória estruturada.
 - Indexação opt-in de projetos e documentação autorizada.
 - Preparação pré-reunião baseada em agenda, participantes e reuniões anteriores.
-- Recuperação automática de tickets, pull requests e decisões relacionadas.
+- Conectores Jira e BigQuery no `ToolRegistry`. BigQuery precisa de read-only, dry-run e limite de bytes por
+  query: um agente autônomo consultando dados tem raio de alcance maior que gasto de tokens.
 
 ### 4. Fechar o ciclo de execução
 

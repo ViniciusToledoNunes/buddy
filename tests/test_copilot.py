@@ -14,6 +14,7 @@ from meeting_agent.copilot import (
     choose_provider,
 )
 from meeting_agent.events import (
+    InvestigationEvent,
     EventBus,
     StatusEvent,
     SuggestionBatchEvent,
@@ -427,7 +428,7 @@ class MeteredProvider(LLMProvider):
         return json.dumps({"suggestions": [], "memory_update": "m", "topics": [], "decisions": [], "action_items": [], "open_questions": []})
 
 
-async def test_tier_one_usage_reaches_the_snapshot(tmp_path):
+async def test_panel_usage_reaches_the_snapshot(tmp_path):
     """Without this, there is no way to tell whether the cached prefix ever engaged."""
     snapshot = tmp_path / "copilot.json"
     worker = CopilotWorker(Settings(), MeteredProvider(), EventBus(), snapshot_path=snapshot)
@@ -437,5 +438,123 @@ async def test_tier_one_usage_reaches_the_snapshot(tmp_path):
     await worker._analyze(manual=False)
 
     saved = json.loads(snapshot.read_text(encoding="utf-8"))["usage"]
-    assert saved["calls"] == 2
-    assert saved["cache_read_input_tokens"] == 6_000
+    assert saved["panel"]["calls"] == 2
+    assert saved["panel"]["cache_read_input_tokens"] == 6_000
+
+
+class StubInvestigator:
+    def __init__(self, answer="storage.py:12 already appends every final event."):
+        self.answer = answer
+        self.questions = []
+        self.last_usage = {"input_tokens": 9_000, "output_tokens": 300, "turns": 3}
+
+    async def investigate(self, question, transcript):
+        self.questions.append(question)
+        return self.answer
+
+
+class QuestioningProvider(LLMProvider):
+    name = "questioning"
+
+    def __init__(self, questions):
+        super().__init__()
+        self.questions = questions
+        self.calls = 0
+
+    async def complete(self, system, prompt):
+        self.calls += 1
+        return json.dumps({
+            "suggestions": [], "memory_update": "m", "topics": [], "decisions": [], "action_items": [],
+            "open_questions": self.questions[: self.calls],
+        })
+
+
+async def test_an_open_question_starts_an_investigation_by_itself(tmp_path):
+    """The reflex loop already names what it could not settle, so its open questions are
+    the trigger; nothing extra has to guess when research is warranted."""
+    bus = EventBus()
+    output = bus.subscribe()
+    investigator = StubInvestigator()
+    worker = CopilotWorker(
+        Settings(), QuestioningProvider(["Do we already store every event?"]), bus,
+        investigator=investigator, investigations_path=tmp_path / "investigations.md",
+    )
+    worker.recent.append((time.monotonic(), "REMOTE: do we already store every event?"))
+
+    await worker._analyze(manual=False)
+    await asyncio.sleep(0.2)
+
+    assert investigator.questions == ["Do we already store every event?"]
+    events = _drain(output)
+    assert any(isinstance(e, InvestigationEvent) and "storage.py:12" in e.text for e in events)
+    assert "storage.py:12" in (tmp_path / "investigations.md").read_text(encoding="utf-8")
+    assert worker.usage["investigation"]["turns"] == 3
+
+
+async def test_the_same_question_is_never_investigated_twice():
+    investigator = StubInvestigator()
+    worker = CopilotWorker(
+        Settings(), QuestioningProvider(["Q1", "Q1"]), EventBus(), investigator=investigator
+    )
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    await worker._analyze(manual=False)
+    await asyncio.sleep(0.1)
+    await worker._analyze(manual=False)
+    await asyncio.sleep(0.1)
+
+    assert investigator.questions == ["Q1"]
+
+
+async def test_concurrent_investigations_are_capped():
+    class Slow(StubInvestigator):
+        async def investigate(self, question, transcript):
+            self.questions.append(question)
+            await asyncio.sleep(0.5)
+            return "answer"
+
+    investigator = Slow()
+    worker = CopilotWorker(
+        Settings(), QuestioningProvider([f"Q{i}" for i in range(5)]), EventBus(), investigator=investigator
+    )
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+    worker.memory.open_questions = [f"Q{i}" for i in range(5)]
+
+    worker._spawn_investigations()
+    await asyncio.sleep(0.05)
+
+    assert len(investigator.questions) == Settings().copilot.investigations_in_flight
+    for task in worker._investigation_tasks:
+        task.cancel()
+
+
+async def test_a_failing_investigation_reports_and_does_not_raise():
+    class Broken:
+        last_usage = None
+
+        async def investigate(self, question, transcript):
+            raise RuntimeError("openai unreachable")
+
+    bus = EventBus()
+    output = bus.subscribe()
+    worker = CopilotWorker(Settings(), RecordingProvider(), bus, investigator=Broken())
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    await worker._investigate("Q")
+
+    assert any(
+        isinstance(e, StatusEvent) and e.component == "investigator" and e.state == "failed"
+        for e in _drain(output)
+    )
+
+
+async def test_investigation_can_be_switched_off():
+    investigator = StubInvestigator()
+    settings = Settings.model_validate({"copilot": {"investigation_enabled": False}})
+    worker = CopilotWorker(settings, QuestioningProvider(["Q1"]), EventBus(), investigator=investigator)
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    await worker._analyze(manual=False)
+    await asyncio.sleep(0.1)
+
+    assert investigator.questions == []

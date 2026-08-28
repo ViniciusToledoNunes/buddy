@@ -16,6 +16,7 @@ from .audio import AudioCapture, AudioFrame
 from .config import Settings, project_root
 from .copilot import CopilotWorker, choose_provider
 from .events import EventBus, StatusEvent
+from .investigator import Investigator
 from .memory import MeetingMemoryIndex
 from .project import ProjectIndex
 from .overlay import SuggestionOverlay, overlay_bridge
@@ -99,6 +100,12 @@ async def run_session(settings: Settings) -> Path:
         memory_index=memory_index,
         current_meeting_id=storage.directory.name,
         project_index=ProjectIndex(project_root()),
+        investigations_path=storage.directory / "investigations.md",
+        investigator=(
+            Investigator(settings, project_root(), storage.directory.parent, storage.directory.name)
+            if settings.copilot.investigation_enabled and os.getenv("OPENAI_API_KEY")
+            else None
+        ),
     )
     external_stop = asyncio.Event()
     asr_stop = asyncio.Event()

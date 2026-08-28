@@ -53,6 +53,15 @@ class CopilotConfig(BaseModel):
     project_context_enabled: bool = True
     project_context_matches: int = Field(3, ge=1, le=10)
     prior_meetings_in_context: int = Field(20, ge=1, le=200)
+    # The investigator runs a tool loop in the background when the reflex loop raises a
+    # question it could not answer. Turns are bounded so a model that keeps calling
+    # tools cannot run for the whole meeting.
+    investigation_enabled: bool = True
+    investigation_model: str = "gpt-5.4"
+    investigation_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] = "low"
+    investigation_max_turns: int = Field(8, ge=2, le=30)
+    investigation_timeout_seconds: float = Field(180.0, ge=10, le=900)
+    investigations_in_flight: int = Field(1, ge=1, le=4)
     ollama_model: str = "qwen3:4b"
 
 
