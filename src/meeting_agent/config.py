@@ -72,6 +72,7 @@ class CopilotConfig(BaseModel):
     bigquery_data_projects: list[str] = []
     bigquery_max_scan_gb: float = Field(20.0, ge=0.1, le=1000)
     jira_enabled: bool = True
+    datadog_enabled: bool = True
     ollama_model: str = "qwen3:4b"
 
 

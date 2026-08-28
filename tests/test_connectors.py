@@ -4,7 +4,13 @@ import pytest
 
 from meeting_agent import connectors
 from meeting_agent.config import Settings
-from meeting_agent.connectors import BYTES_PER_GB, BigQueryConnector, JiraConnector, _plain_text
+from meeting_agent.connectors import (
+    BYTES_PER_GB,
+    BigQueryConnector,
+    DatadogConnector,
+    JiraConnector,
+    _plain_text,
+)
 from meeting_agent.investigator import Investigator
 
 
@@ -231,3 +237,107 @@ def test_datasets_are_listed_per_data_project(monkeypatch):
 
     assert "trr-analytics-237016.dior_cdc" in result
     assert "trr-analytics-237016" in calls[0]
+
+
+# ------------------------------------------------------------------ datadog
+
+
+def _datadog(monkeypatch, payload, status=200):
+    monkeypatch.setenv("DD_SITE", "datadoghq.com")
+    monkeypatch.setenv("DD_API_KEY", "api")
+    monkeypatch.setenv("DD_APP_KEY", "app")
+    connector = DatadogConnector(Settings())
+    monkeypatch.setattr(connector, "_request", lambda *a, **k: payload)
+    return connector
+
+
+def test_datadog_needs_all_three_variables(monkeypatch):
+    """CLAUDE.local.md documents only the two keys; DD_SITE is required as well and its
+    absence would build a request against https://api."""
+    monkeypatch.setenv("DD_API_KEY", "api")
+    monkeypatch.setenv("DD_APP_KEY", "app")
+    monkeypatch.delenv("DD_SITE", raising=False)
+
+    assert DatadogConnector(Settings()).available() is False
+
+    monkeypatch.setenv("DD_SITE", "datadoghq.com")
+    connector = DatadogConnector(Settings())
+    assert connector.available() is True
+    assert connector.base_url == "https://api.datadoghq.com"
+
+
+def test_only_alerting_monitors_hides_the_healthy_ones(monkeypatch):
+    payload = [
+        {"id": 1, "name": "Checkout latency", "overall_state": "Alert"},
+        {"id": 2, "name": "Clock in sync", "overall_state": "OK"},
+        {"id": 3, "name": "Ingest lag", "overall_state": "No Data"},
+    ]
+    connector = _datadog(monkeypatch, payload)
+
+    alerting = connector.monitors(only_alerting=True)
+
+    assert "1: Checkout latency [Alert]" in alerting
+    assert "Clock in sync" not in alerting
+    assert "Ingest lag" not in alerting
+
+
+def test_monitors_filter_by_name_substring(monkeypatch):
+    payload = [
+        {"id": 1, "name": "Checkout latency", "overall_state": "OK"},
+        {"id": 2, "name": "Ingest lag", "overall_state": "OK"},
+    ]
+
+    assert "Checkout" in _datadog(monkeypatch, payload).monitors(name="checkout")
+    assert "Ingest" not in _datadog(monkeypatch, payload).monitors(name="checkout")
+
+
+def test_a_metric_is_summarised_not_dumped_point_by_point(monkeypatch):
+    """A meeting needs the shape of the curve, and a full pointlist would swamp the
+    investigation's context."""
+    payload = {"series": [{"expression": "avg:cpu{*}", "pointlist": [[0, 2.0], [1, None], [2, 10.0]]}]}
+
+    summary = _datadog(monkeypatch, payload).metric_query("avg:cpu{*}", minutes=60)
+
+    assert "last=10" in summary and "min=2" in summary and "max=10" in summary
+    assert "avg=6" in summary
+    assert "pointlist" not in summary
+
+
+def test_an_empty_metric_series_says_so(monkeypatch):
+    assert "No data" in _datadog(monkeypatch, {"series": []}).metric_query("avg:cpu{*}")
+
+
+def test_logs_are_flattened_to_one_line_each(monkeypatch):
+    payload = {
+        "data": [
+            {"attributes": {"timestamp": "T1", "status": "error", "service": "api", "message": "boom\nsecond line"}}
+        ]
+    }
+
+    rendered = _datadog(monkeypatch, payload).logs("status:error")
+
+    assert "T1 [error] api: boom second line" in rendered
+    assert "\n" not in rendered.strip()
+
+
+def test_datadog_exposes_no_way_to_change_anything(monkeypatch, tmp_path):
+    """A copilot reporting on production must not also be able to change it."""
+    monkeypatch.setenv("DD_SITE", "datadoghq.com")
+    monkeypatch.setenv("DD_API_KEY", "api")
+    monkeypatch.setenv("DD_APP_KEY", "app")
+
+    names = {s["name"] for s in Investigator(Settings(), tmp_path).tools.schemas}
+
+    assert {"datadog_monitors", "datadog_metric", "datadog_logs"} <= names
+    assert not any(
+        word in name for name in names for word in ("mute", "resolve", "delete", "create", "update")
+    )
+
+
+def test_a_datadog_failure_is_reported_not_raised(monkeypatch):
+    connector = _datadog(monkeypatch, {})
+    monkeypatch.setattr(connector, "_request", _explode)
+
+    assert "Could not read monitors" in connector.monitors()
+    assert "Metric query failed" in connector.metric_query("avg:cpu{*}")
+    assert "Log search failed" in connector.logs("*")

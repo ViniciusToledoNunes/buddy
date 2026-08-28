@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from typing import Any
 
 import httpx
@@ -31,6 +32,26 @@ def _binary(name: str) -> str:
     bare name -- it reports the tool as missing even though it is installed.
     """
     return shutil.which(name) or name
+
+
+def _bq_ref(reference: str, qualified_segments: int) -> str:
+    """Rewrite project.dataset[.table] as project:dataset[.table].
+
+    bq separates the project with a colon for ls and show. Passing a dot makes it look
+    for a dataset of that literal name inside the billing project, which then reports
+    "not found" for a dataset that exists.
+    """
+    if ":" in reference:
+        return reference
+    parts = reference.split(".")
+    if len(parts) == qualified_segments:
+        return parts[0] + ":" + ".".join(parts[1:])
+    return reference
+
+
+def _reason(stdout: str, stderr: str) -> str:
+    """bq writes some failures to stdout, leaving stderr empty."""
+    return (stderr.strip() or stdout.strip())[:300]
 
 
 def _run(command: list[str], timeout: float = 60) -> tuple[int, str, str]:
@@ -84,7 +105,7 @@ class BigQueryConnector:
         for project in self.data_projects:
             code, out, err = _run(self._base() + ["ls", "--datasets", "--max_results=200", project])
             if code != 0:
-                blocks.append(f"{project}: could not list datasets: {err.strip()[:200]}")
+                blocks.append(f"{project}: could not list datasets: {_reason(out, err)[:200]}")
                 continue
             try:
                 names = [item.get("datasetReference", {}).get("datasetId", "") for item in json.loads(out or "[]")]
@@ -97,9 +118,9 @@ class BigQueryConnector:
 
     def list_tables(self, dataset: str) -> str:
         """Tables in one dataset. Metadata only, no scan cost."""
-        code, out, err = _run(self._base() + ["ls", "--max_results=500", dataset])
+        code, out, err = _run(self._base() + ["ls", "--max_results=500", _bq_ref(dataset, 2)])
         if code != 0:
-            return f"Could not list tables in {dataset}: {err.strip()[:300]}"
+            return f"Could not list tables in {dataset}: {_reason(out, err)}"
         try:
             names = [item.get("tableReference", {}).get("tableId", "") for item in json.loads(out or "[]")]
         except ValueError:
@@ -111,9 +132,9 @@ class BigQueryConnector:
 
         Without this the model writes SQL against columns it imagined.
         """
-        code, out, err = _run(self._base() + ["show", "--schema", table])
+        code, out, err = _run(self._base() + ["show", "--schema", _bq_ref(table, 3)])
         if code != 0:
-            return f"Could not describe {table}: {err.strip()[:300]}"
+            return f"Could not describe {table}: {_reason(out, err)}"
         try:
             fields = json.loads(out or "[]")
         except ValueError:
@@ -127,7 +148,7 @@ class BigQueryConnector:
         dry = self._base() + ["query", "--use_legacy_sql=false", "--dry_run", sql]
         code, out, err = _run(dry)
         if code != 0:
-            return f"Query rejected before running: {err.strip()[:400]}"
+            return f"Query rejected before running: {_reason(out, err)}"
         scanned = self._scanned_bytes(out, err)
         if scanned is None:
             return "Refused: could not estimate the bytes this query would scan."
@@ -146,24 +167,44 @@ class BigQueryConnector:
         ]
         code, out, err = _run(command, timeout=120)
         if code != 0:
-            return f"Query failed: {err.strip()[:400]}"
+            return f"Query failed: {_reason(out, err)}"
         return f"Scanned {scanned / BYTES_PER_GB:.2f} GB.\n{out[:8_000]}"
 
     @staticmethod
     def _scanned_bytes(stdout: str, stderr: str) -> int | None:
+        """Bytes a dry run says the query would scan.
+
+        bq returns a job resource, so the figure sits under statistics rather than at the
+        top level. Zero is a real answer -- SELECT 1 scans nothing -- so it must be
+        distinguished from "not found".
+        """
         for blob in (stdout, stderr):
             try:
                 payload = json.loads(blob)
             except ValueError:
-                match = re.search(r"([0-9]{2,})\s+bytes", blob)
+                match = re.search(r"([0-9]+)\s+bytes", blob)
                 if match:
                     return int(match.group(1))
                 continue
-            if isinstance(payload, dict):
-                for key in ("totalBytesProcessed", "totalBytesBilled"):
-                    if key in payload:
-                        return int(payload[key])
+            found = _find_bytes(payload)
+            if found is not None:
+                return found
         return None
+
+
+def _find_bytes(payload: Any) -> int | None:
+    for key in ("totalBytesProcessed", "totalBytesBilled"):
+        if isinstance(payload, dict) and key in payload:
+            try:
+                return int(payload[key])
+            except (TypeError, ValueError):
+                continue
+    if isinstance(payload, dict):
+        for value in payload.values():
+            found = _find_bytes(value)
+            if found is not None:
+                return found
+    return None
 
 
 class JiraConnector:
@@ -246,3 +287,107 @@ def _plain_text(document: Any) -> str:
     if isinstance(document, list):
         return "".join(_plain_text(child) for child in document)
     return ""
+
+
+class DatadogConnector:
+    """Read-only Datadog access.
+
+    Monitors, metrics, events and logs answer the questions a meeting actually raises --
+    is it broken now, since when, how often. Nothing here mutes, resolves, or edits
+    anything: a copilot reporting on production must not also be changing it.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.site = os.getenv("DD_SITE", "").strip()
+        self.api_key = os.getenv("DD_API_KEY", "").strip()
+        self.app_key = os.getenv("DD_APP_KEY", "").strip()
+
+    def available(self) -> bool:
+        return bool(self.site and self.api_key and self.app_key)
+
+    @property
+    def base_url(self) -> str:
+        return f"https://api.{self.site}"
+
+    def _headers(self) -> dict[str, str]:
+        return {"DD-API-KEY": self.api_key, "DD-APPLICATION-KEY": self.app_key}
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        with httpx.Client(timeout=30) as client:
+            response = client.request(method, f"{self.base_url}{path}", headers=self._headers(), **kwargs)
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+        return response.json()
+
+    def monitors(self, name: str = "", only_alerting: bool = False) -> str:
+        """Monitors, optionally filtered by a substring of the name."""
+        try:
+            payload = self._request("GET", "/api/v1/monitor", params={"page_size": 200})
+        except Exception as exc:
+            return f"Could not read monitors: {exc}"
+        needle = name.strip().casefold()
+        rows = []
+        for monitor in payload if isinstance(payload, list) else []:
+            title = str(monitor.get("name", ""))
+            state = str(monitor.get("overall_state", "Unknown"))
+            if needle and needle not in title.casefold():
+                continue
+            if only_alerting and state in {"OK", "No Data", "Skipped"}:
+                continue
+            rows.append(f"{monitor.get('id')}: {title} [{state}]")
+            if len(rows) >= 40:
+                break
+        return "\n".join(rows) or "No monitors matched."
+
+    def metric_query(self, query: str, minutes: int = 60) -> str:
+        """A metric timeseries, summarised rather than returned point by point."""
+        now = int(time.time())
+        window = max(5, min(int(minutes), 1_440))
+        try:
+            payload = self._request(
+                "GET",
+                "/api/v1/query",
+                params={"from": now - window * 60, "to": now, "query": query},
+            )
+        except Exception as exc:
+            return f"Metric query failed: {exc}"
+        series = payload.get("series") or []
+        if not series:
+            return f"No data for {query} in the last {window} minutes."
+        lines = []
+        for item in series[:5]:
+            points = [value for _, value in (item.get("pointlist") or []) if value is not None]
+            if not points:
+                continue
+            lines.append(
+                f"{item.get('expression', query)}: last={points[-1]:.4g} "
+                f"min={min(points):.4g} max={max(points):.4g} avg={sum(points) / len(points):.4g} "
+                f"({len(points)} points over {window}m)"
+            )
+        return "\n".join(lines) or f"No numeric points for {query}."
+
+    def logs(self, query: str, minutes: int = 60, limit: int = 20) -> str:
+        """Recent log events matching a Datadog log query."""
+        window = max(5, min(int(minutes), 1_440))
+        try:
+            payload = self._request(
+                "POST",
+                "/api/v2/logs/events/search",
+                json={
+                    "filter": {"query": query or "*", "from": f"now-{window}m", "to": "now"},
+                    "sort": "-timestamp",
+                    "page": {"limit": max(1, min(int(limit), 50))},
+                },
+            )
+        except Exception as exc:
+            return f"Log search failed: {exc}"
+        rows = []
+        for event in payload.get("data", []):
+            attributes = event.get("attributes", {})
+            message = str(attributes.get("message", ""))[:200].replace("\n", " ")
+            rows.append(
+                f"{attributes.get('timestamp', '')} [{attributes.get('status', '')}] "
+                f"{attributes.get('service', '')}: {message}"
+            )
+        return "\n".join(rows) or f"No logs matched {query!r} in the last {window} minutes."

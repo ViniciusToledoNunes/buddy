@@ -9,7 +9,7 @@ from typing import Any, Callable
 import httpx
 
 from .config import Settings, project_root
-from .connectors import BigQueryConnector, JiraConnector
+from .connectors import BigQueryConnector, DatadogConnector, JiraConnector
 from .memory import MeetingMemoryIndex
 from .project import SOURCE_SUFFIXES, ProjectIndex, _is_secret
 
@@ -182,6 +182,52 @@ class Investigator:
                 "refused on a free dry run, so prefer narrow columns and partition filters.",
                 _string_arg("sql", "A single SELECT, standard SQL."),
                 bigquery.query,
+            )
+        datadog = DatadogConnector(self.settings)
+        if copilot.datadog_enabled and datadog.available():
+            self.tools.register(
+                "datadog_monitors",
+                "List Datadog monitors, optionally filtered by a name substring, and "
+                "optionally only those not in a healthy state.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Substring of the monitor name."},
+                        "only_alerting": {"type": "boolean", "description": "Skip OK and No Data."},
+                    },
+                    "additionalProperties": False,
+                },
+                datadog.monitors,
+            )
+            self.tools.register(
+                "datadog_metric",
+                "Summarise a Datadog metric over a window, as last, min, max and average. "
+                "Use Datadog query syntax, for example avg:system.cpu.user{service:api}.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Datadog metric query."},
+                        "minutes": {"type": "integer", "description": "Window in minutes, at most 1440."},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                datadog.metric_query,
+            )
+            self.tools.register(
+                "datadog_logs",
+                "Recent Datadog log events matching a log query, newest first.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Datadog log query."},
+                        "minutes": {"type": "integer", "description": "Window in minutes, at most 1440."},
+                        "limit": {"type": "integer", "description": "How many events, at most 50."},
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                datadog.logs,
             )
         jira = JiraConnector(self.settings)
         if copilot.jira_enabled and jira.available():

@@ -169,7 +169,7 @@ painel atualiza a cada ~10s. Por isso a pesquisa roda **em segundo plano** e sem
 reunião dura minutos, então uma resposta que chega 10 a 40 segundos depois ainda é útil.
 
 Ferramentas do investigador: busca no projeto, leitura de arquivo, histórico do git, reuniões anteriores e —
-quando disponíveis — BigQuery e Jira, ambos **somente leitura**. Cada conector só é oferecido ao modelo se suas
+quando disponíveis — BigQuery, Jira e Datadog, todos **somente leitura**. Cada conector só é oferecido ao modelo se suas
 credenciais existirem, para não gastar um turno descobrindo que a ferramenta não funciona.
 
 **BigQuery** usa as credenciais da própria máquina: o Buddy roda como o mesmo usuário do `gcloud`. Toda query
@@ -177,8 +177,12 @@ passa por quatro proteções — apenas `SELECT`, dry-run obrigatório para esti
 `bigquery_max_scan_gb`, e `--maximum_bytes_billed` como rede final. Explorar schema (`ls`, `show`) é metadado e
 não custa nada.
 
-**Jira** precisa de `JIRA_URL`, `JIRA_EMAIL` e `JIRA_API_TOKEN` no `.env`. Só leitura: criar ou transicionar
-issue continua fora de escopo para ação automática.
+**Jira** precisa de `JIRA_URL`, `JIRA_EMAIL` e `JIRA_API_TOKEN`. **Datadog** precisa de `DD_SITE`, `DD_API_KEY`
+e `DD_APP_KEY` — as três; sem `DD_SITE` não há como montar a URL base. Ambos só leem: criar ou transicionar
+issue, silenciar ou resolver monitor continuam fora de escopo para ação automática.
+
+Credenciais que vivem em arquivo e nunca são exportadas — o padrão de um wrapper que faz `source` a cada
+comando — entram por `env_files` no `config.yaml`, não pelo ambiente.
 
 Adicionar um conector novo é registrar um schema e um handler no `ToolRegistry`; o loop que os executa não muda.
 

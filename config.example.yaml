@@ -75,6 +75,7 @@ copilot:
   bigquery_data_projects: []
   bigquery_max_scan_gb: 20
   jira_enabled: true          # ativa sozinho quando JIRA_* existir no .env
+  datadog_enabled: true       # activates when DD_SITE, DD_API_KEY and DD_APP_KEY exist
   ollama_model: qwen3:4b
 
 hotkeys:
