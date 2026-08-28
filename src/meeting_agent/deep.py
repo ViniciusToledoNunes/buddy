@@ -9,6 +9,7 @@ import anthropic
 from anthropic import beta_tool
 
 from .config import Settings, anthropic_client_options, project_root
+from .copilot import add_usage, usage_dict
 from .memory import MeetingMemoryIndex
 from .project import SOURCE_SUFFIXES, ProjectIndex, _is_secret
 
@@ -51,6 +52,7 @@ class DeepAnalyst:
         self.memory_index = memory_index
         self.current_meeting_id = current_meeting_id
         self._client = client
+        self.last_usage: dict[str, int] | None = None
 
     @property
     def client(self) -> Any:
@@ -141,5 +143,13 @@ class DeepAnalyst:
             tools=self._tools(),
             messages=[{"role": "user", "content": prompt}],
         )
-        message = await runner.until_done()
+        # Iterated rather than awaited so every turn of the tool loop is counted, not
+        # just the final one: the reading turns are where the tokens actually go.
+        total: dict[str, int] = {}
+        message = None
+        async for message in runner:
+            total = add_usage(total, usage_dict(message.usage))
+        self.last_usage = total or None
+        if message is None:
+            return ""
         return "".join(block.text for block in message.content if block.type == "text").strip()

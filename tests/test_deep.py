@@ -80,13 +80,17 @@ class _FakeRunner:
     def __init__(self, message):
         self.message = message
 
-    async def until_done(self):
-        return self.message
+    def __aiter__(self):
+        async def gen():
+            yield self.message
+
+        return gen()
 
 
 class _FakeMessage:
-    def __init__(self, text):
+    def __init__(self, text, **usage):
         self.content = [type("Block", (), {"type": "text", "text": text})()]
+        self.usage = type("Usage", (), usage or {"input_tokens": 0, "output_tokens": 0})()
 
 
 class _FakeClient:
@@ -123,3 +127,41 @@ async def test_the_system_block_is_marked_for_caching(tmp_path):
 
     system = client.calls[0]["system"]
     assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+
+class _MeteredRunner:
+    """A tool loop of three turns: two reading, one answering."""
+
+    def __init__(self):
+        self.turns = [
+            _FakeMessage("searching", input_tokens=5_000, output_tokens=100),
+            _FakeMessage("reading", input_tokens=8_000, output_tokens=150),
+            _FakeMessage("storage.py:12 appends every final event.", input_tokens=12_000, output_tokens=400),
+        ]
+
+    def __aiter__(self):
+        async def gen():
+            for turn in self.turns:
+                yield turn
+
+        return gen()
+
+
+async def test_every_turn_of_the_tool_loop_is_counted(tmp_path):
+    """The reading turns are where the tokens go; counting only the final message
+    would under-report a deep analysis by most of its cost."""
+
+    class Client:
+        def __init__(self):
+            self.beta = type("Beta", (), {"messages": self})()
+
+        def tool_runner(self, **kwargs):
+            return _MeteredRunner()
+
+    analyst = DeepAnalyst(Settings(), tmp_path, client=Client())
+
+    answer = await analyst.analyze("REMOTE: do we store every event?", "What should I say?")
+
+    assert "storage.py:12" in answer
+    assert analyst.last_usage["input_tokens"] == 25_000
+    assert analyst.last_usage["calls"] == 3

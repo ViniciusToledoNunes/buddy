@@ -54,8 +54,40 @@ REPORT_SECTIONS = """# Summary
 # Potential follow-ups"""
 
 
+USAGE_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def usage_dict(usage: Any) -> dict[str, int]:
+    """Token counts from one response, tolerating fields the provider omits."""
+    return {field: int(getattr(usage, field, 0) or 0) for field in USAGE_FIELDS}
+
+
+def add_usage(total: dict[str, int], new: dict[str, int]) -> dict[str, int]:
+    """Accumulate one response into a running total.
+
+    cache_read_input_tokens staying at zero across a meeting is the signal that the
+    cached prefix never engaged -- without this there is no way to tell.
+    """
+    merged = dict(total)
+    for field, value in new.items():
+        merged[field] = merged.get(field, 0) + int(value or 0)
+    merged["calls"] = merged.get("calls", 0) + 1
+    return merged
+
+
 class LLMProvider:
     name = "disabled"
+    # A class attribute so a subclass that does not call super().__init__() still has it;
+    # the accounting must never be the reason an analysis fails.
+    last_usage: dict[str, int] | None = None
+
+    def __init__(self) -> None:
+        self.last_usage = None
 
     async def complete(self, system: str, prompt: str) -> str:
         raise NotImplementedError
@@ -73,6 +105,7 @@ class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
     def __init__(self, model: str, timeout: float = 45.0, max_tokens: int = 1_000) -> None:
+        super().__init__()
         self.model = model
         self.timeout = timeout
         self.max_tokens = max_tokens
@@ -91,6 +124,7 @@ class AnthropicProvider(LLMProvider):
             system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": prompt}],
         )
+        self.last_usage = usage_dict(message.usage)
         return "".join(block.text for block in message.content if block.type == "text")
 
 
@@ -98,6 +132,7 @@ class OllamaProvider(LLMProvider):
     name = "ollama"
 
     def __init__(self, model: str, timeout: float = 120.0) -> None:
+        super().__init__()
         self.model = model
         self.timeout = timeout
         self.base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
@@ -112,7 +147,15 @@ class OllamaProvider(LLMProvider):
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(f"{self.base_url}/api/chat", json=payload)
             response.raise_for_status()
-            return response.json().get("message", {}).get("content", "")
+            body = response.json()
+        # Ollama runs locally and bills nothing, but the counts still show prompt growth.
+        self.last_usage = {
+            "input_tokens": int(body.get("prompt_eval_count", 0) or 0),
+            "output_tokens": int(body.get("eval_count", 0) or 0),
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
+        return body.get("message", {}).get("content", "")
 
 
 def choose_provider(settings: Settings, local_asr: bool) -> LLMProvider | None:
@@ -188,6 +231,7 @@ class CopilotWorker:
         self.deep_analyst = deep_analyst
         self.analysis_path = analysis_path
         self.deep_analyses: deque[dict[str, str]] = deque(maxlen=10)
+        self.usage: dict[str, dict[str, int]] = {"tier1": {}, "tier2": {}}
 
     def _write_snapshot(self) -> None:
         if self.snapshot_path is None:
@@ -203,6 +247,7 @@ class CopilotWorker:
             "recent_suggestions": list(self.suggestions),
             "related_meetings": self.related_meetings,
             "deep_analyses": list(self.deep_analyses),
+            "usage": self.usage,
             "project_matches": [
                 {"path": match["path"], "score": match["score"]} for match in self.project_matches
             ],
@@ -266,6 +311,9 @@ class CopilotWorker:
         if not answer:
             self.bus.publish(StatusEvent("deep", "ready", "no answer returned"))
             return True
+        deep_usage = getattr(self.deep_analyst, "last_usage", None)
+        if deep_usage:
+            self.usage["tier2"] = add_usage(self.usage["tier2"], deep_usage)
         entry = {"timestamp": utc_now(), "model": model, "text": answer}
         self.deep_analyses.append(entry)
         self.bus.publish(AnalysisEvent(answer, model))
@@ -365,6 +413,8 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                 for value in data.get(key, []):
                     if value not in values:
                         values.append(str(value))
+            if self.provider.last_usage:
+                self.usage["tier1"] = add_usage(self.usage["tier1"], self.provider.last_usage)
             self.last_analysis = time.monotonic()
             await self._save_snapshot()
             self.bus.publish(StatusEvent("llm", "connected", self.provider.name))

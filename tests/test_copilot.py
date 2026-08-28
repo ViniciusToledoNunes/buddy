@@ -425,3 +425,71 @@ async def test_deep_analysis_can_be_switched_off(tmp_path):
 
     assert analyst.calls == []
     assert provider.prompts
+
+
+class _Usage:
+    def __init__(self, **fields):
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+
+def test_usage_accumulates_and_counts_calls():
+    from meeting_agent.copilot import add_usage, usage_dict
+
+    first = usage_dict(_Usage(input_tokens=100, output_tokens=20, cache_read_input_tokens=900))
+    assert first["cache_creation_input_tokens"] == 0  # absent field, not a crash
+
+    total = add_usage({}, first)
+    total = add_usage(total, first)
+
+    assert total["input_tokens"] == 200
+    assert total["cache_read_input_tokens"] == 1800
+    assert total["calls"] == 2
+
+
+class MeteredProvider(LLMProvider):
+    name = "metered"
+
+    def __init__(self):
+        super().__init__()
+        self.prompts = []
+
+    async def complete(self, system, prompt):
+        self.prompts.append(prompt)
+        self.last_usage = {
+            "input_tokens": 1_000,
+            "output_tokens": 200,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 3_000,
+        }
+        return json.dumps({"suggestions": [], "memory_update": "m", "topics": [], "decisions": [], "action_items": [], "open_questions": []})
+
+
+async def test_tier_one_usage_reaches_the_snapshot(tmp_path):
+    """Without this, there is no way to tell whether the cached prefix ever engaged."""
+    snapshot = tmp_path / "copilot.json"
+    worker = CopilotWorker(Settings(), MeteredProvider(), EventBus(), snapshot_path=snapshot)
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    await worker._analyze(manual=False)
+    await worker._analyze(manual=False)
+
+    saved = json.loads(snapshot.read_text(encoding="utf-8"))["usage"]
+    assert saved["tier1"]["calls"] == 2
+    assert saved["tier1"]["cache_read_input_tokens"] == 6_000
+
+
+async def test_tier_two_usage_is_recorded_separately(tmp_path):
+    class MeteredAnalyst:
+        last_usage = {"input_tokens": 20_000, "output_tokens": 1_500, "calls": 5}
+
+        async def analyze(self, transcript, question):
+            return "answer citing storage.py:12"
+
+    worker = CopilotWorker(Settings(), MeteredProvider(), EventBus(), deep_analyst=MeteredAnalyst())
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    await worker._deep_analysis()
+
+    assert worker.usage["tier2"]["input_tokens"] == 20_000
+    assert worker.usage["tier1"] == {}
