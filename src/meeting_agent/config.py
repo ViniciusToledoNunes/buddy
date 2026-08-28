@@ -65,7 +65,11 @@ class CopilotConfig(BaseModel):
     # Connectors reach real company data, so they are read-only and a query that would
     # scan more than the limit is refused on the free dry run instead of being billed.
     bigquery_enabled: bool = True
-    bigquery_project: str = ""
+    # The project that pays for the query, which is not where the data lives.
+    bigquery_billing_project: str = ""
+    # Projects whose datasets are worth exploring. Tables are addressed fully qualified,
+    # so the billing project having no data of its own is fine.
+    bigquery_data_projects: list[str] = []
     bigquery_max_scan_gb: float = Field(20.0, ge=0.1, le=1000)
     jira_enabled: bool = True
     ollama_model: str = "qwen3:4b"
@@ -93,6 +97,9 @@ class Settings(BaseModel):
     llm_provider: Literal["auto", "openai", "anthropic", "ollama", "disabled"] = "auto"
     save_audio: bool = False
     meetings_dir: str = "meetings"
+    # Extra env files to load, the way a wrapper script sources them. Credentials that
+    # live in a file and are never exported are invisible to a plain environment read.
+    env_files: list[str] = []
     audio: AudioConfig = AudioConfig()
     asr: ASRConfig = ASRConfig()
     copilot: CopilotConfig = CopilotConfig()
@@ -141,5 +148,22 @@ def load_settings(path: Path | None = None) -> Settings:
         example = project_root() / "config.example.yaml"
         target = example
     data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-    return Settings.model_validate(data)
+    settings = Settings.model_validate(data)
+    load_env_files(settings)
+    return settings
+
+
+def load_env_files(settings: Settings) -> list[str]:
+    """Source the extra env files named in configuration.
+
+    Credentials often live in a file that a wrapper script sources per command and never
+    exports, so reading the environment alone reports them as absent.
+    """
+    loaded: list[str] = []
+    for entry in settings.env_files:
+        candidate = Path(entry).expanduser()
+        if candidate.is_file():
+            load_dotenv(candidate, override=False)
+            loaded.append(str(candidate))
+    return loaded
 

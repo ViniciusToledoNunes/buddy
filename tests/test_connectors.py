@@ -178,7 +178,56 @@ def test_an_expired_credential_is_reported_not_raised(monkeypatch):
     """gcloud tokens expire mid-meeting; the investigator must get a message it can
     relay, not an exception that ends the run."""
     connector, _ = _bq(monkeypatch, [(1, "", "Reauthentication failed. Please run: gcloud auth login")])
+    monkeypatch.setattr(type(connector), "data_projects", property(lambda self: ["some-project"]))
 
     result = connector.list_datasets()
 
     assert "Reauthentication failed" in result
+
+
+def test_jira_search_uses_the_endpoint_that_still_exists(monkeypatch):
+    """Atlassian removed /rest/api/3/search; it answers 410 to an authenticated caller,
+    which only a live call reveals."""
+    monkeypatch.setenv("JIRA_URL", "https://example.atlassian.net")
+    monkeypatch.setenv("JIRA_EMAIL", "someone@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "token")
+    connector = JiraConnector(Settings())
+    seen = {}
+
+    def fake_get(path, params):
+        seen["path"] = path
+        return {"issues": [{"key": "ENG-1", "fields": {"summary": "s", "status": {"name": "Done"}}}]}
+
+    monkeypatch.setattr(connector, "_get", fake_get)
+
+    assert "ENG-1: s [Done]" in connector.search("project = ENG")
+    assert seen["path"] == "/rest/api/3/search/jql"
+
+
+def test_the_billing_project_is_not_assumed_to_hold_data(monkeypatch):
+    """The project that pays for a query commonly holds none of the tables."""
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    settings = Settings.model_validate({
+        "copilot": {"bigquery_billing_project": "pays-for-jobs", "bigquery_data_projects": ["holds-the-data"]}
+    })
+    connector = BigQueryConnector(settings)
+
+    assert connector.billing_project == "pays-for-jobs"
+    assert connector.data_projects == ["holds-the-data"]
+
+
+def test_the_billing_project_falls_back_to_the_gcloud_variable(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "from-environment")
+
+    assert BigQueryConnector(Settings()).billing_project == "from-environment"
+
+
+def test_datasets_are_listed_per_data_project(monkeypatch):
+    payload = json.dumps([{"datasetReference": {"datasetId": "dior_cdc"}}])
+    connector, calls = _bq(monkeypatch, [(0, payload, "")])
+    monkeypatch.setattr(type(connector), "data_projects", property(lambda self: ["trr-analytics-237016"]))
+
+    result = connector.list_datasets()
+
+    assert "trr-analytics-237016.dior_cdc" in result
+    assert "trr-analytics-237016" in calls[0]

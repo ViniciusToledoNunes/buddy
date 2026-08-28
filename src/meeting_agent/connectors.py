@@ -59,22 +59,41 @@ class BigQueryConnector:
     def available() -> bool:
         return shutil.which("bq") is not None
 
+    @property
+    def billing_project(self) -> str:
+        return self.settings.copilot.bigquery_billing_project or os.getenv("GOOGLE_CLOUD_PROJECT", "")
+
+    @property
+    def data_projects(self) -> list[str]:
+        configured = list(self.settings.copilot.bigquery_data_projects)
+        return configured or ([self.billing_project] if self.billing_project else [])
+
     def _base(self) -> list[str]:
         command = [_binary("bq"), "--format=json", "--quiet"]
-        if self.settings.copilot.bigquery_project:
-            command.append(f"--project_id={self.settings.copilot.bigquery_project}")
+        if self.billing_project:
+            command.append(f"--project_id={self.billing_project}")
         return command
 
     def list_datasets(self) -> str:
-        """Datasets visible to the configured project. Metadata only, no scan cost."""
-        code, out, err = _run(self._base() + ["ls", "--datasets", "--max_results=200"])
-        if code != 0:
-            return f"Could not list datasets: {err.strip()[:300]}"
-        try:
-            names = [item.get("datasetReference", {}).get("datasetId", "") for item in json.loads(out or "[]")]
-        except ValueError:
-            return out[:2_000]
-        return "\n".join(name for name in names if name) or "No datasets visible."
+        """Datasets in the configured data projects. Metadata only, no scan cost.
+
+        The billing project is deliberately not assumed to hold data: it commonly pays for
+        jobs while the tables live in another project entirely.
+        """
+        blocks: list[str] = []
+        for project in self.data_projects:
+            code, out, err = _run(self._base() + ["ls", "--datasets", "--max_results=200", project])
+            if code != 0:
+                blocks.append(f"{project}: could not list datasets: {err.strip()[:200]}")
+                continue
+            try:
+                names = [item.get("datasetReference", {}).get("datasetId", "") for item in json.loads(out or "[]")]
+            except ValueError:
+                blocks.append(f"{project}:\n{out[:1_000]}")
+                continue
+            listed = "\n".join(f"  {project}.{name}" for name in names if name)
+            blocks.append(f"{project}:\n{listed}" if listed else f"{project}: no datasets visible.")
+        return "\n".join(blocks) or "No data projects are configured."
 
     def list_tables(self, dataset: str) -> str:
         """Tables in one dataset. Metadata only, no scan cost."""
@@ -202,7 +221,10 @@ class JiraConnector:
     def search(self, jql: str) -> str:
         """Issues matching a JQL query, capped."""
         try:
-            data = self._get("/rest/api/3/search", {"jql": jql, "maxResults": 20, "fields": "summary,status"})
+            # /rest/api/3/search was removed by Atlassian; /search/jql replaces it.
+            data = self._get(
+                "/rest/api/3/search/jql", {"jql": jql, "maxResults": 20, "fields": "summary,status"}
+            )
         except Exception as exc:
             return f"Jira search failed: {exc}"
         rows = [

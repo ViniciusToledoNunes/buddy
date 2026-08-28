@@ -162,21 +162,24 @@ class Investigator:
             )
             self.tools.register(
                 "bigquery_list_tables",
-                "List tables in a BigQuery dataset. Metadata only, costs nothing.",
-                _string_arg("dataset", "Dataset id."),
+                "List tables in a BigQuery dataset, given as project.dataset. Metadata only, "
+                "costs nothing.",
+                _string_arg("dataset", "Dataset as project.dataset."),
                 bigquery.list_tables,
             )
             self.tools.register(
                 "bigquery_describe_table",
-                "Column names and types of a table, given as dataset.table. Costs nothing. "
-                "Call this before writing SQL rather than guessing column names.",
-                _string_arg("table", "Table as dataset.table."),
+                "Column names and types of a table, given as project.dataset.table. Costs "
+                "nothing. Call this before writing SQL rather than guessing column names.",
+                _string_arg("table", "Table as project.dataset.table."),
                 bigquery.describe_table,
             )
             self.tools.register(
                 "bigquery_query",
-                "Run one read-only SELECT. A query scanning more than the configured limit "
-                "is refused on a free dry run, so prefer narrow column lists and partition filters.",
+                "Run one read-only SELECT. Address every table by its fully qualified "
+                "project.dataset.table: the project that pays for the query is not the one "
+                "that holds the data. A query scanning more than the configured limit is "
+                "refused on a free dry run, so prefer narrow columns and partition filters.",
                 _string_arg("sql", "A single SELECT, standard SQL."),
                 bigquery.query,
             )

@@ -30,3 +30,22 @@ def test_workspace_header_is_sent_only_when_configured(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "  wrkspc_example  ")
     assert anthropic_headers() == {"anthropic-workspace-id": "wrkspc_example"}
     assert anthropic_client_options(30.0)["default_headers"] == {"anthropic-workspace-id": "wrkspc_example"}
+
+
+def test_env_files_are_sourced_and_expand_home(tmp_path, monkeypatch):
+    """A credential a wrapper script sources per command and never exports looks absent
+    to a plain environment read."""
+    from meeting_agent.config import Settings, load_env_files
+
+    monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    (tmp_path / ".config").mkdir()
+    (tmp_path / ".config" / "trr-jira.env").write_text("JIRA_API_TOKEN=from-file\n", encoding="utf-8")
+
+    loaded = load_env_files(Settings(env_files=["~/.config/trr-jira.env", "~/.config/absent.env"]))
+
+    import os
+
+    assert os.getenv("JIRA_API_TOKEN") == "from-file"
+    assert len(loaded) == 1  # the missing one is skipped, not an error

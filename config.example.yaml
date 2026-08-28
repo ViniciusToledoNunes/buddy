@@ -3,6 +3,9 @@ asr_mode: auto               # auto, local-gpu, local-cpu (always local)
 llm_provider: auto           # auto, openai, anthropic, ollama, disabled
 save_audio: false
 meetings_dir: meetings
+# Extra env files to source, for credentials a wrapper script loads per command and
+# never exports. Paths may use ~.
+env_files: []
 
 audio:
   sample_rate: 24000
@@ -66,7 +69,10 @@ copilot:
   # Conectores externos. Somente leitura; uma query que varreria mais que o limite
   # e recusada no dry run gratuito, antes de ser cobrada.
   bigquery_enabled: true
-  bigquery_project: ''        # vazio usa o projeto do gcloud
+  # Pays for the query; empty falls back to GOOGLE_CLOUD_PROJECT.
+  bigquery_billing_project: ''
+  # Where the data actually lives. Tables are addressed fully qualified.
+  bigquery_data_projects: []
   bigquery_max_scan_gb: 20
   jira_enabled: true          # ativa sozinho quando JIRA_* existir no .env
   ollama_model: qwen3:4b
