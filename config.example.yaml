@@ -63,6 +63,12 @@ copilot:
   investigation_max_turns: 8
   investigation_timeout_seconds: 180
   investigations_in_flight: 1
+  # Conectores externos. Somente leitura; uma query que varreria mais que o limite
+  # e recusada no dry run gratuito, antes de ser cobrada.
+  bigquery_enabled: true
+  bigquery_project: ''        # vazio usa o projeto do gcloud
+  bigquery_max_scan_gb: 20
+  jira_enabled: true          # ativa sozinho quando JIRA_* existir no .env
   ollama_model: qwen3:4b
 
 hotkeys:

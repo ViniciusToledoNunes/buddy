@@ -168,8 +168,19 @@ O reflexo não pesquisa por uma razão de latência: um tool loop custa um turno
 painel atualiza a cada ~10s. Por isso a pesquisa roda **em segundo plano** e sem bloquear — um assunto de
 reunião dura minutos, então uma resposta que chega 10 a 40 segundos depois ainda é útil.
 
-Adicionar um conector novo (Jira, BigQuery) é registrar um schema e um handler no `ToolRegistry`; o loop que
-os executa não muda.
+Ferramentas do investigador: busca no projeto, leitura de arquivo, histórico do git, reuniões anteriores e —
+quando disponíveis — BigQuery e Jira, ambos **somente leitura**. Cada conector só é oferecido ao modelo se suas
+credenciais existirem, para não gastar um turno descobrindo que a ferramenta não funciona.
+
+**BigQuery** usa as credenciais da própria máquina: o Buddy roda como o mesmo usuário do `gcloud`. Toda query
+passa por quatro proteções — apenas `SELECT`, dry-run obrigatório para estimar bytes, recusa acima de
+`bigquery_max_scan_gb`, e `--maximum_bytes_billed` como rede final. Explorar schema (`ls`, `show`) é metadado e
+não custa nada.
+
+**Jira** precisa de `JIRA_URL`, `JIRA_EMAIL` e `JIRA_API_TOKEN` no `.env`. Só leitura: criar ou transicionar
+issue continua fora de escopo para ação automática.
+
+Adicionar um conector novo é registrar um schema e um handler no `ToolRegistry`; o loop que os executa não muda.
 
 O provedor é configurável (`llm_provider`): `openai`, `anthropic` ou `ollama`. Com `auto`, a OpenAI vem primeiro
 quando há chave, para usar a conta que já tem saldo.

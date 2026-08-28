@@ -62,6 +62,12 @@ class CopilotConfig(BaseModel):
     investigation_max_turns: int = Field(8, ge=2, le=30)
     investigation_timeout_seconds: float = Field(180.0, ge=10, le=900)
     investigations_in_flight: int = Field(1, ge=1, le=4)
+    # Connectors reach real company data, so they are read-only and a query that would
+    # scan more than the limit is refused on the free dry run instead of being billed.
+    bigquery_enabled: bool = True
+    bigquery_project: str = ""
+    bigquery_max_scan_gb: float = Field(20.0, ge=0.1, le=1000)
+    jira_enabled: bool = True
     ollama_model: str = "qwen3:4b"
 
 

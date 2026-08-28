@@ -46,10 +46,12 @@ def _explode():
 # -------------------------------------------------------------- local tools
 
 
-def test_local_tools_are_registered_with_schemas(tmp_path):
+def test_local_tools_are_always_registered(tmp_path):
+    """Local tools need no credentials, so they are present on any machine. Connector
+    tools are conditional and covered in test_connectors.py."""
     names = {schema["name"] for schema in _project(tmp_path).tools.schemas}
 
-    assert names == {"search_project", "read_project_file", "git_history", "search_past_meetings"}
+    assert {"search_project", "read_project_file", "git_history", "search_past_meetings"} <= names
 
 
 def test_reading_outside_the_project_or_a_secret_is_refused(tmp_path):

@@ -9,6 +9,7 @@ from typing import Any, Callable
 import httpx
 
 from .config import Settings, project_root
+from .connectors import BigQueryConnector, JiraConnector
 from .memory import MeetingMemoryIndex
 from .project import SOURCE_SUFFIXES, ProjectIndex, _is_secret
 
@@ -99,6 +100,7 @@ class Investigator:
         self.last_usage: dict[str, int] | None = None
         self.tools = ToolRegistry()
         self._register_local_tools()
+        self._register_connectors()
 
     # ------------------------------------------------------------ local tools
 
@@ -142,6 +144,56 @@ class Investigator:
             _string_arg("query", "The subject to look for in earlier meetings."),
             self.search_past_meetings,
         )
+
+    def _register_connectors(self) -> None:
+        """Register external connectors that are actually usable right now.
+
+        A tool the model can see but cannot use wastes a turn discovering that, so each
+        one is only offered when its credentials exist.
+        """
+        copilot = self.settings.copilot
+        if copilot.bigquery_enabled and BigQueryConnector.available():
+            bigquery = BigQueryConnector(self.settings)
+            self.tools.register(
+                "bigquery_list_datasets",
+                "List BigQuery datasets. Metadata only, costs nothing.",
+                {"type": "object", "properties": {}, "additionalProperties": False},
+                lambda: bigquery.list_datasets(),
+            )
+            self.tools.register(
+                "bigquery_list_tables",
+                "List tables in a BigQuery dataset. Metadata only, costs nothing.",
+                _string_arg("dataset", "Dataset id."),
+                bigquery.list_tables,
+            )
+            self.tools.register(
+                "bigquery_describe_table",
+                "Column names and types of a table, given as dataset.table. Costs nothing. "
+                "Call this before writing SQL rather than guessing column names.",
+                _string_arg("table", "Table as dataset.table."),
+                bigquery.describe_table,
+            )
+            self.tools.register(
+                "bigquery_query",
+                "Run one read-only SELECT. A query scanning more than the configured limit "
+                "is refused on a free dry run, so prefer narrow column lists and partition filters.",
+                _string_arg("sql", "A single SELECT, standard SQL."),
+                bigquery.query,
+            )
+        jira = JiraConnector(self.settings)
+        if copilot.jira_enabled and jira.available():
+            self.tools.register(
+                "jira_issue",
+                "Read one Jira issue by key.",
+                _string_arg("key", "Issue key, for example ENG-123."),
+                jira.issue,
+            )
+            self.tools.register(
+                "jira_search",
+                "Search Jira with JQL and return matching issues.",
+                _string_arg("jql", "A JQL query."),
+                jira.search,
+            )
 
     def search_project(self, query: str) -> str:
         matches = self.project_index.find_related(query, limit=5)
