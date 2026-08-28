@@ -62,20 +62,30 @@ def run_doctor(settings: Settings) -> list[Check]:
     for result in probe_audio(settings.audio):
         checks.append(Check(result["name"], result["state"], result["detail"]))
     if os.getenv("ANTHROPIC_API_KEY"):
+        # A real one-token completion, not /v1/models. Listing models succeeds on an
+        # account with no credit balance, so the cheap check certifies a pipeline that
+        # cannot answer a single request.
         try:
-            response = httpx.get(
-                "https://api.anthropic.com/v1/models",
+            response = httpx.post(
+                "https://api.anthropic.com/v1/messages",
                 headers={
                     "x-api-key": os.environ["ANTHROPIC_API_KEY"].strip(),
                     "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
                     **anthropic_headers(),
                 },
-                timeout=8,
+                json={
+                    "model": settings.copilot.anthropic_model,
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "ping"}],
+                },
+                timeout=20,
             )
             if response.status_code == 200:
-                checks.append(Check("Anthropic API", "ok", "authenticated; audio never leaves this machine"))
+                checks.append(
+                    Check("Anthropic API", "ok", f"{settings.copilot.anthropic_model} answered; audio stays local")
+                )
             else:
-                # The status alone is useless for fixing it; carry the API's own reason.
                 try:
                     reason = response.json().get("error", {}).get("message", "")
                 except ValueError:
