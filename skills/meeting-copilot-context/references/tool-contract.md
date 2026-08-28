@@ -9,7 +9,9 @@ The server is local and uses stdio. It exposes only the configured meetings dire
 - `get_live_transcript(minutes, max_events, speaker)`: recent active transcript; `speaker` is `all`, `ME`, or `REMOTE`.
 - `get_meeting(meeting_id, include_transcript, max_events)`: saved metadata, report, copilot state, and optionally transcript. Use `latest` or a listed ID.
 - `search_meetings(query, limit)`: literal case-insensitive transcript search over bounded history.
-- `get_copilot_context(meeting_id)`: compact memory, decisions, actions, questions, and recent suggestions.
+- `get_copilot_context(meeting_id)`: compact memory, decisions, actions, questions, recent suggestions,
+  the project files Buddy ranked as relevant (`project_matches`), and any deep analyses Buddy already ran
+  (`deep_analyses`). Read those before repeating work Buddy has done.
 - `find_related_meetings(query, limit, exclude_meeting_id)`: ranks prior meetings by topical overlap using only
   structured memory (summary, topics, decisions, action items, open questions). Raw transcripts are never read or
   returned. Each result carries `meeting_id` and a relevance `score`.

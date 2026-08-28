@@ -11,11 +11,21 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import anthropic
 import httpx
 
 from .config import Settings
-from .events import EventBus, StatusEvent, SuggestionBatchEvent, SuggestionEvent, TranscriptEvent
+from .events import (
+    AnalysisEvent,
+    EventBus,
+    StatusEvent,
+    SuggestionBatchEvent,
+    SuggestionEvent,
+    TranscriptEvent,
+    utc_now,
+)
 from .memory import MeetingMemoryIndex
+from .project import ProjectIndex
 
 
 SYSTEM_PROMPT = """You are Buddy, a real-time meeting copilot. Continuously refine the complete
@@ -51,53 +61,37 @@ class LLMProvider:
         raise NotImplementedError
 
 
-class OpenAIProvider(LLMProvider):
-    name = "openai"
-
-    def __init__(self, model: str, timeout: float = 45.0) -> None:
-        self.model = model
-        self.timeout = timeout
-
-    async def complete(self, system: str, prompt: str) -> str:
-        headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
-        payload = {"model": self.model, "instructions": system, "input": prompt}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        if data.get("output_text"):
-            return str(data["output_text"])
-        parts: list[str] = []
-        for output in data.get("output", []):
-            for content in output.get("content", []):
-                if content.get("type") == "output_text":
-                    parts.append(content.get("text", ""))
-        return "".join(parts)
-
-
 class AnthropicProvider(LLMProvider):
+    """Claude through the official SDK.
+
+    The system block is marked for caching because it holds the two parts that stay
+    still during a meeting -- the instructions and the project excerpts -- while only
+    the transcript changes. Cached reads cost about a tenth of fresh input, which is
+    what makes a refresh every few seconds affordable.
+    """
+
     name = "anthropic"
 
-    def __init__(self, model: str, timeout: float = 45.0) -> None:
+    def __init__(self, model: str, timeout: float = 45.0, max_tokens: int = 1_000) -> None:
         self.model = model
         self.timeout = timeout
+        self.max_tokens = max_tokens
+        self._client: anthropic.AsyncAnthropic | None = None
+
+    @property
+    def client(self) -> anthropic.AsyncAnthropic:
+        if self._client is None:
+            self._client = anthropic.AsyncAnthropic(timeout=self.timeout)
+        return self._client
 
     async def complete(self, system: str, prompt: str) -> str:
-        headers = {
-            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-            "anthropic-version": "2023-06-01",
-        }
-        payload = {
-            "model": self.model,
-            "max_tokens": 900,
-            "system": system,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        return "".join(x.get("text", "") for x in data.get("content", []) if x.get("type") == "text")
+        message = await self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "".join(block.text for block in message.content if block.type == "text")
 
 
 class OllamaProvider(LLMProvider):
@@ -126,8 +120,6 @@ def choose_provider(settings: Settings, local_asr: bool) -> LLMProvider | None:
     if requested == "disabled" or not settings.copilot.enabled:
         return None
     timeout = settings.copilot.request_timeout_seconds
-    if requested in {"auto", "openai"} and os.getenv("OPENAI_API_KEY"):
-        return OpenAIProvider(settings.copilot.openai_model, timeout)
     if requested in {"auto", "anthropic"} and os.getenv("ANTHROPIC_API_KEY"):
         return AnthropicProvider(settings.copilot.anthropic_model, timeout)
     # A local LLM is never auto-selected while CPU ASR has absolute priority.
@@ -170,6 +162,9 @@ class CopilotWorker:
         snapshot_path: Path | None = None,
         memory_index: MeetingMemoryIndex | None = None,
         current_meeting_id: str | None = None,
+        project_index: ProjectIndex | None = None,
+        deep_analyst: Any | None = None,
+        analysis_path: Path | None = None,
     ) -> None:
         self.settings = settings
         self.provider = provider
@@ -185,6 +180,14 @@ class CopilotWorker:
         self.memory_index = memory_index
         self.current_meeting_id = current_meeting_id
         self.related_meetings: list[dict[str, Any]] = []
+        self.project_index = project_index
+        self.project_matches: list[dict[str, Any]] = []
+        # Rendered once per matched file set so the cached prompt prefix stays
+        # byte-identical between refreshes; a changed prefix means a cache miss.
+        self._project_block = "(no matching project files)"
+        self.deep_analyst = deep_analyst
+        self.analysis_path = analysis_path
+        self.deep_analyses: deque[dict[str, str]] = deque(maxlen=10)
 
     def _write_snapshot(self) -> None:
         if self.snapshot_path is None:
@@ -199,6 +202,10 @@ class CopilotWorker:
             "suggestion_revision": self.suggestion_revision,
             "recent_suggestions": list(self.suggestions),
             "related_meetings": self.related_meetings,
+            "deep_analyses": list(self.deep_analyses),
+            "project_matches": [
+                {"path": match["path"], "score": match["score"]} for match in self.project_matches
+            ],
             "recent_transcript": self._context()[-20_000:],
             "provider": self.provider.name if self.provider else "disabled",
         }
@@ -235,6 +242,76 @@ class CopilotWorker:
             self.recent.popleft()
         return "\n".join(line for _, line in self.recent)
 
+    async def _manual_request(self) -> bool:
+        """Ctrl+Alt+Space. Tier 1 already refreshes on its own, so an explicit request
+        buys the expensive answer: Claude reading the project before it replies."""
+        if self.deep_analyst is not None and self.settings.copilot.deep_analysis_enabled:
+            return await self._deep_analysis()
+        return await self._analyze(manual=True)
+
+    async def _deep_analysis(self) -> bool:
+        context = self._context()
+        if not context:
+            return True
+        model = self.settings.copilot.deep_model
+        self.bus.publish(StatusEvent("deep", "working", model))
+        try:
+            answer = await self.deep_analyst.analyze(
+                context, "What should I contribute right now, checked against the project?"
+            )
+        except Exception as exc:
+            self.bus.publish(StatusEvent("deep", "failed", f"{type(exc).__name__}: {exc}"))
+            return False
+        answer = (answer or "").strip()
+        if not answer:
+            self.bus.publish(StatusEvent("deep", "ready", "no answer returned"))
+            return True
+        entry = {"timestamp": utc_now(), "model": model, "text": answer}
+        self.deep_analyses.append(entry)
+        self.bus.publish(AnalysisEvent(answer, model))
+        self.bus.publish(StatusEvent("deep", "ready", model))
+        await asyncio.to_thread(self._append_analysis, entry)
+        await self._save_snapshot()
+        return True
+
+    def _append_analysis(self, entry: dict[str, str]) -> None:
+        if self.analysis_path is None:
+            return
+        try:
+            self.analysis_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.analysis_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"\n## {entry['timestamp']} ({entry['model']})\n\n{entry['text']}\n")
+        except OSError as exc:
+            self.bus.publish(StatusEvent("deep", "degraded", f"analysis not saved: {exc}"))
+
+    async def _refresh_project_context(self, context: str) -> None:
+        """Re-rank project files, keeping the rendered block stable when nothing moved."""
+        if self.project_index is None or not self.settings.copilot.project_context_enabled:
+            return
+        matches = await asyncio.to_thread(
+            self.project_index.find_related, context, self.settings.copilot.project_context_matches
+        )
+        if [match["path"] for match in matches] == [match["path"] for match in self.project_matches]:
+            return
+        self.project_matches = matches
+        self._project_block = self.project_index.render(matches)
+
+    def _system_prompt(self) -> str:
+        """Instructions plus project excerpts: the half of the prompt that holds still.
+
+        Both parts change rarely during a meeting, so they form the cached prefix while
+        the transcript, which changes constantly, stays in the user message.
+        """
+        if self.project_index is None or not self.settings.copilot.project_context_enabled:
+            return SYSTEM_PROMPT
+        return (
+            f"{SYSTEM_PROMPT}\n\n"
+            "Project files ranked as relevant to this meeting. Cite a path only when the "
+            "excerpt genuinely supports the point; say so plainly when the code does not "
+            "answer the question.\n\n"
+            f"{self._project_block}"
+        )
+
     async def _analyze(self, manual: bool) -> bool:
         if self.provider is None:
             self.bus.publish(StatusEvent("llm", "unavailable", "Configure an API provider"))
@@ -249,6 +326,7 @@ class CopilotWorker:
                 self.settings.copilot.semantic_memory_matches,
                 self.current_meeting_id,
             )
+        await self._refresh_project_context(context)
         question = "What could I contribute right now?" if manual else "Identify only genuinely useful interventions now."
         previous = json.dumps([asdict(item) for item in self.current_suggestions], ensure_ascii=False)
         related = json.dumps(self.related_meetings, ensure_ascii=False)
@@ -264,7 +342,7 @@ Request: {question}
 Output language for speakable suggestions: {self.settings.copilot.output_language}."""
         self.bus.publish(StatusEvent("llm", "working", "manual" if manual else "automatic"))
         try:
-            raw = await self.provider.complete(SYSTEM_PROMPT, prompt)
+            raw = await self.provider.complete(self._system_prompt(), prompt)
             data = _extract_json(raw)
             current: list[SuggestionEvent] = []
             for item in data.get("suggestions", [])[:3]:
@@ -318,7 +396,8 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                     # An explicit request outranks an automatic refresh already running.
                     if analysis is not None:
                         analysis.cancel()
-                    analysis = asyncio.create_task(self._analyze(manual=True))
+                    dirty = False
+                    analysis = asyncio.create_task(self._manual_request())
                     continue
                 if event_task in done:
                     event = event_task.result()
@@ -337,6 +416,10 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                     and now - last_transcript >= self.settings.copilot.suggestion_debounce_seconds
                     and now - self.last_analysis >= self.settings.copilot.suggestion_refresh_seconds
                 ):
+                    # Cleared at the start, not on completion: this pass covers the
+                    # transcript as it stands now, and anything said from here on is
+                    # new information that has to trigger the next pass.
+                    dirty = False
                     # Runs in the background: the meeting keeps moving while the model thinks.
                     analysis = asyncio.create_task(self._analyze(manual=False))
         finally:
@@ -349,15 +432,22 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
     def _collect_analysis(
         self, analysis: asyncio.Task[bool] | None, dirty: bool
     ) -> tuple[asyncio.Task[bool] | None, bool]:
-        """Fold a finished background analysis back into the loop state."""
+        """Fold a finished background analysis back into the loop state.
+
+        Success never clears `dirty` here. An analysis covers the transcript as it
+        stood when it started, and it is cleared there; speech that arrives while the
+        model is thinking is new information and must survive to trigger the next
+        pass. Clearing on completion silently swallowed it.
+        """
         if analysis is None or not analysis.done():
             return analysis, dirty
         try:
-            if analysis.result():
-                dirty = False
+            if not analysis.result():
+                dirty = True  # the provider failed; retry when the refresh window reopens
         except asyncio.CancelledError:
             pass
         except Exception as exc:
+            dirty = True
             self.bus.publish(StatusEvent("llm", "retrying", f"{type(exc).__name__}: {exc}"))
         return None, dirty
 
@@ -367,7 +457,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
         if self.provider is None:
             return (
                 REPORT_SECTIONS
-                + "\n\nLLM summary unavailable. Configure OPENAI_API_KEY, ANTHROPIC_API_KEY, or explicit Ollama.\n"
+                + "\n\nLLM summary unavailable. Set ANTHROPIC_API_KEY or configure Ollama explicitly.\n"
                 + "\n## Meeting memory captured\n\n"
                 + (self.memory.compact or "No structured memory was produced.")
             )

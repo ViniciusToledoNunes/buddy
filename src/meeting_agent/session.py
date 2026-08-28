@@ -11,12 +11,14 @@ from pathlib import Path
 
 import psutil
 
-from .asr import LocalModelPool, run_cloud_asr, run_local_asr, select_asr
+from .asr import LocalModelPool, run_local_asr, select_asr
 from .audio import AudioCapture, AudioFrame
 from .config import Settings, project_root
 from .copilot import CopilotWorker, choose_provider
+from .deep import DeepAnalyst
 from .events import EventBus, StatusEvent
 from .memory import MeetingMemoryIndex
+from .project import ProjectIndex
 from .overlay import SuggestionOverlay, overlay_bridge
 from .storage import AudioArchiver, MeetingStorage, audio_archive_worker, storage_worker
 from .ui import LiveUI
@@ -97,6 +99,13 @@ async def run_session(settings: Settings) -> Path:
         snapshot_path=storage.directory / "copilot.json",
         memory_index=memory_index,
         current_meeting_id=storage.directory.name,
+        project_index=ProjectIndex(project_root()),
+        analysis_path=storage.directory / "analysis.md",
+        deep_analyst=(
+            DeepAnalyst(settings, project_root(), memory_index, storage.directory.name)
+            if settings.copilot.deep_analysis_enabled and os.getenv("ANTHROPIC_API_KEY")
+            else None
+        ),
     )
     external_stop = asyncio.Event()
     asr_stop = asyncio.Event()
@@ -146,17 +155,11 @@ async def run_session(settings: Settings) -> Path:
         )
     await asyncio.sleep(0)
 
-    if selection.mode == "cloud-fast":
-        asr_tasks = [
-            asyncio.create_task(run_cloud_asr(mic_queue, settings, bus, asr_stop), name="asr-me-cloud"),
-            asyncio.create_task(run_cloud_asr(remote_queue, settings, bus, asr_stop), name="asr-remote-cloud"),
-        ]
-    else:
-        pool = LocalModelPool(selection, settings)
-        asr_tasks = [
-            asyncio.create_task(run_local_asr(mic_queue, pool, settings, bus, asr_stop), name="asr-me-local"),
-            asyncio.create_task(run_local_asr(remote_queue, pool, settings, bus, asr_stop), name="asr-remote-local"),
-        ]
+    pool = LocalModelPool(selection, settings)
+    asr_tasks = [
+        asyncio.create_task(run_local_asr(mic_queue, pool, settings, bus, asr_stop), name="asr-me-local"),
+        asyncio.create_task(run_local_asr(remote_queue, pool, settings, bus, asr_stop), name="asr-remote-local"),
+    ]
 
     captures = [
         AudioCapture("ME", settings.audio, mic_queue, capture_stop, bus, loop, archive_queue),

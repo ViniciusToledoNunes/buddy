@@ -21,7 +21,6 @@ class AudioConfig(BaseModel):
 
 
 class ASRConfig(BaseModel):
-    cloud_model: str = "gpt-live-transcribe"
     local_model_en: str = "tiny.en"
     local_model_multilingual: str = "base"
     compute_type: str = "int8"
@@ -44,8 +43,15 @@ class CopilotConfig(BaseModel):
     semantic_memory_max_meetings: int = Field(50, ge=1, le=500)
     semantic_memory_matches: int = Field(3, ge=1, le=10)
     output_language: str = "en"
-    openai_model: str = "gpt-5-mini"
-    anthropic_model: str = "claude-sonnet-4-5"
+    # Tier 1 runs every few seconds, so it wants the fastest model; tier 2 runs on
+    # demand with project tools and wants the strongest.
+    anthropic_model: str = "claude-haiku-4-5"
+    deep_model: str = "claude-opus-5"
+    deep_analysis_enabled: bool = True
+    deep_max_iterations: int = Field(6, ge=1, le=20)
+    deep_timeout_seconds: float = Field(180.0, ge=10, le=900)
+    project_context_enabled: bool = True
+    project_context_matches: int = Field(3, ge=1, le=10)
     ollama_model: str = "qwen3:4b"
 
 
@@ -67,8 +73,8 @@ class BenchmarkConfig(BaseModel):
 
 class Settings(BaseModel):
     language: Literal["en", "pt", "auto"] = "en"
-    asr_mode: Literal["auto", "cloud-fast", "local-gpu", "local-cpu"] = "auto"
-    llm_provider: Literal["auto", "openai", "anthropic", "ollama", "disabled"] = "auto"
+    asr_mode: Literal["auto", "local-gpu", "local-cpu"] = "auto"
+    llm_provider: Literal["auto", "anthropic", "ollama", "disabled"] = "auto"
     save_audio: bool = False
     meetings_dir: str = "meetings"
     audio: AudioConfig = AudioConfig()
@@ -77,12 +83,6 @@ class Settings(BaseModel):
     hotkeys: HotkeyConfig = HotkeyConfig()
     ui: UIConfig = UIConfig()
     benchmark: BenchmarkConfig = BenchmarkConfig()
-
-    @model_validator(mode="after")
-    def cloud_requires_opt_in(self) -> "Settings":
-        # Merely having a key does not transmit audio: auto selects cloud only when
-        # BUDDY_ALLOW_CLOUD_AUDIO is explicitly true (legacy variable also works).
-        return self
 
 
 def project_root() -> Path:
@@ -103,9 +103,3 @@ def load_settings(path: Path | None = None) -> Settings:
     data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
     return Settings.model_validate(data)
 
-
-def cloud_audio_allowed() -> bool:
-    return any(
-        os.getenv(name, "").lower() in {"1", "true", "yes"}
-        for name in ("BUDDY_ALLOW_CLOUD_AUDIO", "MEETING_AGENT_ALLOW_CLOUD_AUDIO")
-    )

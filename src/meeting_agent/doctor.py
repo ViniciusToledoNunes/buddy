@@ -12,7 +12,7 @@ import psutil
 import httpx
 
 from .audio import capture_capabilities, probe_audio
-from .config import Settings, cloud_audio_allowed
+from .config import Settings
 from .system import find_ffmpeg
 from .config import project_root
 
@@ -42,7 +42,7 @@ def run_doctor(settings: Settings) -> list[Check]:
         result = subprocess.run([nvidia, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"], capture_output=True, text=True)
         checks.append(Check("NVIDIA GPU/CUDA", "ok", result.stdout.strip() or result.stderr.strip()))
     else:
-        checks.append(Check("NVIDIA GPU/CUDA", "not-needed", "not present; local-cpu/cloud-fast supported"))
+        checks.append(Check("NVIDIA GPU/CUDA", "not-needed", "not present; local-cpu transcription supported"))
     try:
         compute = ", ".join(sorted(ctranslate2.get_supported_compute_types("cpu")))
         checks.append(Check("CTranslate2 ASR", "ok", f"{ctranslate2.__version__}; CPU: {compute}"))
@@ -61,21 +61,20 @@ def run_doctor(settings: Settings) -> list[Check]:
     checks.append(Check("Audio backend", "ok", f"{capabilities['platform']} / {capabilities['backend']}"))
     for result in probe_audio(settings.audio):
         checks.append(Check(result["name"], result["state"], result["detail"]))
-    if os.getenv("OPENAI_API_KEY"):
+    if os.getenv("ANTHROPIC_API_KEY"):
         try:
             response = httpx.get(
-                "https://api.openai.com/v1/models",
-                headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"},
+                "https://api.anthropic.com/v1/models",
+                headers={"x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01"},
                 timeout=8,
             )
             response.raise_for_status()
-            detail = "authenticated; cloud audio explicitly allowed" if cloud_audio_allowed() else "authenticated; cloud audio opt-in disabled"
-            checks.append(Check("OpenAI API", "ok", detail))
+            checks.append(Check("Anthropic API", "ok", "authenticated; audio never leaves this machine"))
         except Exception as exc:
-            checks.append(Check("OpenAI API", "failed", f"authentication/connectivity: {type(exc).__name__}"))
+            checks.append(Check("Anthropic API", "failed", f"authentication/connectivity: {type(exc).__name__}"))
     else:
-        checks.append(Check("OpenAI API", "not-needed", "OPENAI_API_KEY absent; local ASR available"))
-    if os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or settings.llm_provider == "ollama":
+        checks.append(Check("Anthropic API", "not-needed", "ANTHROPIC_API_KEY absent; local ASR still works"))
+    if os.getenv("ANTHROPIC_API_KEY") or settings.llm_provider == "ollama":
         checks.append(Check("LLM", "ok", f"configured provider: {settings.llm_provider}"))
     else:
         checks.append(Check("LLM", "warning", "no provider key; transcription works, suggestions/report use fallback"))

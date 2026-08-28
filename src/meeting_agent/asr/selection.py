@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import os
 import shutil
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..config import Settings, cloud_audio_allowed
+from ..config import Settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,14 +33,6 @@ def select_asr(settings: Settings) -> ASRSelection:
                 local_model = str(recommended)
         except (OSError, ValueError, TypeError):
             pass
-    if requested == "cloud-fast":
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError("cloud-fast requires OPENAI_API_KEY")
-        if not cloud_audio_allowed():
-            raise RuntimeError(
-                "cloud-fast requires explicit consent: set BUDDY_ALLOW_CLOUD_AUDIO=true in .env"
-            )
-        return ASRSelection("cloud-fast", settings.asr.cloud_model, "OpenAI", "PCM16", "explicit config")
     if requested == "local-gpu":
         if not has_nvidia():
             raise RuntimeError("local-gpu requested but no NVIDIA GPU/driver was found")
@@ -49,10 +40,6 @@ def select_asr(settings: Settings) -> ASRSelection:
     if requested == "local-cpu":
         return ASRSelection("local-cpu", local_model, "cpu", settings.asr.compute_type, "explicit config")
 
-    if os.getenv("OPENAI_API_KEY") and cloud_audio_allowed():
-        return ASRSelection(
-            "cloud-fast", settings.asr.cloud_model, "OpenAI", "PCM16", "API key and cloud audio opt-in"
-        )
     if has_nvidia():
         return ASRSelection("local-gpu", local_model, "cuda", "float16", "NVIDIA GPU detected")
     reason = "local benchmark recommendation" if benchmark_path.exists() else "CPU-safe automatic fallback"

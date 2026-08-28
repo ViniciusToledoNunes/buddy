@@ -5,6 +5,7 @@ from rich.console import Console
 
 from meeting_agent.config import Settings
 from meeting_agent.events import (
+    AnalysisEvent,
     EventBus,
     StatusEvent,
     SuggestionBatchEvent,
@@ -38,7 +39,7 @@ def test_render_shows_transcript_partials_and_status():
     ui = LiveUI(Settings(), EventBus(), "meetings/now")
     ui.apply_event(TranscriptEvent("ME", "final line", True, "u1", latency_seconds=0.42))
     ui.apply_event(TranscriptEvent("REMOTE", "partial line", False, "u2"))
-    ui.apply_event(StatusEvent("llm", "connected", "openai"))
+    ui.apply_event(StatusEvent("llm", "connected", "anthropic"))
     ui.apply_event(SuggestionBatchEvent(revision=1, suggestions=[SuggestionEvent("RISK", "Check rollback")]))
 
     rendered = _plain(ui)
@@ -114,3 +115,16 @@ def test_known_components_keep_their_order():
     rendered = _plain(ui)
 
     assert rendered.index("audio-me") < rendered.index("storage")
+
+
+def test_a_deep_analysis_gets_its_own_persistent_panel():
+    """The deep answer costs an Opus call and cites code; a 6-second suggestion refresh
+    must not wipe it off the screen."""
+    ui = LiveUI(Settings(), EventBus(), "meeting")
+    ui.apply_event(AnalysisEvent("storage.py:12 already appends every final event."))
+    ui.apply_event(SuggestionBatchEvent(revision=9, suggestions=[SuggestionEvent("RISK", "Something else")]))
+
+    rendered = _plain(ui)
+
+    assert "storage.py:12" in rendered
+    assert "Something else" in rendered

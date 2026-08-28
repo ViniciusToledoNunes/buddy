@@ -11,7 +11,15 @@ from rich.table import Table
 from rich.text import Text
 
 from .config import Settings
-from .events import Event, EventBus, StatusEvent, SuggestionBatchEvent, SuggestionEvent, TranscriptEvent
+from .events import (
+    AnalysisEvent,
+    Event,
+    EventBus,
+    StatusEvent,
+    SuggestionBatchEvent,
+    SuggestionEvent,
+    TranscriptEvent,
+)
 
 
 KIND_ICON = {"COMMENT": "💡", "QUESTION": "❓", "RISK": "⚠", "CONNECTION": "🔗", "ACTION": "✅"}
@@ -42,6 +50,7 @@ class LiveUI:
         self.partials: dict[tuple[str, str], str] = {}
         self.suggestions: deque[SuggestionEvent] = deque(maxlen=5)
         self.statuses: dict[str, StatusEvent] = {}
+        self.analysis = ""
         self.latency = 0.0
 
     def apply_event(self, event: Event) -> None:
@@ -60,6 +69,8 @@ class LiveUI:
             self.suggestions.extend(event.suggestions[:5])
         elif isinstance(event, SuggestionEvent):
             self.suggestions.appendleft(event)
+        elif isinstance(event, AnalysisEvent):
+            self.analysis = event.text
         elif isinstance(event, StatusEvent):
             self.statuses[event.component] = event
 
@@ -100,11 +111,14 @@ class LiveUI:
                     color = "yellow"
                 status.append(f"   {component}: {event.state}", style=color)
         status.append(f"\nSaved incrementally: {self.meeting_dir}", style="dim")
-        return Group(
+        panels = [
             Panel(transcript, title="LIVE TRANSCRIPT", border_style="blue"),
             Panel(suggestions, title="BUDDY", border_style="magenta"),
-            Panel(status, title="STATUS", border_style="red"),
-        )
+        ]
+        if self.analysis:
+            panels.append(Panel(Text(self.analysis), title="DEEP ANALYSIS", border_style="green"))
+        panels.append(Panel(status, title="STATUS", border_style="red"))
+        return Group(*panels)
 
     async def run(self, stop: asyncio.Event) -> None:
         queue = self.bus.subscribe(maxsize=512)

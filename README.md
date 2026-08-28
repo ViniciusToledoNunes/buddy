@@ -9,10 +9,15 @@ Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, 
 ## O que o Buddy faz hoje
 
 - Captura separada do microfone (`ME`) e do áudio reproduzido pelo computador (`REMOTE`).
-- Transcrição local com `faster-whisper`/CTranslate2 em CPU ou GPU compatível.
-- Transcrição opcional pela API Realtime da OpenAI, somente com opt-in explícito para envio de áudio.
-- Sugestões contínuas: qualquer fala nova reavalia o conjunto inteiro e substitui o painel, em vez de empilhar
-  conselhos antigos. Quando o assunto se resolve, o painel é esvaziado.
+- Transcrição **sempre local** com `faster-whisper`/CTranslate2 em CPU ou GPU compatível. Não existe modo de
+  transcrição em nuvem: o áudio nunca sai da máquina.
+- **Duas camadas de Claude.** A camada 1 reavalia o painel inteiro a cada poucos segundos com `claude-haiku-4-5`,
+  substituindo as sugestões em vez de empilhá-las; quando o assunto se resolve, o painel é esvaziado.
+- **Camada 2 sob demanda (`Ctrl+Alt+Space`).** `claude-opus-5` com ferramentas reais lê o repositório — busca,
+  leitura de arquivo, histórico do git e memória de reuniões — e responde citando `caminho:linha`.
+- **Contexto de projeto no prompt.** Arquivos do repositório são ranqueados por relevância (BM25, com quebra de
+  `snake_case` e `camelCase`) e entram no prefixo cacheado, então a camada 1 também cita código sem custo de
+  ida e volta de ferramenta.
 - Memória entre reuniões: o Buddy recupera reuniões anteriores relacionadas usando apenas memória estruturada
   (resumo, tópicos, decisões, ações, perguntas). Transcrições brutas nunca são indexadas nem enviadas ao provedor.
 - Memória compacta da reunião atual com decisões, ações e perguntas em aberto.
@@ -85,7 +90,8 @@ Os comandos antigos `meeting-agent` e `meeting-agent-mcp` continuam disponíveis
 
 ## Durante a reunião
 
-- `Ctrl+Alt+Space`: pede uma sugestão imediatamente.
+- `Ctrl+Alt+Space`: dispara a análise profunda, em que o Claude lê o projeto antes de responder. O resultado
+  aparece no painel `DEEP ANALYSIS` e é gravado em `analysis.md` na pasta da reunião.
 - `Ctrl+Alt+M`: encerra a sessão.
 - `buddy stop`: encerra a sessão a partir de outro terminal.
 - `buddy status`: informa se existe captura ativa.
@@ -147,6 +153,19 @@ copilot.json
 
 Com `save_audio: false`, padrão do projeto, o áudio é descartado após o processamento. Quando habilitado, são criados `audio_me.wav` e `audio_remote.wav`.
 
+## Modelos
+
+| Camada | Quando roda | Modelo | Papel |
+|---|---|---|---|
+| 1 | a cada poucos segundos | `claude-haiku-4-5` | mantém o painel vivo; recebe transcrição, memória e trechos de código |
+| 2 | `Ctrl+Alt+Space` | `claude-opus-5` | lê o repositório com ferramentas e responde citando `caminho:linha` |
+
+O prefixo do prompt — instruções mais trechos de projeto — é marcado para *prompt caching*, porque é a parte que
+não muda durante a reunião. Leituras de cache custam cerca de um décimo da entrada normal, que é o que torna um
+refresh a cada poucos segundos viável.
+
+Ollama continua disponível com `llm_provider: ollama` para operação totalmente offline.
+
 ## Provedores e privacidade
 
 Copie `.env.example` para `.env` e preencha somente os provedores desejados. OpenAI, Anthropic e Ollama são opcionais; a transcrição local funciona sem chave.
@@ -179,8 +198,11 @@ Resultados variam por máquina. Execute `buddy benchmark` para medir o ambiente 
   validados. Captura, ASR e o helper Swift dependem de hardware e não entram no gate automatizado.
 - O Buddy ainda não possui aplicativo desktop completo, bandeja do sistema ou instalador assinado.
 - Integrações com calendário, plataformas de reunião, Jira, GitHub ou CRM ainda não são automáticas.
-- A memória entre reuniões usa sobreposição de termos ponderada, não embeddings vetoriais; sinônimos e paráfrases
-  ainda não são reconhecidos.
+- A memória entre reuniões e o índice de projeto usam ranqueamento léxico (BM25), não embeddings; sinônimos e
+  paráfrases ainda não são reconhecidos. `store` não encontra `storage`.
+- Trechos de código entram no prompt da camada 1. Arquivos de credencial são excluídos por construção
+  (`.env*`, `*.pem`, `*.key`, nomes com `password`/`credential`), mas se o seu código-fonte contém segredos em
+  texto puro, desligue com `project_context_enabled: false`.
 
 Veja o [roadmap de capacidades](docs/ROADMAP.md) para as próximas evoluções possíveis.
 

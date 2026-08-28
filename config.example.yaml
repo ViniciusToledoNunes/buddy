@@ -1,6 +1,6 @@
 language: en                 # en, pt, or auto
-asr_mode: auto               # auto, cloud-fast, local-gpu, local-cpu
-llm_provider: auto           # auto, openai, anthropic, ollama, disabled
+asr_mode: auto               # auto, local-gpu, local-cpu (always local)
+llm_provider: auto           # auto, anthropic, ollama, disabled
 save_audio: false
 meetings_dir: meetings
 
@@ -16,7 +16,6 @@ audio:
   silence_reconnect_seconds: 20
 
 asr:
-  cloud_model: gpt-live-transcribe
   local_model_en: tiny.en
   local_model_multilingual: base
   compute_type: int8
@@ -42,8 +41,17 @@ copilot:
   semantic_memory_max_meetings: 50
   semantic_memory_matches: 3
   output_language: en
-  openai_model: gpt-5-mini
-  anthropic_model: claude-sonnet-4-5
+  # Tier 1 refreshes the panel every few seconds, so it runs the fastest model.
+  anthropic_model: claude-haiku-4-5
+  # Tier 2 answers Ctrl+Alt+Space with real project tools, so it runs the strongest.
+  deep_model: claude-opus-5
+  deep_analysis_enabled: true
+  deep_max_iterations: 6
+  deep_timeout_seconds: 180
+  # Ranked project excerpts are added to the cached prompt prefix. Turn this off to
+  # keep source code entirely out of the requests.
+  project_context_enabled: true
+  project_context_matches: 3
   ollama_model: qwen3:4b
 
 hotkeys:

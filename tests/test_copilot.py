@@ -4,16 +4,23 @@ import time
 
 from meeting_agent.config import Settings
 from meeting_agent.copilot import (
+    SYSTEM_PROMPT,
     AnthropicProvider,
     CopilotWorker,
     LLMProvider,
     OllamaProvider,
-    OpenAIProvider,
     _extract_json,
     choose_provider,
 )
-from meeting_agent.events import EventBus, StatusEvent, SuggestionBatchEvent, TranscriptEvent
+from meeting_agent.events import (
+    AnalysisEvent,
+    EventBus,
+    StatusEvent,
+    SuggestionBatchEvent,
+    TranscriptEvent,
+)
 from meeting_agent.memory import MeetingMemoryIndex
+from meeting_agent.project import ProjectIndex
 
 
 def test_json_fence_parser():
@@ -22,17 +29,13 @@ def test_json_fence_parser():
 
 
 def test_provider_selection_prefers_explicit_keys(monkeypatch):
-    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     settings = Settings()
 
     assert choose_provider(settings, local_asr=True) is None
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     assert isinstance(choose_provider(settings, local_asr=True), AnthropicProvider)
-
-    monkeypatch.setenv("OPENAI_API_KEY", "y")
-    assert isinstance(choose_provider(settings, local_asr=True), OpenAIProvider)
 
     assert isinstance(choose_provider(Settings(llm_provider="ollama"), local_asr=True), OllamaProvider)
     assert choose_provider(Settings(llm_provider="disabled"), local_asr=True) is None
@@ -283,3 +286,142 @@ def test_snapshot_write_retries_a_locked_destination(tmp_path, monkeypatch):
 async def test_provider_timeout_comes_from_configuration():
     settings = Settings.model_validate({"copilot": {"request_timeout_seconds": 90}})
     assert settings.copilot.request_timeout_seconds == 90
+
+
+async def test_speech_during_an_analysis_still_triggers_the_next_one():
+    """The analysis covers the transcript as it stood when it started. Anything said
+    while the model is thinking is new information, not already-handled context."""
+    bus = EventBus()
+    provider = SlowProvider(delay=0.3)
+    worker = CopilotWorker(_continuous_settings(), provider, bus)
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop))
+    await asyncio.sleep(0)
+
+    bus.publish(TranscriptEvent("REMOTE", "opening point", True, "u1"))
+    await asyncio.sleep(0.1)
+    assert provider.started == 1 and provider.finished == 0
+
+    bus.publish(TranscriptEvent("REMOTE", "said while the model was thinking", True, "u2"))
+    await asyncio.sleep(0.6)
+
+    stop.set()
+    await task
+    assert provider.started == 2
+
+
+async def test_project_excerpts_reach_the_cached_prefix(tmp_path):
+    """Project context belongs in the system block: it holds still while the transcript
+    moves, which is what makes the cached prefix worth anything."""
+    (tmp_path / "billing").mkdir()
+    (tmp_path / "billing" / "rollback.py").write_text("def rollback_invoice(): pass\n", encoding="utf-8")
+    provider = RecordingProvider()
+    worker = CopilotWorker(
+        Settings(), provider, EventBus(), project_index=ProjectIndex(tmp_path)
+    )
+    worker.recent.append((time.monotonic(), "REMOTE: can we rollback the invoice?"))
+
+    await worker._analyze(manual=False)
+
+    assert "billing/rollback.py" in worker._system_prompt()
+    assert "rollback_invoice" in worker._system_prompt()
+    assert worker.project_matches[0]["path"] == "billing/rollback.py"
+
+
+async def test_the_cached_prefix_is_stable_while_the_same_files_match(tmp_path):
+    (tmp_path / "app.py").write_text("def rollback(): pass\n", encoding="utf-8")
+    worker = CopilotWorker(
+        Settings(), RecordingProvider(), EventBus(), project_index=ProjectIndex(tmp_path)
+    )
+    worker.recent.append((time.monotonic(), "REMOTE: rollback"))
+
+    await worker._analyze(manual=False)
+    first = worker._system_prompt()
+    worker.recent.append((time.monotonic(), "REMOTE: rollback again please"))
+    await worker._analyze(manual=False)
+
+    assert worker._system_prompt() == first
+
+
+async def test_project_context_can_be_switched_off(tmp_path):
+    (tmp_path / "app.py").write_text("def rollback(): pass\n", encoding="utf-8")
+    settings = Settings.model_validate({"copilot": {"project_context_enabled": False}})
+    worker = CopilotWorker(
+        settings, RecordingProvider(), EventBus(), project_index=ProjectIndex(tmp_path)
+    )
+    worker.recent.append((time.monotonic(), "REMOTE: rollback"))
+
+    await worker._analyze(manual=False)
+
+    assert worker._system_prompt() == SYSTEM_PROMPT
+    assert worker.project_matches == []
+
+
+class StubAnalyst:
+    def __init__(self, answer="storage.py:12 already appends every final event."):
+        self.answer = answer
+        self.calls = []
+
+    async def analyze(self, transcript, question):
+        self.calls.append((transcript, question))
+        return self.answer
+
+
+async def test_manual_request_runs_the_deep_analysis(tmp_path):
+    """Ctrl+Alt+Space is the deep question now: tier 1 already refreshes on its own."""
+    bus = EventBus()
+    output = bus.subscribe()
+    analyst = StubAnalyst()
+    worker = CopilotWorker(
+        Settings(), RecordingProvider(), bus, analysis_path=tmp_path / "analysis.md", deep_analyst=analyst
+    )
+    worker.recent.append((time.monotonic(), "REMOTE: do we already store every event?"))
+
+    assert await worker._deep_analysis() is True
+
+    assert analyst.calls and "store every event" in analyst.calls[0][0]
+    events = _drain(output)
+    assert any(isinstance(e, AnalysisEvent) and "storage.py:12" in e.text for e in events)
+    assert "storage.py:12" in (tmp_path / "analysis.md").read_text(encoding="utf-8")
+    assert worker.deep_analyses[-1]["text"].startswith("storage.py:12")
+
+
+async def test_a_failing_deep_analysis_reports_and_does_not_raise(tmp_path):
+    class Broken:
+        async def analyze(self, transcript, question):
+            raise RuntimeError("opus unreachable")
+
+    bus = EventBus()
+    output = bus.subscribe()
+    worker = CopilotWorker(Settings(), RecordingProvider(), bus, deep_analyst=Broken())
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    assert await worker._deep_analysis() is False
+
+    assert any(
+        isinstance(e, StatusEvent) and e.component == "deep" and e.state == "failed" for e in _drain(output)
+    )
+
+
+async def test_manual_falls_back_to_tier_one_without_a_deep_analyst():
+    bus = EventBus()
+    provider = RecordingProvider()
+    worker = CopilotWorker(Settings(), provider, bus)
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    await worker._manual_request()
+
+    assert provider.prompts  # tier 1 ran instead
+
+
+async def test_deep_analysis_can_be_switched_off(tmp_path):
+    settings = Settings.model_validate({"copilot": {"deep_analysis_enabled": False}})
+    provider = RecordingProvider()
+    analyst = StubAnalyst()
+    worker = CopilotWorker(settings, provider, EventBus(), deep_analyst=analyst)
+    worker.recent.append((time.monotonic(), "REMOTE: anything"))
+
+    await worker._manual_request()
+
+    assert analyst.calls == []
+    assert provider.prompts

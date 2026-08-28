@@ -13,6 +13,10 @@ explícito.
 - **CI multiplataforma.** Testes com cobertura em `ubuntu-latest` (3.12 e 3.13), `windows-latest` e `macos-15`,
   incluindo verificação de sintaxe do helper Swift e checagem de importação por plataforma.
 
+- **Claude em duas camadas.** Camada 1 (`claude-haiku-4-5`) mantém o painel vivo com trechos de projeto no
+  prefixo cacheado; camada 2 (`claude-opus-5`) lê o repositório com ferramentas reais no `Ctrl+Alt+Space`.
+  A OpenAI foi removida: transcrição é sempre local e só texto de reunião chega ao modelo.
+
 ## Próximos passos recomendados
 
 ### 1. Validar e empacotar cada plataforma
@@ -29,7 +33,8 @@ explícito.
 
 ### 3. Aumentar o contexto útil
 
-- Evoluir a memória entre reuniões de sobreposição de termos para embeddings, reconhecendo sinônimos e paráfrases.
+- Evoluir a memória entre reuniões e o índice de projeto de BM25 para embeddings, reconhecendo sinônimos e
+  paráfrases (hoje `store` não encontra `storage`).
 - Criptografia em repouso para a memória estruturada.
 - Indexação opt-in de projetos e documentação autorizada.
 - Preparação pré-reunião baseada em agenda, participantes e reuniões anteriores.
