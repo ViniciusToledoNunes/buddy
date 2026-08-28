@@ -14,7 +14,7 @@ from typing import Any
 import anthropic
 import httpx
 
-from .config import Settings
+from .config import Settings, anthropic_client_options
 from .events import (
     AnalysisEvent,
     EventBus,
@@ -81,7 +81,7 @@ class AnthropicProvider(LLMProvider):
     @property
     def client(self) -> anthropic.AsyncAnthropic:
         if self._client is None:
-            self._client = anthropic.AsyncAnthropic(timeout=self.timeout)
+            self._client = anthropic.AsyncAnthropic(**anthropic_client_options(self.timeout))
         return self._client
 
     async def complete(self, system: str, prompt: str) -> str:

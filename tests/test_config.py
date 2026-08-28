@@ -30,3 +30,17 @@ def test_tiered_claude_models_are_configured():
     copilot = Settings().copilot
     assert copilot.anthropic_model == "claude-haiku-4-5"
     assert copilot.deep_model == "claude-opus-5"
+
+
+def test_workspace_header_is_sent_only_when_configured(monkeypatch):
+    """Identity-linked keys are rejected with HTTP 400 unless the request names a
+    workspace; plain workspace keys must not receive a stray header."""
+    from meeting_agent.config import anthropic_client_options, anthropic_headers
+
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    assert anthropic_headers() == {}
+    assert anthropic_client_options(30.0) == {"timeout": 30.0}
+
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "  wrkspc_example  ")
+    assert anthropic_headers() == {"anthropic-workspace-id": "wrkspc_example"}
+    assert anthropic_client_options(30.0)["default_headers"] == {"anthropic-workspace-id": "wrkspc_example"}

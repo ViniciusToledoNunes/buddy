@@ -85,6 +85,30 @@ class Settings(BaseModel):
     benchmark: BenchmarkConfig = BenchmarkConfig()
 
 
+def anthropic_workspace_id() -> str:
+    """Workspace an identity-linked API key acts in.
+
+    Keys tied to a user identity are rejected with HTTP 400 unless the request names a
+    workspace. Plain workspace keys ignore the header, so sending it when set is safe
+    for both kinds.
+    """
+    return os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip()
+
+
+def anthropic_headers() -> dict[str, str]:
+    workspace = anthropic_workspace_id()
+    return {"anthropic-workspace-id": workspace} if workspace else {}
+
+
+def anthropic_client_options(timeout: float) -> dict[str, object]:
+    """Constructor options for anthropic.AsyncAnthropic, workspace header included."""
+    options: dict[str, object] = {"timeout": timeout}
+    headers = anthropic_headers()
+    if headers:
+        options["default_headers"] = headers
+    return options
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 

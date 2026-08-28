@@ -12,7 +12,7 @@ import psutil
 import httpx
 
 from .audio import capture_capabilities, probe_audio
-from .config import Settings
+from .config import Settings, anthropic_headers
 from .system import find_ffmpeg
 from .config import project_root
 
@@ -65,13 +65,24 @@ def run_doctor(settings: Settings) -> list[Check]:
         try:
             response = httpx.get(
                 "https://api.anthropic.com/v1/models",
-                headers={"x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01"},
+                headers={
+                    "x-api-key": os.environ["ANTHROPIC_API_KEY"].strip(),
+                    "anthropic-version": "2023-06-01",
+                    **anthropic_headers(),
+                },
                 timeout=8,
             )
-            response.raise_for_status()
-            checks.append(Check("Anthropic API", "ok", "authenticated; audio never leaves this machine"))
+            if response.status_code == 200:
+                checks.append(Check("Anthropic API", "ok", "authenticated; audio never leaves this machine"))
+            else:
+                # The status alone is useless for fixing it; carry the API's own reason.
+                try:
+                    reason = response.json().get("error", {}).get("message", "")
+                except ValueError:
+                    reason = response.text[:200]
+                checks.append(Check("Anthropic API", "failed", f"HTTP {response.status_code}: {reason[:220]}"))
         except Exception as exc:
-            checks.append(Check("Anthropic API", "failed", f"authentication/connectivity: {type(exc).__name__}"))
+            checks.append(Check("Anthropic API", "failed", f"{type(exc).__name__}: {exc}"))
     else:
         checks.append(Check("Anthropic API", "not-needed", "ANTHROPIC_API_KEY absent; local ASR still works"))
     if os.getenv("ANTHROPIC_API_KEY") or settings.llm_provider == "ollama":

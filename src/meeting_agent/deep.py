@@ -8,7 +8,7 @@ from typing import Any
 import anthropic
 from anthropic import beta_tool
 
-from .config import Settings, project_root
+from .config import Settings, anthropic_client_options, project_root
 from .memory import MeetingMemoryIndex
 from .project import SOURCE_SUFFIXES, ProjectIndex, _is_secret
 
@@ -55,7 +55,9 @@ class DeepAnalyst:
     @property
     def client(self) -> Any:
         if self._client is None:
-            self._client = anthropic.AsyncAnthropic(timeout=self.settings.copilot.deep_timeout_seconds)
+            self._client = anthropic.AsyncAnthropic(
+                **anthropic_client_options(self.settings.copilot.deep_timeout_seconds)
+            )
         return self._client
 
     # ---------------------------------------------------------------- tools
