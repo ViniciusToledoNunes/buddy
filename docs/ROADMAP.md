@@ -13,9 +13,11 @@ explícito.
 - **CI multiplataforma.** Testes com cobertura em `ubuntu-latest` (3.12 e 3.13), `windows-latest` e `macos-15`,
   incluindo verificação de sintaxe do helper Swift e checagem de importação por plataforma.
 
-- **Claude em duas camadas.** Camada 1 (`claude-haiku-4-5`) mantém o painel vivo com trechos de projeto no
-  prefixo cacheado; camada 2 (`claude-opus-5`) lê o repositório com ferramentas reais no `Ctrl+Alt+Space`.
-  A OpenAI foi removida: transcrição é sempre local e só texto de reunião chega ao modelo.
+- **Painel contínuo com contexto largo.** O prefixo do prompt carrega o mapa do repositório inteiro e a memória
+  de todas as reuniões anteriores, cacheado; o ranqueador escolhe apenas os trechos detalhados. Provedor
+  configurável (OpenAI, Anthropic ou Ollama). Transcrição é sempre local: áudio nunca sai da máquina.
+- **Investigação profunda delegada.** Perguntas que exigem ler o código vão pela skill + MCP no Codex/Claude,
+  que já têm ferramentas melhores do que um tool loop próprio pagaria para reimplementar.
 
 ## Próximos passos recomendados
 

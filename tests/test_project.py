@@ -89,3 +89,29 @@ def test_rendering_is_stable_for_the_same_matches(tmp_path):
 
 def test_rendering_no_matches_is_explicit(tmp_path):
     assert "no matching" in ProjectIndex(tmp_path).render([]).lower()
+
+
+def test_the_map_lists_every_indexed_file_with_a_summary(tmp_path):
+    """The map is the cached half of the prompt: the model gets the whole table of
+    contents instead of three files chosen by a ranker that cannot tell store from
+    storage."""
+    _write(tmp_path, "app/storage.py", '"""Persist meeting transcripts to disk."""\nimport json\n')
+    _write(tmp_path, "app/ui.py", "# Renders the live panel\nclass LiveUI: pass\n")
+    _write(tmp_path, ".env", "SECRET=1\n")
+
+    rendered = ProjectIndex(tmp_path).render_map()
+
+    assert "app/storage.py - Persist meeting transcripts to disk." in rendered
+    assert "app/ui.py - Renders the live panel" in rendered
+    assert ".env" not in rendered
+
+
+def test_the_map_is_stable_between_calls(tmp_path):
+    _write(tmp_path, "app/main.py", "def main(): pass\n")
+    index = ProjectIndex(tmp_path)
+
+    assert index.render_map() == index.render_map()
+
+
+def test_an_empty_project_still_renders(tmp_path):
+    assert "no project files" in ProjectIndex(tmp_path).render_map()

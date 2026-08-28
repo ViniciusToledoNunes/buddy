@@ -16,6 +16,8 @@ BM25_B = 0.5
 # storage means storage.py, not whichever file happens to say the word most.
 PATH_WEIGHT = 2.5
 
+QUOTE_CHARS = "\"'"
+
 IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
 IDENTIFIER_PARTS = re.compile(r"_+|(?<=[a-z0-9])(?=[A-Z])")
 
@@ -192,6 +194,36 @@ class ProjectIndex:
             )
         ranked.sort(key=lambda item: (-item["score"], item["path"]))
         return ranked[: max(1, min(limit, 10))]
+
+    def summarise(self, path: Path) -> str:
+        """One line describing a file: its docstring, leading comment, or first line."""
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for _ in range(40):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    stripped = line.strip().strip(QUOTE_CHARS).lstrip("#/*- ").strip()
+                    if not stripped or stripped.startswith(("import ", "from ", "#!", "<?")):
+                        continue
+                    return stripped[:110]
+        except (OSError, UnicodeDecodeError):
+            pass
+        return ""
+
+    def render_map(self) -> str:
+        """Every indexed file with a one-line summary.
+
+        This is the half of the context that holds still for a whole meeting, so it
+        belongs in the cached prefix. Giving the model the full table of contents beats
+        handing it three files chosen by a ranker that cannot tell store from storage.
+        """
+        lines = []
+        for path in sorted(self._candidates(), key=lambda item: item.as_posix()):
+            relative = path.relative_to(self.root).as_posix()
+            summary = self.summarise(path)
+            lines.append(f"{relative} - {summary}" if summary else relative)
+        return "\n".join(lines) if lines else "(no project files indexed)"
 
     @staticmethod
     def render(matches: list[dict[str, Any]]) -> str:

@@ -45,13 +45,14 @@ class CopilotConfig(BaseModel):
     output_language: str = "en"
     # Tier 1 runs every few seconds, so it wants the fastest model; tier 2 runs on
     # demand with project tools and wants the strongest.
+    openai_model: str = "gpt-5.4-mini"
+    # gpt-5 models reason by default, which costs tens of seconds on a full meeting
+    # prompt. The panel refreshes every few seconds, so it asks for none.
+    openai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh"] = "none"
     anthropic_model: str = "claude-haiku-4-5"
-    deep_model: str = "claude-opus-5"
-    deep_analysis_enabled: bool = True
-    deep_max_iterations: int = Field(6, ge=1, le=20)
-    deep_timeout_seconds: float = Field(180.0, ge=10, le=900)
     project_context_enabled: bool = True
     project_context_matches: int = Field(3, ge=1, le=10)
+    prior_meetings_in_context: int = Field(20, ge=1, le=200)
     ollama_model: str = "qwen3:4b"
 
 
@@ -74,7 +75,7 @@ class BenchmarkConfig(BaseModel):
 class Settings(BaseModel):
     language: Literal["en", "pt", "auto"] = "en"
     asr_mode: Literal["auto", "local-gpu", "local-cpu"] = "auto"
-    llm_provider: Literal["auto", "anthropic", "ollama", "disabled"] = "auto"
+    llm_provider: Literal["auto", "openai", "anthropic", "ollama", "disabled"] = "auto"
     save_audio: bool = False
     meetings_dir: str = "meetings"
     audio: AudioConfig = AudioConfig()

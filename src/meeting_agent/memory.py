@@ -72,6 +72,25 @@ class MeetingMemoryIndex:
             )
         return documents
 
+    def render_all(self, limit: int = 20, exclude_meeting_id: str | None = None) -> str:
+        """Structured memory of every recent meeting, for the cached prefix.
+
+        Retrieval picked three by term overlap and got it wrong often enough to mislead;
+        the whole set is small, stable during a meeting, and lets the model decide what
+        is relevant.
+        """
+        blocks = []
+        for document in self._documents(exclude_meeting_id)[: max(1, limit)]:
+            parts = [f"## {document['meeting_id']}"]
+            if document["memory"]:
+                parts.append(document["memory"])
+            for label, key in (("Topics", "topics"), ("Decisions", "decisions"), ("Open questions", "open_questions")):
+                values = document[key]
+                if values:
+                    parts.append(f"{label}: " + "; ".join(values))
+            blocks.append("\n".join(parts))
+        return "\n\n".join(blocks) if blocks else "(no prior meetings)"
+
     def find_related(
         self,
         query: str,

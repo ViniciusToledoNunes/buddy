@@ -11,13 +11,13 @@ Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, 
 - Captura separada do microfone (`ME`) e do áudio reproduzido pelo computador (`REMOTE`).
 - Transcrição **sempre local** com `faster-whisper`/CTranslate2 em CPU ou GPU compatível. Não existe modo de
   transcrição em nuvem: o áudio nunca sai da máquina.
-- **Duas camadas de Claude.** A camada 1 reavalia o painel inteiro a cada poucos segundos com `claude-haiku-4-5`,
-  substituindo as sugestões em vez de empilhá-las; quando o assunto se resolve, o painel é esvaziado.
-- **Camada 2 sob demanda (`Ctrl+Alt+Space`).** `claude-opus-5` com ferramentas reais lê o repositório — busca,
-  leitura de arquivo, histórico do git e memória de reuniões — e responde citando `caminho:linha`.
-- **Contexto de projeto no prompt.** Arquivos do repositório são ranqueados por relevância (BM25, com quebra de
-  `snake_case` e `camelCase`) e entram no prefixo cacheado, então a camada 1 também cita código sem custo de
-  ida e volta de ferramenta.
+- **Painel contínuo.** Qualquer fala nova reavalia o conjunto inteiro e substitui o painel, em vez de empilhar
+  conselhos; quando o assunto se resolve, o painel é esvaziado.
+- **Contexto largo e cacheado.** O prefixo do prompt carrega o mapa do repositório inteiro (cada arquivo com uma
+  linha de resumo) e a memória estruturada de todas as reuniões anteriores. Como isso não muda durante a reunião,
+  o *prompt caching* funciona: medido em 53% do input vindo do cache já no segundo refresh.
+- **Investigação profunda via Codex/Claude.** Perguntas que exigem ler o código de verdade vão pela skill
+  `meeting-copilot-context` e pelo MCP, usando as ferramentas nativas do agente.
 - Memória entre reuniões: o Buddy recupera reuniões anteriores relacionadas usando apenas memória estruturada
   (resumo, tópicos, decisões, ações, perguntas). Transcrições brutas nunca são indexadas nem enviadas ao provedor.
 - Memória compacta da reunião atual com decisões, ações e perguntas em aberto.
@@ -90,8 +90,7 @@ Os comandos antigos `meeting-agent` e `meeting-agent-mcp` continuam disponíveis
 
 ## Durante a reunião
 
-- `Ctrl+Alt+Space`: dispara a análise profunda, em que o Claude lê o projeto antes de responder. O resultado
-  aparece no painel `DEEP ANALYSIS` e é gravado em `analysis.md` na pasta da reunião.
+- `Ctrl+Alt+Space`: força um refresh imediato do painel, sem esperar o intervalo.
 - `Ctrl+Alt+M`: encerra a sessão.
 - `buddy stop`: encerra a sessão a partir de outro terminal.
 - `buddy status`: informa se existe captura ativa.
@@ -155,10 +154,13 @@ Com `save_audio: false`, padrão do projeto, o áudio é descartado após o proc
 
 ## Modelos
 
-| Camada | Quando roda | Modelo | Papel |
+| Onde | Quando | Como | Papel |
 |---|---|---|---|
-| 1 | a cada poucos segundos | `claude-haiku-4-5` | mantém o painel vivo; recebe transcrição, memória e trechos de código |
-| 2 | `Ctrl+Alt+Space` | `claude-opus-5` | lê o repositório com ferramentas e responde citando `caminho:linha` |
+| Painel do Buddy | contínuo | `gpt-5.4-mini` (ou `claude-haiku-4-5`) | mantém sugestões vivas durante a fala |
+| Codex / Claude | sob demanda | skill + MCP | lê o código e responde citando `caminho:linha` |
+
+O provedor é configurável (`llm_provider`): `openai`, `anthropic` ou `ollama`. Com `auto`, a OpenAI vem primeiro
+quando há chave, para usar a conta que já tem saldo.
 
 O prefixo do prompt — instruções mais trechos de projeto — é marcado para *prompt caching*, porque é a parte que
 não muda durante a reunião. Leituras de cache custam cerca de um décimo da entrada normal, que é o que torna um
@@ -198,8 +200,10 @@ Resultados variam por máquina. Execute `buddy benchmark` para medir o ambiente 
   validados. Captura, ASR e o helper Swift dependem de hardware e não entram no gate automatizado.
 - O Buddy ainda não possui aplicativo desktop completo, bandeja do sistema ou instalador assinado.
 - Integrações com calendário, plataformas de reunião, Jira, GitHub ou CRM ainda não são automáticas.
-- A memória entre reuniões e o índice de projeto usam ranqueamento léxico (BM25), não embeddings; sinônimos e
-  paráfrases ainda não são reconhecidos. `store` não encontra `storage`.
+- O ranqueamento de trechos é léxico (BM25), não semântico: `store` não encontra `storage`. Isso importa menos
+  agora que o mapa completo do projeto e todas as memórias vão no prefixo — o modelo escolhe, não o ranqueador.
+- O consumo é real: ~5K tokens de entrada por refresh, dos quais cerca de metade sai do cache depois do primeiro.
+  O `usage` gravado em `copilot.json` mostra o número verdadeiro de cada reunião.
 - Trechos de código entram no prompt da camada 1. Arquivos de credencial são excluídos por construção
   (`.env*`, `*.pem`, `*.key`, nomes com `password`/`credential`), mas se o seu código-fonte contém segredos em
   texto puro, desligue com `project_context_enabled: false`.

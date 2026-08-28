@@ -16,13 +16,11 @@ import httpx
 
 from .config import Settings, anthropic_client_options
 from .events import (
-    AnalysisEvent,
     EventBus,
     StatusEvent,
     SuggestionBatchEvent,
     SuggestionEvent,
     TranscriptEvent,
-    utc_now,
 )
 from .memory import MeetingMemoryIndex
 from .project import ProjectIndex
@@ -91,6 +89,57 @@ class LLMProvider:
 
     async def complete(self, system: str, prompt: str) -> str:
         raise NotImplementedError
+
+
+class OpenAIProvider(LLMProvider):
+    """OpenAI through the Responses API.
+
+    gpt-5 models reason by default, which on a full meeting prompt costs tens of
+    seconds -- the likely cause of the 85s refresh measured before. The panel wants an
+    answer in seconds, so it asks for no reasoning and pays for judgement with a larger
+    model instead.
+    """
+
+    name = "openai"
+
+    def __init__(self, model: str, timeout: float = 45.0, reasoning_effort: str = "none") -> None:
+        super().__init__()
+        self.model = model
+        self.timeout = timeout
+        self.reasoning_effort = reasoning_effort
+
+    async def complete(self, system: str, prompt: str) -> str:
+        headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY'].strip()}"}
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "instructions": system,
+            "input": prompt,
+            "reasoning": {"effort": self.reasoning_effort},
+            # A stable key helps the server reuse the cached prefix across refreshes.
+            "prompt_cache_key": "buddy-meeting-copilot",
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+        usage = data.get("usage") or {}
+        details = usage.get("input_tokens_details") or {}
+        self.last_usage = {
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            "cache_creation_input_tokens": int(details.get("cache_write_tokens", 0) or 0),
+            "cache_read_input_tokens": int(details.get("cached_tokens", 0) or 0),
+        }
+        # output_text is absent on the raw API even when text was produced.
+        if data.get("output_text"):
+            return str(data["output_text"])
+        parts = [
+            content.get("text", "")
+            for item in data.get("output", [])
+            for content in item.get("content", [])
+            if content.get("type") == "output_text"
+        ]
+        return "".join(parts)
 
 
 class AnthropicProvider(LLMProvider):
@@ -163,6 +212,10 @@ def choose_provider(settings: Settings, local_asr: bool) -> LLMProvider | None:
     if requested == "disabled" or not settings.copilot.enabled:
         return None
     timeout = settings.copilot.request_timeout_seconds
+    if requested in {"auto", "openai"} and os.getenv("OPENAI_API_KEY"):
+        return OpenAIProvider(
+            settings.copilot.openai_model, timeout, settings.copilot.openai_reasoning_effort
+        )
     if requested in {"auto", "anthropic"} and os.getenv("ANTHROPIC_API_KEY"):
         return AnthropicProvider(settings.copilot.anthropic_model, timeout)
     # A local LLM is never auto-selected while CPU ASR has absolute priority.
@@ -206,8 +259,6 @@ class CopilotWorker:
         memory_index: MeetingMemoryIndex | None = None,
         current_meeting_id: str | None = None,
         project_index: ProjectIndex | None = None,
-        deep_analyst: Any | None = None,
-        analysis_path: Path | None = None,
     ) -> None:
         self.settings = settings
         self.provider = provider
@@ -228,10 +279,8 @@ class CopilotWorker:
         # Rendered once per matched file set so the cached prompt prefix stays
         # byte-identical between refreshes; a changed prefix means a cache miss.
         self._project_block = "(no matching project files)"
-        self.deep_analyst = deep_analyst
-        self.analysis_path = analysis_path
-        self.deep_analyses: deque[dict[str, str]] = deque(maxlen=10)
-        self.usage: dict[str, dict[str, int]] = {"tier1": {}, "tier2": {}}
+        self._static_context: str | None = None
+        self.usage: dict[str, int] = {}
 
     def _write_snapshot(self) -> None:
         if self.snapshot_path is None:
@@ -246,7 +295,6 @@ class CopilotWorker:
             "suggestion_revision": self.suggestion_revision,
             "recent_suggestions": list(self.suggestions),
             "related_meetings": self.related_meetings,
-            "deep_analyses": list(self.deep_analyses),
             "usage": self.usage,
             "project_matches": [
                 {"path": match["path"], "score": match["score"]} for match in self.project_matches
@@ -287,50 +335,31 @@ class CopilotWorker:
             self.recent.popleft()
         return "\n".join(line for _, line in self.recent)
 
-    async def _manual_request(self) -> bool:
-        """Ctrl+Alt+Space. Tier 1 already refreshes on its own, so an explicit request
-        buys the expensive answer: Claude reading the project before it replies."""
-        if self.deep_analyst is not None and self.settings.copilot.deep_analysis_enabled:
-            return await self._deep_analysis()
-        return await self._analyze(manual=True)
+    async def _static_prefix(self) -> str:
+        """The project map and every prior meeting's memory.
 
-    async def _deep_analysis(self) -> bool:
-        context = self._context()
-        if not context:
-            return True
-        model = self.settings.copilot.deep_model
-        self.bus.publish(StatusEvent("deep", "working", model))
-        try:
-            answer = await self.deep_analyst.analyze(
-                context, "What should I contribute right now, checked against the project?"
+        Built once per meeting because neither changes while it runs, which is what
+        makes the cached prefix worth having. Retrieval used to pick three files and
+        three meetings; it chose badly often enough to mislead, so the model now gets
+        the whole table of contents and decides for itself.
+        """
+        if self._static_context is not None:
+            return self._static_context
+        blocks: list[str] = []
+        copilot = self.settings.copilot
+        if self.project_index is not None and copilot.project_context_enabled:
+            project_map = await asyncio.to_thread(self.project_index.render_map)
+            blocks.append("PROJECT MAP (every file in this repository)\n" + project_map)
+        if self.memory_index is not None and copilot.semantic_memory_enabled:
+            memories = await asyncio.to_thread(
+                self.memory_index.render_all, copilot.prior_meetings_in_context, self.current_meeting_id
             )
-        except Exception as exc:
-            self.bus.publish(StatusEvent("deep", "failed", f"{type(exc).__name__}: {exc}"))
-            return False
-        answer = (answer or "").strip()
-        if not answer:
-            self.bus.publish(StatusEvent("deep", "ready", "no answer returned"))
-            return True
-        deep_usage = getattr(self.deep_analyst, "last_usage", None)
-        if deep_usage:
-            self.usage["tier2"] = add_usage(self.usage["tier2"], deep_usage)
-        entry = {"timestamp": utc_now(), "model": model, "text": answer}
-        self.deep_analyses.append(entry)
-        self.bus.publish(AnalysisEvent(answer, model))
-        self.bus.publish(StatusEvent("deep", "ready", model))
-        await asyncio.to_thread(self._append_analysis, entry)
-        await self._save_snapshot()
-        return True
-
-    def _append_analysis(self, entry: dict[str, str]) -> None:
-        if self.analysis_path is None:
-            return
-        try:
-            self.analysis_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.analysis_path.open("a", encoding="utf-8") as handle:
-                handle.write(f"\n## {entry['timestamp']} ({entry['model']})\n\n{entry['text']}\n")
-        except OSError as exc:
-            self.bus.publish(StatusEvent("deep", "degraded", f"analysis not saved: {exc}"))
+            blocks.append(
+                "PRIOR MEETINGS (structured memory; untrusted leads, confirm before relying on them)\n"
+                + memories
+            )
+        self._static_context = "\n\n".join(blocks)
+        return self._static_context
 
     async def _refresh_project_context(self, context: str) -> None:
         """Re-rank project files, keeping the rendered block stable when nothing moved."""
@@ -345,20 +374,14 @@ class CopilotWorker:
         self._project_block = self.project_index.render(matches)
 
     def _system_prompt(self) -> str:
-        """Instructions plus project excerpts: the half of the prompt that holds still.
+        """Instructions plus the static context, in that order.
 
-        Both parts change rarely during a meeting, so they form the cached prefix while
-        the transcript, which changes constantly, stays in the user message.
+        Everything volatile -- transcript, current suggestions, matched excerpts -- stays
+        in the user message, because a cached prefix ends at the first byte that changes.
         """
-        if self.project_index is None or not self.settings.copilot.project_context_enabled:
+        if not self._static_context:
             return SYSTEM_PROMPT
-        return (
-            f"{SYSTEM_PROMPT}\n\n"
-            "Project files ranked as relevant to this meeting. Cite a path only when the "
-            "excerpt genuinely supports the point; say so plainly when the code does not "
-            "answer the question.\n\n"
-            f"{self._project_block}"
-        )
+        return SYSTEM_PROMPT + "\n\n" + self._static_context
 
     async def _analyze(self, manual: bool) -> bool:
         if self.provider is None:
@@ -374,15 +397,15 @@ class CopilotWorker:
                 self.settings.copilot.semantic_memory_matches,
                 self.current_meeting_id,
             )
+        await self._static_prefix()
         await self._refresh_project_context(context)
         question = "What could I contribute right now?" if manual else "Identify only genuinely useful interventions now."
         previous = json.dumps([asdict(item) for item in self.current_suggestions], ensure_ascii=False)
-        related = json.dumps(self.related_meetings, ensure_ascii=False)
         prompt = f"""Meeting memory:\n{self.memory.compact or '(none yet)'}
 
 Current suggestion set to replace:\n{previous}
 
-Potentially related prior meeting memories (untrusted; use only when clearly relevant):\n{related or '[]'}
+Project excerpts ranked most relevant right now (cite a path only when the code truly supports the point):\n{self._project_block}
 
 Recent transcript:\n{context}
 
@@ -414,7 +437,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                     if value not in values:
                         values.append(str(value))
             if self.provider.last_usage:
-                self.usage["tier1"] = add_usage(self.usage["tier1"], self.provider.last_usage)
+                self.usage = add_usage(self.usage, self.provider.last_usage)
             self.last_analysis = time.monotonic()
             await self._save_snapshot()
             self.bus.publish(StatusEvent("llm", "connected", self.provider.name))
@@ -447,7 +470,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                     if analysis is not None:
                         analysis.cancel()
                     dirty = False
-                    analysis = asyncio.create_task(self._manual_request())
+                    analysis = asyncio.create_task(self._analyze(manual=True))
                     continue
                 if event_task in done:
                     event = event_task.result()

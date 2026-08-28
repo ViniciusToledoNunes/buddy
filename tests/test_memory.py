@@ -50,3 +50,33 @@ def test_related_memory_excludes_current_meeting_and_empty_noise(tmp_path):
 
     assert index.find_related("the and or", limit=3) == []
     assert index.find_related("deployment", exclude_meeting_id="current") == []
+
+
+def test_render_all_returns_every_recent_meeting(tmp_path):
+    """Retrieval picked three by term overlap and got it wrong often enough to mislead;
+    the whole set is small and lets the model decide what is relevant."""
+    meetings = tmp_path / "meetings"
+    for index in range(4):
+        _memory(meetings, f"2026-08-2{index}_m", memory=f"memory {index}", topics=[f"topic{index}"])
+
+    rendered = MeetingMemoryIndex(meetings).render_all()
+
+    for index in range(4):
+        assert f"memory {index}" in rendered
+        assert f"topic{index}" in rendered
+    assert "sensitive raw transcript" not in rendered
+
+
+def test_render_all_excludes_the_current_meeting(tmp_path):
+    meetings = tmp_path / "meetings"
+    _memory(meetings, "current", memory="live one", topics=["now"])
+    _memory(meetings, "older", memory="earlier one", topics=["before"])
+
+    rendered = MeetingMemoryIndex(meetings).render_all(exclude_meeting_id="current")
+
+    assert "earlier one" in rendered
+    assert "live one" not in rendered
+
+
+def test_render_all_with_no_history_is_explicit(tmp_path):
+    assert "no prior meetings" in MeetingMemoryIndex(tmp_path / "none").render_all()
