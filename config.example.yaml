@@ -94,6 +94,18 @@ copilot:
   datadog_enabled: true       # activates when DD_SITE, DD_API_KEY and DD_APP_KEY exist
   ollama_model: qwen3:4b
 
+# `buddy listen`: the microphone stays attentive for "Hey Buddy"; meetings are recorded
+# only when asked. Speech outside a meeting that does not open with the phrase is dropped.
+listen:
+  wake_arm_seconds: 6          # after a bare "Hey Buddy", the next utterance is the command
+  batch_min_seconds: 60        # meeting speech reaches the session at most once per interval
+  batch_pause_seconds: 3
+  batch_max_wait_seconds: 150
+  meeting_idle_minutes: 10     # a forgotten meeting ends on silence
+  meeting_max_minutes: 240
+  event_log_max_mb: 5
+  event_line_max_chars: 6000
+
 hotkeys:
   toggle_meeting: ctrl+alt+m
   suggest_now: ctrl+alt+space

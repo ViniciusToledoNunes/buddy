@@ -19,9 +19,21 @@ explícito.
   por reunião, somente leitura e isolada das regras de permissão do usuário. BigQuery e Datadog continuam
   protegidos em código, acessados pelo `buddy tool`.
 
+- **Modo escuta.** `buddy listen` mantém o microfone atento a "Hey Buddy", grava reuniões quando pedido e
+  publica eventos num log em disco; a skill `buddy-listener` faz de uma sessão do Claude Code o cérebro, com o
+  mesmo padrão de um monitor de Slack: cursor em disco, `Monitor`, investigação livre e escrita só com aprovação.
+
 ## Próximos passos recomendados
 
-### 0. Reduzir a latência do cérebro
+### 0. Modo escuta: próximos passos
+
+- Detectar reunião pelo sinal do sistema: o Windows informa quais apps estão usando o microfone (Zoom, Chrome,
+  Teams). Perguntar se deve gravar quando uma chamada começa sem aviso, e encerrar quando o app solta o
+  microfone. Precisa de lista de apps: um cliente de VDI pode segurar o microfone o dia todo.
+- Detector dedicado de palavra de ativação, para não transcrever fala que será descartada.
+- Validar "Hey Buddy" em reuniões reais: taxa de disparo falso e de comando perdido.
+
+### 1. Reduzir a latência do cérebro
 
 - Hoje leva de 40 a 90s por atualização. Medir `claude_model: sonnet` e `claude_effort: medium` numa reunião real.
 - Encerrar sozinho uma sessão esquecida, para ela não continuar chamando o Claude enquanto o computador toca áudio.
@@ -30,19 +42,19 @@ explícito.
 
 ## Próximos passos recomendados
 
-### 1. Validar e empacotar cada plataforma
+### 2. Validar e empacotar cada plataforma
 
 - Testes end-to-end com áudio real em hardware Linux e macOS. A CI cobre lógica e importação, não captura.
 - Instaladores assinados e releases versionadas.
 - Aplicativo de bandeja com indicador inequívoco de gravação e do conjunto de sugestões atual.
 
-### 2. Entender participantes, não apenas fontes
+### 3. Entender participantes, não apenas fontes
 
 - Diarização dos participantes remotos.
 - Associação opcional entre voz e nome, sempre confirmada pelo usuário.
 - Detecção de sobreposição de fala e melhor separação de vazamento acústico.
 
-### 3. Aumentar o contexto útil
+### 4. Aumentar o contexto útil
 
 - Evoluir a memória entre reuniões e o índice de projeto de BM25 para embeddings, reconhecendo sinônimos e
   paráfrases (hoje `store` não encontra `storage`).
@@ -52,7 +64,7 @@ explícito.
 - Conectores Jira e BigQuery no `ToolRegistry`. BigQuery precisa de read-only, dry-run e limite de bytes por
   query: um agente autônomo consultando dados tem raio de alcance maior que gasto de tokens.
 
-### 4. Fechar o ciclo de execução
+### 5. Fechar o ciclo de execução
 
 - Rascunhos de issues e tarefas para GitHub, Jira, Linear ou Todoist.
 - Follow-up por e-mail ou chat sujeito a revisão humana.

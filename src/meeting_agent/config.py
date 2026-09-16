@@ -111,6 +111,23 @@ class CopilotConfig(BaseModel):
     ollama_model: str = "qwen3:4b"
 
 
+class ListenConfig(BaseModel):
+    """`buddy listen`: an always-attentive microphone that keeps only what matters."""
+
+    # After a bare "Hey Buddy", how long the next utterance counts as the command.
+    wake_arm_seconds: float = Field(6.0, ge=1, le=30)
+    # A meeting batch goes out at a pause, at most once per interval, and never waits
+    # longer than max_wait. A session turn takes 40-90s, so sending faster only queues.
+    batch_min_seconds: float = Field(60.0, ge=5, le=900)
+    batch_pause_seconds: float = Field(3.0, ge=0.5, le=60)
+    batch_max_wait_seconds: float = Field(150.0, ge=10, le=1800)
+    # A meeting nobody ended still ends: silence, or a ceiling on its length.
+    meeting_idle_minutes: float = Field(10.0, ge=1, le=240)
+    meeting_max_minutes: float = Field(240.0, ge=5, le=1440)
+    event_log_max_mb: float = Field(5.0, ge=0.1, le=500)
+    event_line_max_chars: int = Field(6000, ge=500, le=50_000)
+
+
 class HotkeyConfig(BaseModel):
     toggle_meeting: str = "ctrl+alt+m"
     suggest_now: str = "ctrl+alt+space"
@@ -139,6 +156,7 @@ class Settings(BaseModel):
     audio: AudioConfig = AudioConfig()
     asr: ASRConfig = ASRConfig()
     copilot: CopilotConfig = CopilotConfig()
+    listen: ListenConfig = ListenConfig()
     hotkeys: HotkeyConfig = HotkeyConfig()
     ui: UIConfig = UIConfig()
     benchmark: BenchmarkConfig = BenchmarkConfig()

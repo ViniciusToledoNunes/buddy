@@ -102,10 +102,16 @@ def stop() -> None:
 
 @app.command()
 def status() -> None:
-    """Show current session status."""
+    """Show whether Buddy is listening, recording a meeting, or stopped."""
+    from .listener import listener_state
+
+    listening = listener_state()
+    if listening:
+        console.print_json(json.dumps({"listener": listening}))
+        return
     state = read_state()
     if not state or not _state_process_alive(state):
-        console.print("[dim]STOPPED - no capture is active.[/dim]")
+        console.print("[dim]STOPPED - not listening and no capture is active.[/dim]")
         return
     console.print_json(json.dumps(state))
 
@@ -198,6 +204,160 @@ def tool(
         print("Arguments must be a JSON object.")
         raise typer.Exit(code=2)
     print(registry.call(name, parsed))
+
+
+# ----------------------------------------------------------------- listening
+
+
+def _runtime_dir() -> Path:
+    return project_root() / ".meeting-agent"
+
+
+def _require_listener() -> None:
+    from .listener import listener_state
+
+    if not listener_state(_runtime_dir()):
+        console.print("[red]Buddy is not listening. Start it with `buddy listen --detach`.[/red]")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def listen(
+    detach: bool = typer.Option(False, "--detach", help="Run in the background and return."),
+    stop_listener: bool = typer.Option(False, "--stop", help="Shut down a running listener."),
+) -> None:
+    """Keep the microphone attentive for "Hey Buddy"; record meetings when asked.
+
+    Speech is kept only when it opens with the wake phrase or a meeting is being
+    recorded. Events go to the log that `buddy watch` follows.
+    """
+    from .listener import ListenDaemon, listener_state, request
+
+    runtime = _runtime_dir()
+    if stop_listener:
+        _require_listener()
+        request(runtime, "shutdown")
+        for _ in range(60):
+            if not listener_state(runtime):
+                console.print("Buddy stopped listening.")
+                return
+            time.sleep(0.5)
+        console.print("[yellow]Shutdown requested; the listener has not exited yet.[/yellow]")
+        return
+    if detach:
+        if listener_state(runtime):
+            console.print("Buddy is already listening.")
+            return
+        runtime.mkdir(parents=True, exist_ok=True)
+        log = (runtime / "listen.log").open("a", encoding="utf-8")
+        kwargs: dict = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL, "cwd": str(project_root())}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "listen"], **kwargs)
+        for _ in range(60):
+            state = listener_state(runtime)
+            if state:
+                console.print(f"Buddy is listening for \"Hey Buddy\" (pid {state['pid']}).")
+                return
+            time.sleep(0.5)
+        console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
+        raise typer.Exit(code=1)
+    settings = load_settings()
+    daemon = ListenDaemon(settings, runtime)
+    console.print('Listening for "Hey Buddy". Ctrl+C stops.')
+    try:
+        asyncio.run(daemon.run(asyncio.Event()))
+    except KeyboardInterrupt:
+        pass
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def watch(
+    follow: bool = typer.Option(False, "--follow", "-f", help="Keep running and print events as they happen."),
+    peek: bool = typer.Option(False, "--peek", help="Show new events without advancing the cursor."),
+    consumer: str = typer.Option("default", "--as", help="Cursor name; each watcher gets its own."),
+    as_json: bool = typer.Option(False, "--json", help="Print raw JSON records."),
+    interval: float = typer.Option(1.0, "--interval", help="Seconds between checks with --follow."),
+) -> None:
+    """Print what the listener noticed since this watcher last looked.
+
+    One line per event, so `--follow` can drive a Claude Code Monitor. It also reports
+    when the listener goes down: a silent monitor must not look like a quiet room.
+    """
+    from .listener import EventReader, format_event, listener_state
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    runtime = _runtime_dir()
+    safe = "".join(ch for ch in consumer if ch.isalnum() or ch in "-_") or "default"
+    reader = EventReader(runtime / "events.jsonl", runtime / "cursors" / f"{safe}.json")
+    cursor = reader.load_cursor()
+    settings = load_settings()
+    last_type = ""
+    was_up: bool | None = None
+    while True:
+        records, cursor = reader.read(cursor)
+        for record in records:
+            last_type = str(record.get("type", ""))
+            line = json.dumps(record, ensure_ascii=False) if as_json else format_event(
+                record, settings.listen.event_line_max_chars
+            )
+            print(line, flush=True)
+        if not peek:
+            reader.save_cursor(cursor)
+        if not follow:
+            if not listener_state(runtime):
+                print("LISTENER_DOWN Buddy is not listening.", flush=True)
+            return
+        up = listener_state(runtime) is not None
+        if up != was_up:
+            if not up and last_type != "LISTENER_DOWN":
+                print("LISTENER_DOWN Buddy is not listening; start it with `buddy listen --detach`.", flush=True)
+            last_type = "" if up else "LISTENER_DOWN"
+            was_up = up
+        time.sleep(max(0.2, interval))
+
+
+@app.command()
+def meeting(action: str = typer.Argument(..., help="start or stop")) -> None:
+    """Start or stop recording a meeting in the running listener."""
+    from .listener import request
+
+    if action not in {"start", "stop"}:
+        console.print("Use `buddy meeting start` or `buddy meeting stop`.")
+        raise typer.Exit(code=2)
+    _require_listener()
+    request(_runtime_dir(), f"{action}-meeting")
+    console.print(f"Meeting {action} requested.")
+
+
+@app.command()
+def pause() -> None:
+    """Close the microphone until `buddy resume`."""
+    from .listener import request
+
+    _require_listener()
+    request(_runtime_dir(), "pause")
+    console.print("Pause requested.")
+
+
+@app.command()
+def resume() -> None:
+    """Reopen the microphone after a pause."""
+    from .listener import request
+
+    _require_listener()
+    request(_runtime_dir(), "resume")
+    console.print("Resume requested.")
 
 
 if __name__ == "__main__":

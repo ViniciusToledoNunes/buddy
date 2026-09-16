@@ -8,6 +8,12 @@ Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, 
 
 ## O que o Buddy faz hoje
 
+Há dois modos de uso.
+
+- **Modo escuta (`buddy listen`)** — o recomendado. O microfone fica atento a "Hey Buddy"; reuniões são gravadas
+  quando você pede; uma sessão do Claude Code que você já tem aberta recebe os eventos e age. Sem tela própria.
+- **Modo sessão (`buddy start`)** — uma reunião por vez, com TUI no terminal e o Claude chamado em modo headless.
+
 - Captura separada do microfone (`ME`) e do áudio reproduzido pelo computador (`REMOTE`).
 - Transcrição **sempre local** com `faster-whisper`/CTranslate2 em CPU ou GPU compatível. Não existe modo de
   transcrição em nuvem: o áudio nunca sai da máquina.
@@ -91,7 +97,57 @@ buddy start
 
 Os comandos antigos `meeting-agent` e `meeting-agent-mcp` continuam disponíveis como aliases de compatibilidade.
 
-## Durante a reunião
+## Modo escuta
+
+```sh
+buddy listen --detach      # microfone atento a "Hey Buddy", em segundo plano
+buddy status               # listening, meeting ou paused
+buddy listen --stop
+```
+
+Depois, na sessão do Claude Code que você deixa aberta (a mesma de outros monitores, como o do Slack):
+
+```text
+Liga o Buddy.
+```
+
+A skill `buddy-listener` arma um `Monitor` sobre `buddy watch --follow --as claude-code` e passa a tratar os
+eventos. A partir daí, fale:
+
+| Você diz | Quem trata | O que acontece |
+|---|---|---|
+| "Hey Buddy, the meeting is starting" | o Buddy, em ~2s | passa a gravar microfone e áudio do sistema |
+| "Hey Buddy, the meeting is over" | o Buddy | encerra; o Claude escreve o resumo e as pendências |
+| "Hey Buddy, stop listening" | o Buddy | fecha o microfone até `buddy resume` |
+| "Hey Buddy, review PR 123" | o Claude | investiga e responde na sessão |
+| "Hey Buddy, post the update on Slack" | o Claude | escreve o rascunho e espera você aprovar o texto |
+| "Hey Buddy, approve 4" | o Claude | executa a proposta 4 exatamente como proposta |
+
+Um "Hey Buddy" sozinho arma a frase seguinte, dita em até 6 segundos. Comandos são em inglês: o ASR usa um modelo
+só-inglês, mais rápido e preciso nas reuniões.
+
+**O que é guardado.** Fala que não começa com "Hey Buddy" e não faz parte de uma reunião é transcrita em memória
+e descartada. Reuniões são gravadas por inteiro — cerca de 44 KB por hora de texto. O áudio do sistema só é
+capturado durante reunião.
+
+**Durante a reunião,** a sessão recebe um lote de falas nas pausas, no máximo um por minuto: uma notificação por
+fala faria o `Monitor` ser interrompido por excesso de eventos, e o Claude leva de 40 a 90 segundos por turno.
+
+**Segurança.** Só o microfone gera comandos: alguém na chamada dizendo "hey buddy, merge it" fica gravado, nunca
+é obedecido. O que sai da máquina — postar, comentar, aprovar, mergear, criar ticket — sempre passa por um
+rascunho que você aprova. A transcrição é tratada como dado, não como instrução.
+
+**Reunião esquecida.** Termina sozinha após 10 minutos sem fala ou 4 horas de duração
+(`listen.meeting_idle_minutes`, `listen.meeting_max_minutes`).
+
+**Vários leitores.** Cada `buddy watch --as <nome>` tem seu próprio cursor em disco. Uma segunda sessão não
+consome os eventos da primeira, e um monitor que expirou recebe, ao ser religado, o que aconteceu no intervalo.
+`--peek` olha sem avançar.
+
+Outros controles: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. O servidor MCP (`meeting_status`,
+`get_live_transcript`, `stop_meeting`) enxerga as reuniões abertas pelo modo escuta.
+
+## Durante a reunião (modo sessão)
 
 - `Ctrl+Alt+Space`: pede uma atualização do painel agora. Se o Claude já estiver trabalhando, o pedido entra na
   fila em vez de interromper — a pesquisa em curso não é jogada fora.
@@ -108,6 +164,7 @@ buddy devices
 buddy doctor
 buddy hotkeys
 buddy tool --list          # conectores somente leitura que o Claude usa (BigQuery, Datadog, Jira)
+buddy watch --as nome     # eventos do modo escuta desde a última leitura deste nome
 ```
 
 As sugestões aparecem na TUI. Com `ui.overlay: true`, também aparecem em uma janela sempre visível. Sugestões produzidas pela skill aparecem na conversa do Codex ou Claude.
@@ -235,7 +292,13 @@ Resultados variam por máquina. Execute `buddy benchmark` para medir o ambiente 
   na hora a uma pergunta recém-feita.
 - Regras de permissão casam por prefixo do comando. Se o Claude invocar um helper de um jeito diferente do
   previsto (`sh ~/bin/jira.sh` e não `~/bin/jira.sh`), a chamada é negada e aparece em `tool_denials`.
-- Uma sessão esquecida aberta enquanto o computador toca áudio continua transcrevendo e chamando o Claude.
+- No modo sessão, uma sessão esquecida aberta enquanto o computador toca áudio continua transcrevendo e
+  chamando o Claude. O modo escuta encerra reuniões sozinho.
+- No modo escuta, a detecção de "Hey Buddy" transcreve toda fala do microfone para decidir, ainda que
+  descarte o resto. Um detector dedicado de palavra de ativação evitaria isso e gastaria menos CPU (hoje
+  ~8% em repouso).
+- O `Monitor` pertence à sessão que o criou e expira a cada 30 minutos; a skill o religa. Com a sessão
+  fechada, os eventos esperam em disco.
 
 Veja o [roadmap de capacidades](docs/ROADMAP.md) para as próximas evoluções possíveis.
 
