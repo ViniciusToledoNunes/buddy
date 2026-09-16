@@ -64,6 +64,41 @@ class CopilotConfig(BaseModel):
     investigations_in_flight: int = Field(1, ge=1, le=4)
     # Connectors reach real company data, so they are read-only and a query that would
     # scan more than the limit is refused on the free dry run instead of being billed.
+    # The brain: the user's own Claude Code, run headless (llm_provider: claude-code).
+    # It runs in claude_workdir so it loads the CLAUDE.md that describes the user's work.
+    claude_workdir: str = ""
+    claude_model: str = ""
+    claude_effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
+    claude_timeout_seconds: float = Field(240.0, ge=20, le=900)
+    # User-level settings are left out on purpose: they commonly allow git push and
+    # similar, which an unattended run must never inherit.
+    claude_setting_sources: str = "project"
+    claude_allowed_tools: list[str] = [
+        "Read",
+        "Grep",
+        "Glob",
+        "WebSearch",
+        "WebFetch",
+        "Bash(git log *)",
+        "Bash(git show *)",
+        "Bash(git diff *)",
+        "Bash(git blame *)",
+    ]
+    claude_disallowed_tools: list[str] = [
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "PowerShell",
+        "Bash(git commit *)",
+        "Bash(git push *)",
+        "Bash(git reset *)",
+        "Bash(git checkout *)",
+        "Bash(rm *)",
+    ]
+    claude_extra_dirs: list[str] = []
+    claude_connectors: bool = True
+    claude_mcp: bool = False
+    claude_instructions: str = ""
     bigquery_enabled: bool = True
     # The project that pays for the query, which is not where the data lives.
     bigquery_billing_project: str = ""
@@ -95,7 +130,7 @@ class BenchmarkConfig(BaseModel):
 class Settings(BaseModel):
     language: Literal["en", "pt", "auto"] = "en"
     asr_mode: Literal["auto", "local-gpu", "local-cpu"] = "auto"
-    llm_provider: Literal["auto", "openai", "anthropic", "ollama", "disabled"] = "auto"
+    llm_provider: Literal["auto", "claude-code", "openai", "anthropic", "ollama", "disabled"] = "auto"
     save_audio: bool = False
     meetings_dir: str = "meetings"
     # Extra env files to load, the way a wrapper script sources them. Credentials that

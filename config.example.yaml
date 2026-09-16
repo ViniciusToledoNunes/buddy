@@ -1,6 +1,6 @@
 language: en                 # en, pt, or auto
 asr_mode: auto               # auto, local-gpu, local-cpu (always local)
-llm_provider: auto           # auto, openai, anthropic, ollama, disabled
+llm_provider: auto           # claude-code, auto, openai, anthropic, ollama, disabled
 save_audio: false
 meetings_dir: meetings
 # Extra env files to source, for credentials a wrapper script loads per command and
@@ -29,6 +29,22 @@ asr:
   max_segment_seconds: 12
 
 copilot:
+  # --- brain: your own Claude Code, run headless (llm_provider: claude-code) ---------
+  # Runs here so it loads the CLAUDE.md that describes your work. Empty uses your home.
+  claude_workdir: ''
+  claude_model: ''                  # empty uses Claude Code's default; e.g. opus, sonnet
+  claude_effort: ''                 # low | medium | high | xhigh | max
+  claude_timeout_seconds: 240
+  claude_setting_sources: project   # never inherit user-level allow rules such as git push
+  claude_connectors: true           # BigQuery and Datadog through the guarded `buddy tool`
+  claude_mcp: false
+  # Read-only by default. Add rules for your own helpers, and block their write verbs:
+  #   - Bash(sh ~/bin/jira.sh get *)        in claude_allowed_tools
+  #   - Bash(sh ~/bin/jira.sh create *)     in claude_disallowed_tools
+  claude_allowed_tools: [Read, Grep, Glob, WebSearch, WebFetch, 'Bash(git log *)', 'Bash(git show *)', 'Bash(git diff *)', 'Bash(git blame *)']
+  claude_disallowed_tools: [Edit, Write, NotebookEdit, PowerShell, 'Bash(git commit *)', 'Bash(git push *)', 'Bash(git reset *)', 'Bash(git checkout *)', 'Bash(rm *)']
+  claude_extra_dirs: []
+  claude_instructions: ''           # how to call your helpers, appended to the brain's prompt
   enabled: true
   automatic_suggestions: true
   # Buddy re-evaluates the whole suggestion set whenever new speech arrives.

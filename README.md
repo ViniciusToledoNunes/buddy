@@ -11,15 +11,14 @@ Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, 
 - Captura separada do microfone (`ME`) e do áudio reproduzido pelo computador (`REMOTE`).
 - Transcrição **sempre local** com `faster-whisper`/CTranslate2 em CPU ou GPU compatível. Não existe modo de
   transcrição em nuvem: o áudio nunca sai da máquina.
-- **Painel contínuo.** Qualquer fala nova reavalia o conjunto inteiro e substitui o painel, em vez de empilhar
-  conselhos; quando o assunto se resolve, o painel é esvaziado.
-- **Contexto largo e cacheado.** O prefixo do prompt carrega o mapa do repositório inteiro (cada arquivo com uma
-  linha de resumo) e a memória estruturada de todas as reuniões anteriores. Como isso não muda durante a reunião,
-  o *prompt caching* funciona: medido em 53% do input vindo do cache já no segundo refresh.
-- **Investigador autônomo.** Quando o painel levanta uma pergunta que não consegue responder do que já sabe, o
-  Buddy dispara sozinho uma pesquisa em segundo plano com ferramentas reais — busca no projeto, leitura de
-  arquivo, histórico do git e reuniões anteriores. A resposta chega em ~10s no painel `INVESTIGATION`, cita
-  `caminho:linha` e é gravada em `investigations.md`. O painel continua atualizando enquanto isso.
+- **O seu Claude Code é o cérebro.** A cada fala nova, o Buddy chama o Claude Code em modo headless no diretório
+  do seu trabalho. Ele chega sabendo quem você é e como os seus sistemas funcionam — pelo `CLAUDE.md` e pela
+  memória que já usa no dia a dia — e pesquisa Jira, Slack, git, BigQuery e Datadog quando a conversa pede.
+  Roda na sua assinatura, não em crédito de API.
+- **Painel contínuo.** Cada resposta substitui o conjunto inteiro de sugestões, em vez de empilhar; quando o
+  assunto se resolve, o painel é esvaziado. Tudo fica também em `suggestions.md`, para ler depois.
+- **Uma sessão por reunião.** O Claude lembra o que já pesquisou minutos antes e recebe só as falas novas; o
+  contexto compartilhado vem do cache.
 - **Investigação manual via Codex/Claude.** A skill `meeting-copilot-context` e o MCP continuam disponíveis
   para quando você quiser perguntar diretamente.
 - Memória entre reuniões: o Buddy recupera reuniões anteriores relacionadas usando apenas memória estruturada
@@ -94,7 +93,8 @@ Os comandos antigos `meeting-agent` e `meeting-agent-mcp` continuam disponíveis
 
 ## Durante a reunião
 
-- `Ctrl+Alt+Space`: força um refresh imediato do painel, sem esperar o intervalo.
+- `Ctrl+Alt+Space`: pede uma atualização do painel agora. Se o Claude já estiver trabalhando, o pedido entra na
+  fila em vez de interromper — a pesquisa em curso não é jogada fora.
 - `Ctrl+Alt+M`: encerra a sessão.
 - `buddy stop`: encerra a sessão a partir de outro terminal.
 - `buddy status`: informa se existe captura ativa.
@@ -107,6 +107,7 @@ buddy config
 buddy devices
 buddy doctor
 buddy hotkeys
+buddy tool --list          # conectores somente leitura que o Claude usa (BigQuery, Datadog, Jira)
 ```
 
 As sugestões aparecem na TUI. Com `ui.overlay: true`, também aparecem em uma janela sempre visível. Sugestões produzidas pela skill aparecem na conversa do Codex ou Claude.
@@ -147,71 +148,74 @@ Backends de captura:
 Cada sessão fica em `meetings/YYYY-MM-DD_HHMMSS/`:
 
 ```text
-transcript.txt
-transcript.jsonl
-summary.md
-metadata.json
-copilot.json
+transcript.txt      transcrição legível, gravada a cada fala
+transcript.jsonl    a mesma, estruturada
+suggestions.md      tudo que o painel sugeriu, com o motivo
+summary.md          relatório final
+metadata.json       início, fim, backend de ASR e falhas de subsistema
+copilot.json        memória, sugestões atuais, uso, último erro, chamadas bloqueadas e id da sessão do Claude
 ```
+
+O `copilot.json` guarda o `brain_session_id`. Depois da reunião, no diretório configurado em `claude_workdir`,
+`claude --resume <id>` abre a mesma conversa — com tudo que o Claude leu e pesquisou durante a reunião.
 
 Com `save_audio: false`, padrão do projeto, o áudio é descartado após o processamento. Quando habilitado, são criados `audio_me.wav` e `audio_remote.wav`.
 
-## Modelos
+## O cérebro
 
-| Camada | Quando | Modelo | Ferramentas | Papel |
-|---|---|---|---|---|
-| Reflexo | a cada ~10s | `gpt-5.4-mini` | nenhuma | mantém o painel vivo a partir do contexto pré-carregado |
-| Investigador | quando o reflexo levanta uma pergunta | `gpt-5.4` | busca, leitura, git, reuniões | vai verificar antes de afirmar |
-| Codex / Claude | quando você pede | skill + MCP | nativas do agente | investigação manual |
+Com `llm_provider: claude-code`, cada análise é uma execução do Claude Code headless:
 
-O reflexo não pesquisa por uma razão de latência: um tool loop custa um turno de modelo por ferramenta, e o
-painel atualiza a cada ~10s. Por isso a pesquisa roda **em segundo plano** e sem bloquear — um assunto de
-reunião dura minutos, então uma resposta que chega 10 a 40 segundos depois ainda é útil.
+| Decisão | Por quê |
+|---|---|
+| roda em `claude_workdir` | é o diretório cujo `CLAUDE.md` descreve o seu trabalho; o Buddy não tem esse conhecimento |
+| `--setting-sources project` | não herda as regras de *allow* do usuário, que costumam liberar `git push` |
+| `--permission-mode dontAsk` | ninguém está olhando para aprovar; o que não está liberado é negado |
+| `claude_allowed_tools` / `claude_disallowed_tools` | só leitura; verbos de escrita dos seus helpers bloqueados explicitamente |
+| sem `ANTHROPIC_API_KEY` no ambiente | a chave faria o Claude Code cobrar a API em vez da assinatura |
+| `claude.exe` nativo no Windows | o shim `.cmd` do npm corta o prompt de sistema na primeira quebra de linha |
+| `--session-id` e depois `--resume` | uma conversa por reunião; do segundo turno em diante o contexto vem do cache |
 
-Ferramentas do investigador: busca no projeto, leitura de arquivo, histórico do git, reuniões anteriores e —
-quando disponíveis — BigQuery, Jira e Datadog, todos **somente leitura**. Cada conector só é oferecido ao modelo se suas
-credenciais existirem, para não gastar um turno descobrindo que a ferramenta não funciona.
+A transcrição é tratada como dado, nunca como instrução: se alguém na reunião pedir uma ação, o Claude no máximo
+sugere que você a faça.
 
-**BigQuery** usa as credenciais da própria máquina: o Buddy roda como o mesmo usuário do `gcloud`. Toda query
-passa por quatro proteções — apenas `SELECT`, dry-run obrigatório para estimar bytes, recusa acima de
-`bigquery_max_scan_gb`, e `--maximum_bytes_billed` como rede final. Explorar schema (`ls`, `show`) é metadado e
-não custa nada.
+Chamadas negadas aparecem no STATUS como `tools: denied` e ficam em `copilot.json`, para você decidir se amplia a
+regra ou se ela deve continuar bloqueada. Duas falhas seguidas do cérebro ficam vermelhas e o motivo é gravado —
+uma semana de reuniões sem sugestão passou despercebida justamente por falta disso.
 
-**Jira** precisa de `JIRA_URL`, `JIRA_EMAIL` e `JIRA_API_TOKEN`. **Datadog** precisa de `DD_SITE`, `DD_API_KEY`
-e `DD_APP_KEY` — as três; sem `DD_SITE` não há como montar a URL base. Ambos só leem: criar ou transicionar
-issue, silenciar ou resolver monitor continuam fora de escopo para ação automática.
+**BigQuery e Datadog** chegam ao Claude pelo `buddy tool`, que aplica as proteções em código: apenas `SELECT`,
+dry-run obrigatório, recusa acima de `bigquery_max_scan_gb` e `--maximum_bytes_billed`. `buddy tool --list` mostra
+o que existe. **Jira e Slack** usam os seus próprios helpers, liberados só nos subcomandos de leitura.
 
-Credenciais que vivem em arquivo e nunca são exportadas — o padrão de um wrapper que faz `source` a cada
-comando — entram por `env_files` no `config.yaml`, não pelo ambiente.
+Credenciais que vivem em arquivo e nunca são exportadas entram por `env_files` no `config.yaml`.
 
-Adicionar um conector novo é registrar um schema e um handler no `ToolRegistry`; o loop que os executa não muda.
+### Latência e consumo
 
-O provedor é configurável (`llm_provider`): `openai`, `anthropic` ou `ollama`. Com `auto`, a OpenAI vem primeiro
-quando há chave, para usar a conta que já tem saldo.
+Medido numa conversa de trabalho: **86s** no primeiro turno (partida fria, com consulta ao Datadog) e **43s** no
+seguinte (Jira e git). Serve para posicionamento e respostas a perguntas que ficam no ar; não é resposta
+instantânea. `claude_model: sonnet` ou `claude_effort: medium` reduzem o tempo.
 
-O prefixo do prompt — instruções mais trechos de projeto — é marcado para *prompt caching*, porque é a parte que
-não muda durante a reunião. Leituras de cache custam cerca de um décimo da entrada normal, que é o que torna um
-refresh a cada poucos segundos viável.
+Nada é cobrado por token, mas cada execução conta para os limites da sua assinatura. O `usage` em `copilot.json`
+traz uma estimativa em dólares (`cost_usd_estimate`) para você acompanhar: no teste, $0,37 no primeiro turno e
+$0,10 nos seguintes. O Claude só roda quando há fala nova, então silêncio não consome nada.
 
-Ollama continua disponível com `llm_provider: ollama` para operação totalmente offline.
+### Outros provedores
+
+`openai`, `anthropic` e `ollama` continuam disponíveis, com o motor antigo: contexto pré-carregado, índice de
+projeto e investigador em segundo plano. Nenhum deles conhece você, e o `auto` nunca escolhe o `claude-code` —
+gastar a assinatura é uma escolha explícita.
 
 ## Provedores e privacidade
 
-Copie `.env.example` para `.env` e preencha somente os provedores desejados. OpenAI, Anthropic e Ollama são opcionais; a transcrição local funciona sem chave.
+O áudio nunca sai da máquina: a transcrição é sempre local e não existe modo de ASR em nuvem.
 
-O simples fato de existir uma chave não permite upload de áudio. Para usar ASR em nuvem são necessárias as duas configurações:
+O que chega ao modelo é texto: a transcrição recente, a memória da reunião e aquilo que o próprio Claude decidir
+ler com as ferramentas liberadas. Com `claude-code`, isso vai para a Anthropic pela sua conta do Claude Code, sob as
+mesmas regras do seu uso normal.
 
-```yaml
-asr_mode: cloud-fast
-```
+Iniciar por MCP exige `BUDDY_ALLOW_MCP_START=true` e `confirmed=true` na chamada. Verifique consentimento dos
+participantes, legislação local e políticas corporativas antes de gravar.
 
-```dotenv
-BUDDY_ALLOW_CLOUD_AUDIO=true
-```
-
-Iniciar por MCP também exige `BUDDY_ALLOW_MCP_START=true` e `confirmed=true` na chamada. Verifique consentimento dos participantes, legislação local e políticas corporativas antes de gravar ou transmitir conteúdo.
-
-Os nomes antigos das variáveis `MEETING_AGENT_*` e `MEETING_COPILOT_ALLOW_MCP_START` continuam aceitos para compatibilidade.
+Os nomes antigos das variáveis `MEETING_AGENT_*` e `MEETING_COPILOT_ALLOW_MCP_START` continuam aceitos.
 
 ## Resultado nesta máquina
 
@@ -227,13 +231,11 @@ Resultados variam por máquina. Execute `buddy benchmark` para medir o ambiente 
   validados. Captura, ASR e o helper Swift dependem de hardware e não entram no gate automatizado.
 - O Buddy ainda não possui aplicativo desktop completo, bandeja do sistema ou instalador assinado.
 - Integrações com calendário, plataformas de reunião, Jira, GitHub ou CRM ainda não são automáticas.
-- O ranqueamento de trechos é léxico (BM25), não semântico: `store` não encontra `storage`. Isso importa menos
-  agora que o mapa completo do projeto e todas as memórias vão no prefixo — o modelo escolhe, não o ranqueador.
-- O consumo é real: ~5K tokens de entrada por refresh, dos quais cerca de metade sai do cache depois do primeiro.
-  O `usage` gravado em `copilot.json` mostra o número verdadeiro de cada reunião.
-- Trechos de código entram no prompt da camada 1. Arquivos de credencial são excluídos por construção
-  (`.env*`, `*.pem`, `*.key`, nomes com `password`/`credential`), mas se o seu código-fonte contém segredos em
-  texto puro, desligue com `project_context_enabled: false`.
+- Cada atualização leva de 40 a 90 segundos com o Claude Code. O painel acompanha a reunião, mas não responde
+  na hora a uma pergunta recém-feita.
+- Regras de permissão casam por prefixo do comando. Se o Claude invocar um helper de um jeito diferente do
+  previsto (`sh ~/bin/jira.sh` e não `~/bin/jira.sh`), a chamada é negada e aparece em `tool_denials`.
+- Uma sessão esquecida aberta enquanto o computador toca áudio continua transcrevendo e chamando o Claude.
 
 Veja o [roadmap de capacidades](docs/ROADMAP.md) para as próximas evoluções possíveis.
 

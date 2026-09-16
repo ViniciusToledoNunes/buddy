@@ -154,5 +154,51 @@ def hotkeys() -> None:
         listener.stop()
 
 
+# Connector tools only: the brain has its own file and search tools, so exposing the
+# project index here would just search Buddy's repository again.
+CONNECTOR_PREFIXES = ("bigquery_", "datadog_", "jira_", "search_past_meetings")
+
+
+@app.command()
+def tool(
+    name: str = typer.Argument("", help="Tool to run, as shown by --list."),
+    arguments: str = typer.Argument("{}", help="JSON object with the tool's arguments."),
+    list_tools: bool = typer.Option(False, "--list", help="List the available read-only tools."),
+) -> None:
+    """Run one read-only connector (BigQuery, Datadog, Jira) and print its result.
+
+    This is how the Claude Code brain reaches the guarded connectors: they refuse writes
+    and oversized queries in code, whatever the caller asks for.
+    """
+    from .investigator import Investigator
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    settings = load_settings()
+    meetings = Path(settings.meetings_dir)
+    if not meetings.is_absolute():
+        meetings = project_root() / meetings
+    registry = Investigator(settings, project_root(), meetings).tools
+    schemas = [s for s in registry.schemas if s["name"].startswith(CONNECTOR_PREFIXES)]
+    if list_tools or not name:
+        for schema in schemas:
+            properties = schema.get("parameters", {}).get("properties", {})
+            args = ", ".join(f"{key}: {value.get('type', '?')}" for key, value in properties.items())
+            print(f"{schema['name']}({args}) - {schema['description']}")
+        return
+    if name not in {s["name"] for s in schemas}:
+        print(f"Unknown tool {name!r}. Run with --list.")
+        raise typer.Exit(code=2)
+    try:
+        parsed = json.loads(arguments or "{}")
+    except ValueError as exc:
+        print(f"Arguments must be a JSON object: {exc}")
+        raise typer.Exit(code=2)
+    if not isinstance(parsed, dict):
+        print("Arguments must be a JSON object.")
+        raise typer.Exit(code=2)
+    print(registry.call(name, parsed))
+
+
 if __name__ == "__main__":
     app()

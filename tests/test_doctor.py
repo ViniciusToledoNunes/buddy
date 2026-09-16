@@ -53,3 +53,43 @@ def test_a_missing_key_is_not_a_failure(monkeypatch):
     checks = {check.name: check for check in run_doctor(Settings())}
 
     assert checks["Anthropic API"].state == "not-needed"
+
+
+def test_the_api_is_not_probed_when_the_brain_does_not_use_it(monkeypatch):
+    """An unused key with no credit would otherwise report a failure that does not
+    matter, next to a brain that works."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    probed = []
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: probed.append(a) or _Response(200, {}))
+
+    checks = {check.name: check for check in run_doctor(Settings(llm_provider="claude-code"))}
+
+    assert probed == []
+    assert checks["Anthropic API"].state == "not-needed"
+
+
+def test_the_brain_check_reports_what_a_run_needs(tmp_path, monkeypatch):
+    from meeting_agent import claude_code
+    from meeting_agent.doctor import brain_check
+
+    def settings(workdir):
+        return Settings.model_validate({"llm_provider": "claude-code", "copilot": {"claude_workdir": str(workdir)}})
+
+    monkeypatch.setattr(claude_code, "claude_binary", lambda: None)
+    assert "not installed" in brain_check(settings(tmp_path)).detail
+
+    monkeypatch.setattr(claude_code, "claude_binary", lambda: "claude")
+    assert brain_check(settings(tmp_path / "gone")).state == "failed"
+
+    bare = brain_check(settings(tmp_path))
+    assert bare.state == "warning" and "none found" in bare.detail
+
+    (tmp_path / "CLAUDE.local.md").write_text("context", encoding="utf-8")
+    ready = brain_check(settings(tmp_path))
+    assert ready.state == "ok" and "CLAUDE.local.md" in ready.detail
+
+
+def test_a_disabled_engine_is_not_a_failure():
+    from meeting_agent.doctor import brain_check
+
+    assert brain_check(Settings(llm_provider="disabled")).state == "not-needed"

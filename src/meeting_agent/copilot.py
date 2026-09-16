@@ -75,7 +75,8 @@ def add_usage(total: dict[str, int], new: dict[str, int]) -> dict[str, int]:
     """
     merged = dict(total)
     for field, value in new.items():
-        merged[field] = merged.get(field, 0) + int(value or 0)
+        # round() keeps integers integral and stops float noise in cost estimates.
+        merged[field] = round(merged.get(field, 0) + (value or 0), 6)
     merged["calls"] = merged.get("calls", 0) + 1
     return merged
 
@@ -85,9 +86,18 @@ class LLMProvider:
     # A class attribute so a subclass that does not call super().__init__() still has it;
     # the accounting must never be the reason an analysis fails.
     last_usage: dict[str, int] | None = None
+    # A stateful provider keeps one conversation per meeting, so after its first call it
+    # only needs the speech it has not seen yet.
+    stateful = False
+    # A provider with its own tools and context needs neither the project map nor the
+    # background investigator.
+    has_own_tools = False
 
     def __init__(self) -> None:
         self.last_usage = None
+
+    def session_fresh(self) -> bool:
+        return True
 
     async def complete(self, system: str, prompt: str) -> str:
         raise NotImplementedError
@@ -122,8 +132,15 @@ class OpenAIProvider(LLMProvider):
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post("https://api.openai.com/v1/responses", headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
+        if response.status_code != 200:
+            # A bare 429 read the same for "slow down" and "no credit left"; the second
+            # silenced every meeting for a week.
+            try:
+                reason = response.json().get("error", {}).get("message", "")
+            except ValueError:
+                reason = response.text[:300]
+            raise RuntimeError(f"OpenAI HTTP {response.status_code}: {reason[:300]}")
+        data = response.json()
         usage = data.get("usage") or {}
         details = usage.get("input_tokens_details") or {}
         self.last_usage = {
@@ -209,10 +226,17 @@ class OllamaProvider(LLMProvider):
         return body.get("message", {}).get("content", "")
 
 
-def choose_provider(settings: Settings, local_asr: bool) -> LLMProvider | None:
+def choose_provider(
+    settings: Settings, local_asr: bool, meetings_dir: Path | None = None
+) -> LLMProvider | None:
     requested = settings.llm_provider
     if requested == "disabled" or not settings.copilot.enabled:
         return None
+    if requested == "claude-code":
+        from .claude_code import ClaudeCodeProvider
+
+        brain = ClaudeCodeProvider(settings, meetings_dir)
+        return brain if brain.available() else None
     timeout = settings.copilot.request_timeout_seconds
     if requested in {"auto", "openai"} and os.getenv("OPENAI_API_KEY"):
         return OpenAIProvider(
@@ -263,6 +287,7 @@ class CopilotWorker:
         project_index: ProjectIndex | None = None,
         investigator: Any | None = None,
         investigations_path: Path | None = None,
+        suggestions_path: Path | None = None,
     ) -> None:
         self.settings = settings
         self.provider = provider
@@ -290,6 +315,12 @@ class CopilotWorker:
         self.investigations: deque[dict[str, str]] = deque(maxlen=20)
         self._investigated: set[str] = set()
         self._investigation_tasks: set[asyncio.Task[None]] = set()
+        self.suggestions_path = suggestions_path
+        # Newest transcript line a stateful provider has already been shown.
+        self._sent_upto = 0.0
+        self._failures = 0
+        self.last_error = ""
+        self.tool_denials: deque[dict[str, Any]] = deque(maxlen=20)
 
     def _write_snapshot(self) -> None:
         if self.snapshot_path is None:
@@ -311,6 +342,9 @@ class CopilotWorker:
             ],
             "recent_transcript": self._context()[-20_000:],
             "provider": self.provider.name if self.provider else "disabled",
+            "last_error": self.last_error,
+            "tool_denials": list(self.tool_denials),
+            "brain_session_id": getattr(self.provider, "session_id", None),
         }
         temporary = self.snapshot_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -395,6 +429,53 @@ class CopilotWorker:
         except OSError as exc:
             self.bus.publish(StatusEvent("investigator", "degraded", f"not saved: {exc}"))
 
+    def _own_tools(self) -> bool:
+        return bool(getattr(self.provider, "has_own_tools", False))
+
+    def _build_prompt(self, manual: bool, context: str) -> tuple[str, float]:
+        """The user message for one analysis, and the newest line it covers."""
+        question = "What could I contribute right now?" if manual else "Identify only genuinely useful interventions now."
+        previous = json.dumps([asdict(item) for item in self.current_suggestions], ensure_ascii=False)
+        newest = self.recent[-1][0] if self.recent else 0.0
+        if self._own_tools():
+            if self.provider.session_fresh():
+                opening = (
+                    f"Meeting memory so far:\n{self.memory.compact or '(none yet)'}\n\n"
+                    f"Recent transcript of meeting {self.current_meeting_id or ''}:\n{context}"
+                )
+            else:
+                unseen = [line for moment, line in self.recent if moment > self._sent_upto]
+                opening = "New transcript since your last update:\n" + (
+                    "\n".join(unseen) or "(no new speech)"
+                )
+            return f"{opening}\n\nCurrent suggestion set to replace:\n{previous}\n\nRequest: {question}", newest
+        prompt = f"""Meeting memory:\n{self.memory.compact or '(none yet)'}
+
+Current suggestion set to replace:\n{previous}
+
+Project excerpts ranked most relevant right now (cite a path only when the code truly supports the point):\n{self._project_block}
+
+Recent transcript:\n{context}
+
+Request: {question}
+Output language for speakable suggestions: {self.settings.copilot.output_language}."""
+        return prompt, newest
+
+    def _append_suggestions(self, revision: int, suggestions: list[SuggestionEvent]) -> None:
+        """Keep a readable log of what Buddy suggested, for reading after the meeting."""
+        if self.suggestions_path is None or not suggestions:
+            return
+        lines = [f"\n## {utc_now()} - revision {revision}\n"]
+        for item in suggestions:
+            lines.append(f"- **{item.kind}** {item.text}")
+            if item.reason:
+                lines.append(f"  - _{item.reason}_")
+        try:
+            with self.suggestions_path.open("a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            self.bus.publish(StatusEvent("copilot", "degraded", f"suggestions not logged: {exc}"))
+
     async def _static_prefix(self) -> str:
         """The project map and every prior meeting's memory.
 
@@ -404,6 +485,10 @@ class CopilotWorker:
         the whole table of contents and decides for itself.
         """
         if self._static_context is not None:
+            return self._static_context
+        if self._own_tools():
+            # The brain reads the user's own context and earlier meetings itself.
+            self._static_context = ""
             return self._static_context
         blocks: list[str] = []
         copilot = self.settings.copilot
@@ -439,6 +524,8 @@ class CopilotWorker:
         Everything volatile -- transcript, current suggestions, matched excerpts -- stays
         in the user message, because a cached prefix ends at the first byte that changes.
         """
+        if self._own_tools():
+            return self.provider.system_prompt()
         if not self._static_context:
             return SYSTEM_PROMPT
         return SYSTEM_PROMPT + "\n\n" + self._static_context
@@ -459,18 +546,7 @@ class CopilotWorker:
             )
         await self._static_prefix()
         await self._refresh_project_context(context)
-        question = "What could I contribute right now?" if manual else "Identify only genuinely useful interventions now."
-        previous = json.dumps([asdict(item) for item in self.current_suggestions], ensure_ascii=False)
-        prompt = f"""Meeting memory:\n{self.memory.compact or '(none yet)'}
-
-Current suggestion set to replace:\n{previous}
-
-Project excerpts ranked most relevant right now (cite a path only when the code truly supports the point):\n{self._project_block}
-
-Recent transcript:\n{context}
-
-Request: {question}
-Output language for speakable suggestions: {self.settings.copilot.output_language}."""
+        prompt, newest = self._build_prompt(manual, context)
         self.bus.publish(StatusEvent("llm", "working", "manual" if manual else "automatic"))
         try:
             raw = await self.provider.complete(self._system_prompt(), prompt)
@@ -485,6 +561,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
             self.current_suggestions = current
             self.suggestion_revision += 1
             self.bus.publish(SuggestionBatchEvent(self.suggestion_revision, list(current)))
+            await asyncio.to_thread(self._append_suggestions, self.suggestion_revision, list(current))
             self.memory.compact = str(data.get("memory_update") or self.memory.compact)
             for attr, key in (
                 ("topics", "topics"),
@@ -498,14 +575,30 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                         values.append(str(value))
             if self.provider.last_usage:
                 self.usage["panel"] = add_usage(self.usage["panel"], self.provider.last_usage)
-            self._spawn_investigations()
+            denials = list(getattr(self.provider, "last_denials", None) or [])
+            if denials:
+                self.tool_denials.extend(
+                    {"tool": d.get("tool_name"), "input": str(d.get("tool_input", ""))[:200]} for d in denials
+                )
+                self.bus.publish(StatusEvent("tools", "denied", f"{len(denials)} tool call(s) blocked"))
+            self._sent_upto = newest
+            self._failures = 0
+            self.last_error = ""
+            if not self._own_tools():
+                self._spawn_investigations()
             self.last_analysis = time.monotonic()
             await self._save_snapshot()
             self.bus.publish(StatusEvent("llm", "connected", self.provider.name))
             return True
         except Exception as exc:
             self.last_analysis = time.monotonic()
-            self.bus.publish(StatusEvent("llm", "retrying", f"{type(exc).__name__}: {exc}"))
+            self._failures += 1
+            self.last_error = f"{type(exc).__name__}: {exc}"[:500]
+            # One failure is a blip; a second in a row means nothing will appear until
+            # someone acts, which has to be impossible to miss.
+            state = "failed" if self._failures >= 2 else "retrying"
+            self.bus.publish(StatusEvent("llm", state, self.last_error))
+            await self._save_snapshot()
             return False
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -516,6 +609,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
         dirty = False
         last_transcript = 0.0
         analysis: asyncio.Task[bool] | None = None
+        manual_pending = False
         try:
             while not stop.is_set():
                 event_task = asyncio.create_task(queue.get())
@@ -527,9 +621,14 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
                     task.cancel()
                 analysis, dirty = self._collect_analysis(analysis, dirty)
                 if manual_task in done:
-                    # An explicit request outranks an automatic refresh already running.
-                    if analysis is not None:
+                    manual_pending = True
+                    # An explicit request outranks an automatic refresh -- unless that
+                    # refresh is a stateful run whose research would be thrown away.
+                    if analysis is not None and not getattr(self.provider, "stateful", False):
                         analysis.cancel()
+                        analysis = None
+                if manual_pending and analysis is None:
+                    manual_pending = False
                     dirty = False
                     analysis = asyncio.create_task(self._analyze(manual=True))
                     continue
@@ -593,7 +692,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
         if self.provider is None:
             return (
                 REPORT_SECTIONS
-                + "\n\nLLM summary unavailable. Set ANTHROPIC_API_KEY or configure Ollama explicitly.\n"
+                + "\n\nLLM summary unavailable. Set llm_provider (claude-code, openai, anthropic or ollama).\n"
                 + "\n## Meeting memory captured\n\n"
                 + (self.memory.compact or "No structured memory was produced.")
             )
@@ -603,7 +702,12 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
 Distinguish ME's actions from other people's actions. Do not invent details.
 
 Transcript:\n{transcript}"""
+        system = "You produce concise, factual meeting reports in Markdown."
+        if self._own_tools():
+            from .claude_code import REPORT_SYSTEM_PROMPT
+
+            system = REPORT_SYSTEM_PROMPT
         try:
-            return await self.provider.complete("You produce concise, factual meeting reports in Markdown.", prompt)
+            return await self.provider.complete(system, prompt)
         except Exception as exc:
             return REPORT_SECTIONS + f"\n\nReport generation failed: {type(exc).__name__}: {exc}"

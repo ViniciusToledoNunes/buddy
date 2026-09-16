@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import ctranslate2
 import psutil
@@ -61,7 +62,7 @@ def run_doctor(settings: Settings) -> list[Check]:
     checks.append(Check("Audio backend", "ok", f"{capabilities['platform']} / {capabilities['backend']}"))
     for result in probe_audio(settings.audio):
         checks.append(Check(result["name"], result["state"], result["detail"]))
-    if os.getenv("ANTHROPIC_API_KEY"):
+    if os.getenv("ANTHROPIC_API_KEY") and settings.llm_provider in {"anthropic", "auto"}:
         # A real one-token completion, not /v1/models. Listing models succeeds on an
         # account with no credit balance, so the cheap check certifies a pipeline that
         # cannot answer a single request.
@@ -94,12 +95,40 @@ def run_doctor(settings: Settings) -> list[Check]:
         except Exception as exc:
             checks.append(Check("Anthropic API", "failed", f"{type(exc).__name__}: {exc}"))
     else:
-        checks.append(Check("Anthropic API", "not-needed", "ANTHROPIC_API_KEY absent; local ASR still works"))
-    if os.getenv("ANTHROPIC_API_KEY") or settings.llm_provider == "ollama":
-        checks.append(Check("LLM", "ok", f"configured provider: {settings.llm_provider}"))
-    else:
-        checks.append(Check("LLM", "warning", "no provider key; transcription works, suggestions/report use fallback"))
+        reason = (
+            f"not used by llm_provider {settings.llm_provider}"
+            if os.getenv("ANTHROPIC_API_KEY")
+            else "ANTHROPIC_API_KEY absent; local ASR still works"
+        )
+        checks.append(Check("Anthropic API", "not-needed", reason))
+    checks.append(brain_check(settings))
     return checks
+
+
+def brain_check(settings: Settings) -> Check:
+    """Whether the configured suggestion engine can actually run.
+
+    A real Claude Code run loads the whole work context, which is too heavy for a health
+    check, so this confirms the pieces a run needs instead of spending one.
+    """
+    provider = settings.llm_provider
+    if provider == "disabled":
+        return Check("LLM", "not-needed", "suggestions disabled; transcription still works")
+    if provider == "claude-code":
+        from .claude_code import claude_binary
+
+        binary = claude_binary()
+        workdir = Path(settings.copilot.claude_workdir).expanduser() if settings.copilot.claude_workdir else Path.home()
+        if binary is None:
+            return Check("LLM", "failed", "claude-code selected but the claude CLI is not installed")
+        if not workdir.is_dir():
+            return Check("LLM", "failed", f"claude_workdir does not exist: {workdir}")
+        context = [name for name in ("CLAUDE.md", "CLAUDE.local.md") if (workdir / name).is_file()]
+        detail = f"Claude Code in {workdir}; context files: {', '.join(context) or 'none found'}"
+        return Check("LLM", "ok" if context else "warning", detail)
+    if provider == "ollama" or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY"):
+        return Check("LLM", "ok", f"configured provider: {provider}")
+    return Check("LLM", "warning", "no provider available; transcription works, suggestions/report do not")
 
 
 def hardware_snapshot() -> dict[str, object]:

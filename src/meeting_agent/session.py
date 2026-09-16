@@ -90,8 +90,13 @@ async def run_session(settings: Settings) -> Path:
         "compute_type": selection.compute_type,
         "reason": selection.reason,
     })
-    provider = choose_provider(settings, local_asr=selection.mode.startswith("local"))
+    provider = choose_provider(
+        settings, local_asr=selection.mode.startswith("local"), meetings_dir=storage.directory.parent
+    )
     memory_index = MeetingMemoryIndex(storage.directory.parent, settings.copilot.semantic_memory_max_meetings)
+    # A brain with its own tools and context (Claude Code) needs neither Buddy's project
+    # index nor its investigator; both would only duplicate what it already does.
+    own_tools = bool(getattr(provider, "has_own_tools", False))
     copilot = CopilotWorker(
         settings,
         provider,
@@ -99,14 +104,17 @@ async def run_session(settings: Settings) -> Path:
         snapshot_path=storage.directory / "copilot.json",
         memory_index=memory_index,
         current_meeting_id=storage.directory.name,
-        project_index=ProjectIndex(project_root()),
+        project_index=None if own_tools else ProjectIndex(project_root()),
         investigations_path=storage.directory / "investigations.md",
+        suggestions_path=storage.directory / "suggestions.md",
         investigator=(
             Investigator(settings, project_root(), storage.directory.parent, storage.directory.name)
-            if settings.copilot.investigation_enabled and os.getenv("OPENAI_API_KEY")
+            if not own_tools and settings.copilot.investigation_enabled and os.getenv("OPENAI_API_KEY")
             else None
         ),
     )
+    if settings.llm_provider != "disabled" and provider is None:
+        bus.publish(StatusEvent("llm", "failed", f"llm_provider {settings.llm_provider} is not available"))
     external_stop = asyncio.Event()
     asr_stop = asyncio.Event()
     consumer_stop = asyncio.Event()
