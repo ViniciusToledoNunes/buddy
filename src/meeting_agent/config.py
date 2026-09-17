@@ -114,8 +114,14 @@ class CopilotConfig(BaseModel):
 class ListenConfig(BaseModel):
     """`buddy listen`: an always-attentive microphone that keeps only what matters."""
 
-    # After a bare "Hey Buddy", how long the next utterance counts as the command.
-    wake_arm_seconds: float = Field(6.0, ge=1, le=30)
+    # A command stays open after "Hey Buddy" until one of these closing phrases, so a
+    # pause mid-sentence no longer sends half an instruction.
+    end_phrases: list[str] = ["over and out", "that's all buddy", "that is all buddy"]
+    # Fallbacks for a forgotten closing phrase; the session is told the command may be cut.
+    command_silence_seconds: float = Field(10.0, ge=2, le=120)
+    command_max_seconds: float = Field(120.0, ge=10, le=900)
+    # A short tone when a command opens, is sent, or is cancelled (Windows).
+    sounds: bool = True
     # A meeting batch goes out at a pause, at most once per interval, and never waits
     # longer than max_wait. A session turn takes 40-90s, so sending faster only queues.
     batch_min_seconds: float = Field(60.0, ge=5, le=900)

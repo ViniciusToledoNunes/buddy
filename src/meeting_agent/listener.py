@@ -30,11 +30,20 @@ START_MEETING = re.compile(
     re.IGNORECASE,
 )
 STOP_MEETING = re.compile(
-    rf"\b(?:stop|end|ending|finish|finished|over|done)\b.*\b{MEETING_WORD}\b"
+    rf"\b(?:stop|end|ending|finish|finished|over|done|turn\s+off|switch\s+off)\b.*\b{MEETING_WORD}\b"
     rf"|\b{MEETING_WORD}\b.*\b(?:over|ended|end|ending|done|finished|stopped)\b",
     re.IGNORECASE,
 )
-PAUSE = re.compile(r"\b(?:stop|pause)\s+listening\b|\bgo to sleep\b", re.IGNORECASE)
+PAUSE = re.compile(r"\b(?:stop|pause)\s+listening\b|\bgo to sleep\b|^\W*pause\W*$", re.IGNORECASE)
+# "Hey Buddy, stop" was the natural way to turn it off in the first real test, and it
+# went to Claude as an unknown command while the process kept running.
+SHUTDOWN = re.compile(
+    r"\bshut\s*(?:yourself\s+)?down\b|\bturn\s+(?:yourself\s+)?off\b|\bswitch\s+(?:yourself\s+)?off\b"
+    r"|\bpower\s+off\b|^\W*stop(?:\W+(?:buddy|now|please))*\W*$",
+    re.IGNORECASE,
+)
+CANCEL = re.compile(r"^\W*(?:cancel(?:\W+that)?|never\s*mind|forget\s+(?:it|that)|scratch\s+that)\W*$", re.IGNORECASE)
+LOCAL_COMMANDS = {"start_meeting", "stop_meeting", "pause", "shutdown"}
 
 SUMMARY_PENDING = (
     "# Summary\n\n_Pending: the Claude Code session following Buddy writes this when the "
@@ -59,12 +68,36 @@ def classify_command(text: str) -> str:
     if PAUSE.search(text):
         return "pause"
     starts = bool(START_MEETING.search(text))
+    if SHUTDOWN.search(text) and not STOP_MEETING.search(text):
+        return "shutdown"
     stops = bool(STOP_MEETING.search(text))
     if starts and not stops:
         return "start_meeting"
     if stops and not starts:
         return "stop_meeting"
     return "other"
+
+
+def is_cancel(text: str) -> bool:
+    return bool(CANCEL.match(text or ""))
+
+
+def end_phrase_pattern(phrases: list[str]) -> re.Pattern[str]:
+    """Match a closing phrase at the end of an utterance, whatever Whisper did to punctuation."""
+    def word(text: str) -> str:
+        # Whisper writes "that's" with a straight or a curly apostrophe.
+        return "['\u2019]".join(re.escape(part) for part in re.split("['\u2019]", text))
+
+    alternatives = [r"\W+".join(word(w) for w in phrase.split()) for phrase in phrases if phrase.strip()]
+    return re.compile(rf"(?:^|\W)(?:{'|'.join(alternatives) or '(?!)'})\W*$", re.IGNORECASE)
+
+
+def split_end_phrase(text: str, pattern: re.Pattern[str]) -> tuple[str, bool]:
+    """The command text before a closing phrase, and whether the phrase was there."""
+    match = pattern.search(text or "")
+    if not match:
+        return (text or "").strip(), False
+    return text[: match.start()].strip(" ,.;:-"), True
 
 
 def _process_started(pid: int) -> str:
@@ -198,7 +231,10 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
             text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
         return text
     if kind == "COMMAND":
-        return f'{head} said="{record.get("text", "")}"'
+        ended = record.get("ended", "phrase")
+        # Anything but the closing phrase means the user may not have finished.
+        note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
+        return f'{head} said="{record.get("text", "")}"{note}'
     if kind in {"MEETING_START", "MEETING_END"}:
         extra = [f"lines={record['lines']}"] if "lines" in record else []
         extra.append(f"transcript={record.get('transcript', '')}")
@@ -331,7 +367,14 @@ class ListenDaemon:
         self.storage: Any = None
         self.paused = False
         self.batcher = self._new_batcher()
-        self._armed_until = 0.0
+        # An open command: what the user has said since "Hey Buddy", waiting for the
+        # closing phrase. None when no command is being dictated.
+        self.capture: list[str] | None = None
+        self._capture_started = 0.0
+        self._capture_last = 0.0
+        self._end_phrase = end_phrase_pattern(listen.end_phrases)
+        self._shutdown_reason = ""
+        self.chime: Callable[[str], None] = self._play_chime
         self._meeting_started = 0.0
         self._last_speech = 0.0
         self._started_iso = ""
@@ -509,17 +552,14 @@ class ListenDaemon:
         now = self.clock()
         if event.speaker == "ME":
             matched, remainder = parse_wake(text)
-            if not matched and now < self._armed_until:
-                matched, remainder = True, text
-            if matched:
-                self._armed_until = 0.0
+            if self.capture is not None or matched:
                 if self.storage is not None:
                     await asyncio.to_thread(self.storage.append, event)
-                if remainder:
-                    await self.command(remainder)
+                if self.capture is None:
+                    await self.open_command(remainder, now)
                 else:
-                    # "Hey Buddy" on its own: the command is the next thing said.
-                    self._armed_until = now + self.settings.listen.wake_arm_seconds
+                    # A second "Hey Buddy" while dictating just carries on.
+                    await self.continue_command(remainder if matched else text, now)
                 return
         if self.storage is None:
             return  # speech outside a meeting is heard, not kept
@@ -527,26 +567,113 @@ class ListenDaemon:
         self.batcher.add(f"{event.speaker}: {text}", now)
         self._last_speech = now
 
-    async def command(self, text: str) -> None:
+    # --------------------------------------------------------------- commands
+
+    async def open_command(self, remainder: str, now: float) -> None:
+        """"Hey Buddy" was heard: run a short control command at once, or start dictation.
+
+        Whisper closes a segment after a short silence, so the first real test sent
+        "just to let you know, item two" to Claude while the user was still talking. A
+        command now stays open until its closing phrase, however many pauses it takes.
+        """
+        body, _ = split_end_phrase(remainder, self._end_phrase)
+        kind = classify_command(body) if body else "other"
+        if kind in LOCAL_COMMANDS:
+            await self.run_local(kind)
+            return
+        self.capture = []
+        self._capture_started = now
+        self._capture_last = now
+        self.chime("open")
+        if remainder:
+            await self.continue_command(remainder, now)
+
+    async def continue_command(self, piece: str, now: float) -> None:
+        assert self.capture is not None
+        if is_cancel(piece):
+            self.capture = None
+            self.chime("cancel")
+            return
+        body, closed = split_end_phrase(piece, self._end_phrase)
+        kind = classify_command(body) if body and not self.capture else "other"
+        if kind in LOCAL_COMMANDS:
+            # "Hey Buddy." then "the meeting is starting": still a control command.
+            self.capture = None
+            await self.run_local(kind)
+            return
+        if body:
+            self.capture.append(body)
+        self._capture_last = now
+        if closed:
+            await self.send_command("phrase")
+
+    async def send_command(self, ended: str) -> None:
+        """Close the open command and hand it on.
+
+        `ended` records how it closed. Anything other than the closing phrase means the
+        user may not have finished, and the session is told so.
+        """
+        words, self.capture = self.capture or [], None
+        text = " ".join(words).strip()
+        if not text:
+            self.chime("cancel")
+            return
         kind = classify_command(text)
+        if kind in LOCAL_COMMANDS:
+            await self.run_local(kind)
+            return
+        # Only the user's own wake-worded speech ever arrives here: REMOTE speech and
+        # anything said without "Hey Buddy" never becomes a command.
+        self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended=ended)
+        self.chime("sent")
+
+    async def run_local(self, kind: str) -> None:
+        self.chime("sent")
         if kind == "start_meeting":
             await self.start_meeting("voice")
         elif kind == "stop_meeting":
             await self.stop_meeting("voice")
         elif kind == "pause":
             await self.pause("voice")
-        else:
-            # Only the user's own wake-worded speech ever arrives here: REMOTE speech and
-            # anything said without "Hey Buddy" never becomes a command.
-            self.events.append("COMMAND", meeting=self.meeting_id, text=text)
+        elif kind == "shutdown":
+            self._shutdown_reason = "voice"
+
+    async def command(self, text: str) -> None:
+        """Handle a complete command, as if it had been dictated and closed."""
+        self.capture = [text]
+        await self.send_command("phrase")
+
+    def _play_chime(self, kind: str) -> None:
+        """A short tone, so the user knows Buddy heard them without looking at a screen."""
+        if not self.settings.listen.sounds:
+            return
+        tones = {"open": [(880, 90)], "sent": [(660, 70), (990, 90)], "cancel": [(330, 160)]}.get(kind, [])
+
+        def play() -> None:
+            try:
+                import winsound
+            except ImportError:  # only Windows has a built-in tone API
+                return
+            for frequency, duration in tones:
+                winsound.Beep(frequency, duration)
+
+        try:
+            asyncio.get_running_loop().run_in_executor(None, play)
+        except RuntimeError:
+            pass
 
     # ------------------------------------------------------------------ ticks
 
     async def tick(self) -> None:
-        if self.storage is None:
-            return
         now = self.clock()
         listen = self.settings.listen
+        if self.capture is not None:
+            if now - self._capture_last >= listen.command_silence_seconds:
+                await self.send_command("silence")
+            elif now - self._capture_started >= listen.command_max_seconds:
+                await self.send_command("limit")
+        if self.storage is None:
+            return
         if self.batcher.due(now):
             self._flush_batch(now)
         if now - self._last_speech >= listen.meeting_idle_minutes * 60:
@@ -576,8 +703,8 @@ class ListenDaemon:
         shutdown = self.control_dir / "shutdown.flag"
         if shutdown.exists():
             shutdown.unlink(missing_ok=True)
-            return False
-        return True
+            self._shutdown_reason = self._shutdown_reason or "shutdown requested"
+        return not self._shutdown_reason
 
     async def run(self, stop: asyncio.Event) -> None:
         self.claim()
@@ -594,7 +721,7 @@ class ListenDaemon:
                 if isinstance(event, TranscriptEvent) and event.final:
                     await self.on_final(event)
                 if not await self.check_controls():
-                    reason = "shutdown requested"
+                    reason = self._shutdown_reason
                     break
                 await self.tick()
         except Exception as exc:

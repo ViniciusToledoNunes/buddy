@@ -31,7 +31,8 @@ explícito.
   Teams). Perguntar se deve gravar quando uma chamada começa sem aviso, e encerrar quando o app solta o
   microfone. Precisa de lista de apps: um cliente de VDI pode segurar o microfone o dia todo.
 - Detector dedicado de palavra de ativação, para não transcrever fala que será descartada.
-- Validar "Hey Buddy" em reuniões reais: taxa de disparo falso e de comando perdido.
+- Validar "Hey Buddy" em reuniões reais: taxa de disparo falso, de comando perdido e de "over and out" mal
+  transcrito. Se o encerramento falhar com frequência, somar um atalho de teclado que envia o comando aberto.
 
 ### 1. Reduzir a latência do cérebro
 

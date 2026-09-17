@@ -290,8 +290,9 @@ def watch(
 ) -> None:
     """Print what the listener noticed since this watcher last looked.
 
-    One line per event, so `--follow` can drive a Claude Code Monitor. It also reports
-    when the listener goes down: a silent monitor must not look like a quiet room.
+    One line per event, so `--follow` can drive a Claude Code Monitor. It reports when
+    the listener goes down and then exits: a silent monitor must not look like a quiet
+    room, and a monitor must not outlive the listener it follows.
     """
     from .listener import EventReader, format_event, listener_state
 
@@ -303,8 +304,9 @@ def watch(
     cursor = reader.load_cursor()
     settings = load_settings()
     last_type = ""
-    was_up: bool | None = None
-    while True:
+
+    def drain() -> None:
+        nonlocal cursor, last_type
         records, cursor = reader.read(cursor)
         for record in records:
             last_type = str(record.get("type", ""))
@@ -314,16 +316,19 @@ def watch(
             print(line, flush=True)
         if not peek:
             reader.save_cursor(cursor)
-        if not follow:
-            if not listener_state(runtime):
-                print("LISTENER_DOWN Buddy is not listening.", flush=True)
-            return
-        up = listener_state(runtime) is not None
-        if up != was_up:
-            if not up and last_type != "LISTENER_DOWN":
+
+    while True:
+        drain()
+        if listener_state(runtime) is None:
+            # The listener writes LISTENER_DOWN just before it lets go of its state, so one
+            # more read catches it; a crash leaves no such line, and one is printed here.
+            # Exiting ends a Monitor, so nothing keeps watching a listener that is gone.
+            drain()
+            if last_type != "LISTENER_DOWN":
                 print("LISTENER_DOWN Buddy is not listening; start it with `buddy listen --detach`.", flush=True)
-            last_type = "" if up else "LISTENER_DOWN"
-            was_up = up
+            return
+        if not follow:
+            return
         time.sleep(max(0.2, interval))
 
 

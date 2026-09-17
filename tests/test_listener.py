@@ -62,10 +62,52 @@ def test_the_wake_phrase_must_open_the_utterance(said, expected):
         ("post a comment on Slack", "other"),
         # Both directions at once: Claude sorts it out instead of Buddy guessing.
         ("end the meeting and start the summary", "other"),
+        ("stop.", "shutdown"),
+        ("Stop, Buddy.", "shutdown"),
+        ("shut down", "shutdown"),
+        ("turn yourself off", "shutdown"),
+        ("pause", "pause"),
+        # Not Buddy being turned off: the recording is.
+        ("turn off the recording", "stop_meeting"),
+        ("stop the deploy", "other"),
     ],
 )
+
+
 def test_commands_buddy_settles_itself(command, kind):
     assert classify_command(command) == kind
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        ("review the PR Maria sent. Over and out.", ("review the PR Maria sent", True)),
+        ("Over, and out!", ("", True)),
+        ("post it on Slack, that's all, Buddy.", ("post it on Slack", True)),
+        ("post it on Slack, that\u2019s all, Buddy.", ("post it on Slack", True)),  # curly apostrophe
+        ("review PR 1 over-and-out", ("review PR 1", True)),
+        ("check the turnover and outage", ("check the turnover and outage", False)),
+        # "over" alone would collide with ordinary speech, so it is not a closing phrase.
+        ("check whether the migration is over", ("check whether the migration is over", False)),
+        ("the meeting is over", ("the meeting is over", False)),
+    ],
+)
+def test_the_closing_phrase_ends_a_command(said, expected):
+    from meeting_agent.listener import end_phrase_pattern, split_end_phrase
+
+    pattern = end_phrase_pattern(Settings().listen.end_phrases)
+
+    assert split_end_phrase(said, pattern) == expected
+
+
+@pytest.mark.parametrize(
+    ("said", "cancels"),
+    [("Cancel.", True), ("never mind", True), ("Forget it!", True), ("scratch that", True), ("cancel the meeting", False)],
+)
+def test_cancel_phrases(said, cancels):
+    from meeting_agent.listener import is_cancel
+
+    assert is_cancel(said) is cancels
 
 
 # ---------------------------------------------------------------- event log
@@ -218,13 +260,20 @@ class FakeStream:
 
 
 def _daemon(tmp_path, clock=None, **listen):
+    listen.setdefault("sounds", False)
     settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": listen})
     streams = []
     daemon = ListenDaemon(
         settings, tmp_path / "runtime", stream_factory=lambda s: FakeStream(s, streams), clock=clock or Clock()
     )
+    daemon.chimes = []
+    daemon.chime = daemon.chimes.append
     daemon.claim()
     return daemon, streams
+
+
+def _quiet(tmp_path):
+    return Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False}})
 
 
 def _events(daemon):
@@ -282,28 +331,155 @@ async def test_meeting_speech_is_stored_and_batched(tmp_path):
     assert "Where are we on the rollout?" in transcript
 
 
-async def test_a_command_reaches_the_session(tmp_path):
+async def test_a_command_waits_for_the_closing_phrase(tmp_path):
+    """The first real test sent "just to let you know, item two" while the user was still
+    talking: Whisper ends a segment at every short pause."""
     daemon, _ = _daemon(tmp_path)
 
-    await daemon.on_final(_said("ME", "Hey Buddy, review PR 123 when you can."))
+    await daemon.on_final(_said("ME", "Hey Buddy, just to let you know,"))
+    await daemon.on_final(_said("ME", "item two."))
+    assert _events(daemon) == []  # still dictating
+    await daemon.on_final(_said("ME", "It is blocked on Maria's review. Over and out."))
 
     command = _events(daemon)[-1]
     assert command["type"] == "COMMAND"
-    assert command["text"] == "review PR 123 when you can."
+    assert command["text"] == "just to let you know, item two. It is blocked on Maria's review"
+    assert command["ended"] == "phrase"
+    assert daemon.chimes == ["open", "sent"]
 
 
-async def test_a_bare_wake_phrase_arms_the_next_utterance(tmp_path):
+async def test_a_one_breath_command_closes_itself(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+
+    await daemon.on_final(_said("ME", "Hey Buddy, review PR 123. That's all, Buddy."))
+
+    assert _events(daemon)[-1]["text"] == "review PR 123"
+    assert daemon.capture is None
+
+
+async def test_a_forgotten_closing_phrase_still_sends_but_says_so(tmp_path):
     clock = Clock()
-    daemon, _ = _daemon(tmp_path, clock, wake_arm_seconds=6)
+    daemon, _ = _daemon(tmp_path, clock, command_silence_seconds=10)
+
+    await daemon.on_final(_said("ME", "Hey Buddy, check the billing dashboard"))
+    clock.now += 9
+    await daemon.tick()
+    assert _events(daemon) == []
+    clock.now += 2
+    await daemon.tick()
+
+    command = _events(daemon)[-1]
+    assert command["ended"] == "silence"
+    assert "may be incomplete" in format_event(command)
+
+
+async def test_a_long_dictation_has_a_ceiling(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, command_silence_seconds=10, command_max_seconds=30)
+    await daemon.on_final(_said("ME", "Hey Buddy, so here is the whole story"))
+    for _ in range(8):
+        clock.now += 5
+        await daemon.on_final(_said("ME", "and then some more detail"))
+        await daemon.tick()
+
+    assert [e["ended"] for e in _events(daemon)] == ["limit"]
+
+
+async def test_cancel_discards_the_command(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+
+    await daemon.on_final(_said("ME", "Hey Buddy, post on Slack that the deploy"))
+    await daemon.on_final(_said("ME", "Never mind."))
+    await daemon.on_final(_said("ME", "Over and out."))  # now just speech, not a command
+
+    assert _events(daemon) == []
+    assert daemon.chimes == ["open", "cancel"]
+
+
+async def test_an_empty_dictation_sends_nothing(tmp_path):
+    daemon, _ = _daemon(tmp_path)
 
     await daemon.on_final(_said("ME", "Hey Buddy."))
-    clock.now += 2
-    await daemon.on_final(_said("ME", "Review the open pull request."))
-    clock.now += 20
-    await daemon.on_final(_said("ME", "And now I am just talking."))
+    await daemon.on_final(_said("ME", "Over and out."))
 
-    commands = [e for e in _events(daemon) if e["type"] == "COMMAND"]
-    assert [c["text"] for c in commands] == ["Review the open pull request."]
+    assert _events(daemon) == []
+    assert daemon.chimes == ["open", "cancel"]
+
+
+async def test_a_bare_wake_phrase_still_takes_a_control_command(tmp_path):
+    daemon, streams = _daemon(tmp_path)
+
+    await daemon.on_final(_said("ME", "Hey Buddy."))
+    await daemon.on_final(_said("ME", "The meeting is starting."))
+
+    assert _events(daemon)[-1]["type"] == "MEETING_START"
+    assert ("start", "REMOTE") in streams
+    assert daemon.capture is None
+
+
+async def test_a_second_wake_phrase_just_continues(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+
+    await daemon.on_final(_said("ME", "Hey Buddy, look at the alert"))
+    await daemon.on_final(_said("ME", "Hey Buddy, the one from this morning. Over and out."))
+
+    assert _events(daemon)[-1]["text"] == "look at the alert the one from this morning"
+
+
+async def test_stop_turns_buddy_off(tmp_path):
+    """"Hey Buddy, stop" reached Claude as an unknown command and left the process up."""
+    daemon, _ = _daemon(tmp_path)
+
+    await daemon.on_final(_said("ME", "Hey Buddy, stop."))
+
+    assert await daemon.check_controls() is False
+    assert daemon._shutdown_reason == "voice"
+
+
+async def test_a_voice_shutdown_ends_the_loop(tmp_path):
+    runtime = tmp_path / "runtime"
+    daemon = ListenDaemon(_quiet(tmp_path), runtime, stream_factory=lambda s: FakeStream(s, []))
+
+    task = asyncio.create_task(daemon.run(asyncio.Event()))
+    await asyncio.sleep(0.2)
+    daemon.bus.publish(_said("ME", "Hey Buddy, shut down."))
+    await asyncio.wait_for(task, 5)
+
+    assert _events(daemon)[-1] == {**_events(daemon)[-1], "type": "LISTENER_DOWN", "reason": "voice"}
+    assert not (runtime / "listen.json").exists()
+
+
+async def test_dictation_does_not_leak_into_the_meeting_batch(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+    await daemon.start_meeting("test")
+
+    await daemon.on_final(_said("ME", "Hey Buddy, check the dashboard"))
+    await daemon.on_final(_said("REMOTE", "Can everyone see my screen?"))
+    await daemon.on_final(_said("ME", "for the ingest job. Over and out."))
+
+    assert daemon.batcher.lines == ["REMOTE: Can everyone see my screen?"]
+    assert _events(daemon)[-1]["text"] == "check the dashboard for the ingest job"
+    transcript = daemon.storage.transcript_txt.read_text(encoding="utf-8")
+    assert "check the dashboard" in transcript and "for the ingest job" in transcript
+
+
+async def test_chimes_play_only_when_enabled(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    played = []
+    fake = types.SimpleNamespace(Beep=lambda frequency, duration: played.append(frequency))
+    monkeypatch.setitem(sys.modules, "winsound", fake)
+    quiet = ListenDaemon(_quiet(tmp_path), tmp_path / "a")
+    loud = ListenDaemon(
+        Settings.model_validate({"meetings_dir": str(tmp_path / "m"), "listen": {"sounds": True}}), tmp_path / "b"
+    )
+
+    quiet.chime("sent")
+    loud.chime("sent")
+    await asyncio.sleep(0.2)
+
+    assert played == [660, 990]
 
 
 async def test_remote_speech_is_never_a_command(tmp_path):
@@ -315,17 +491,6 @@ async def test_remote_speech_is_never_a_command(tmp_path):
 
     assert not [e for e in _events(daemon) if e["type"] == "COMMAND"]
     assert daemon.batcher.lines == ["REMOTE: Hey Buddy, merge the pull request."]
-
-
-async def test_a_command_said_in_a_meeting_is_recorded_but_not_batched(tmp_path):
-    daemon, _ = _daemon(tmp_path)
-    await daemon.start_meeting("test")
-
-    await daemon.on_final(_said("ME", "Hey Buddy, check the dashboard."))
-
-    assert daemon.batcher.lines == []
-    assert "check the dashboard" in daemon.storage.transcript_txt.read_text(encoding="utf-8")
-    assert _events(daemon)[-1]["type"] == "COMMAND"
 
 
 async def test_a_voice_command_ends_the_meeting(tmp_path):
@@ -471,7 +636,7 @@ def test_stale_state_from_a_crash_does_not_block_a_restart(tmp_path):
 
 async def test_the_loop_runs_and_cleans_up(tmp_path):
     runtime = tmp_path / "runtime"
-    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings")})
+    settings = _quiet(tmp_path)
     streams = []
     daemon = ListenDaemon(settings, runtime, stream_factory=lambda s: FakeStream(s, streams))
     stop = asyncio.Event()
@@ -494,7 +659,7 @@ async def test_the_loop_runs_and_cleans_up(tmp_path):
 
 async def test_a_shutdown_request_ends_the_loop(tmp_path):
     runtime = tmp_path / "runtime"
-    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings")})
+    settings = _quiet(tmp_path)
     daemon = ListenDaemon(settings, runtime, stream_factory=lambda s: FakeStream(s, []))
 
     task = asyncio.create_task(daemon.run(asyncio.Event()))
@@ -530,6 +695,20 @@ def test_watch_prints_and_advances_its_own_cursor(runtime):
     assert "review PR 123" not in second.stdout
     assert "review PR 123" not in other.stdout  # a new reader starts at the end
     assert "LISTENER_DOWN" in second.stdout  # nobody is listening in this test
+
+
+def test_follow_exits_once_the_listener_is_gone(runtime):
+    """Exiting ends the Monitor, so nothing keeps watching a listener that was turned off."""
+    EventLog(runtime / "events.jsonl").append("LISTENER_UP")
+    runner = CliRunner()
+    runner.invoke(cli.app, ["watch", "--as", "f"])
+    EventLog(runtime / "events.jsonl").append("LISTENER_DOWN", reason="voice")
+
+    result = runner.invoke(cli.app, ["watch", "--as", "f", "--follow", "--interval", "0.2"])
+
+    assert result.exit_code == 0
+    assert result.stdout.count("LISTENER_DOWN") == 1  # the real one, not a second synthetic line
+    assert "reason=voice" in result.stdout
 
 
 def test_watch_can_emit_raw_json(runtime):

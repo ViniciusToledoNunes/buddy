@@ -102,7 +102,7 @@ Os comandos antigos `meeting-agent` e `meeting-agent-mcp` continuam disponíveis
 ```sh
 buddy listen --detach      # microfone atento a "Hey Buddy", em segundo plano
 buddy status               # listening, meeting ou paused
-buddy listen --stop
+buddy listen --stop        # desliga
 ```
 
 Depois, na sessão do Claude Code que você deixa aberta (a mesma de outros monitores, como o do Slack):
@@ -112,19 +112,27 @@ Liga o Buddy.
 ```
 
 A skill `buddy-listener` arma um `Monitor` sobre `buddy watch --follow --as claude-code` e passa a tratar os
-eventos. A partir daí, fale:
+eventos. Para desligar, diga "Desliga o Buddy" na sessão, ou "Hey Buddy, stop" em voz alta: o processo termina e o
+`watch` sai junto, encerrando o `Monitor`.
+
+**Como falar com ele.** Um comando começa em "Hey Buddy" e termina em **"over and out"** (ou "that's all,
+Buddy"). Pode fazer pausas no meio: nada é enviado antes da frase de encerramento. "Cancel" ou "never mind"
+descarta o que foi dito. Se você esquecer de encerrar, o Buddy envia após 10 segundos de silêncio e avisa o Claude
+que o comando pode estar incompleto. Sons curtos marcam o comando aberto, enviado e cancelado
+(`listen.sounds: false` desliga).
 
 | Você diz | Quem trata | O que acontece |
 |---|---|---|
 | "Hey Buddy, the meeting is starting" | o Buddy, em ~2s | passa a gravar microfone e áudio do sistema |
 | "Hey Buddy, the meeting is over" | o Buddy | encerra; o Claude escreve o resumo e as pendências |
 | "Hey Buddy, stop listening" | o Buddy | fecha o microfone até `buddy resume` |
-| "Hey Buddy, review PR 123" | o Claude | investiga e responde na sessão |
-| "Hey Buddy, post the update on Slack" | o Claude | escreve o rascunho e espera você aprovar o texto |
-| "Hey Buddy, approve 4" | o Claude | executa a proposta 4 exatamente como proposta |
+| "Hey Buddy, stop" / "shut down" / "turn off" | o Buddy | desliga o processo |
+| "Hey Buddy, review PR 123. Over and out." | o Claude | investiga e responde na sessão |
+| "Hey Buddy, post the update on Slack. Over and out." | o Claude | escreve o rascunho e espera você aprovar o texto |
+| "Hey Buddy, approve 4. Over and out." | o Claude | executa a proposta 4 exatamente como proposta |
 
-Um "Hey Buddy" sozinho arma a frase seguinte, dita em até 6 segundos. Comandos são em inglês: o ASR usa um modelo
-só-inglês, mais rápido e preciso nas reuniões.
+Os comandos de controle (reunião, pausa, desligar) valem na hora, sem "over and out", e nunca chegam ao Claude.
+Comandos são em inglês: o ASR usa um modelo só-inglês, mais rápido e preciso nas reuniões.
 
 **O que é guardado.** Fala que não começa com "Hey Buddy" e não faz parte de uma reunião é transcrita em memória
 e descartada. Reuniões são gravadas por inteiro — cerca de 44 KB por hora de texto. O áudio do sistema só é

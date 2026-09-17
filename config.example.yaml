@@ -97,7 +97,13 @@ copilot:
 # `buddy listen`: the microphone stays attentive for "Hey Buddy"; meetings are recorded
 # only when asked. Speech outside a meeting that does not open with the phrase is dropped.
 listen:
-  wake_arm_seconds: 6          # after a bare "Hey Buddy", the next utterance is the command
+  end_phrases:                 # a command stays open after "Hey Buddy" until one of these
+    - over and out
+    - that's all buddy
+    - that is all buddy
+  command_silence_seconds: 10  # a forgotten closing phrase: sent anyway, marked "may be incomplete"
+  command_max_seconds: 120
+  sounds: true                 # short tones when a command opens, is sent, or is cancelled (Windows)
   batch_min_seconds: 60        # meeting speech reaches the session at most once per interval
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150
