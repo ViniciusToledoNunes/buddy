@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as described
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact any meeting content before pasting it. For a security issue, use the Security tab
+        instead of this form.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `buddy doctor`
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Python version
+      placeholder: "Windows 11 Pro, Python 3.13.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which mode
+      options:
+        - Listening mode (buddy listen)
+        - Session mode (buddy start)
+        - MCP server or skill
+        - Install or setup
+        - Other
+    validations:
+      required: true

@@ -269,8 +269,10 @@ The 80% coverage gate covers the hardware-independent core: copilot, memory, MCP
 configuration and ASR selection. Audio capture, ASR, benchmark, `doctor`, CLI and session need real devices and
 are verified by `buddy doctor` and the checklist in [docs/PORTABILITY.md](docs/PORTABILITY.md).
 
-Issues and pull requests are welcome. Please keep personal identifiers, credentials and recordings out of
-anything you submit.
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for what is especially useful
+(platform validation, support for other agents) and what will not be merged (anything that records without being
+asked, or sends audio off the machine). Security reports go through the Security tab, as described in
+[SECURITY.md](SECURITY.md).
 
 The older `meeting-agent` and `meeting-agent-mcp` commands remain as compatibility aliases, as do the
 `MEETING_AGENT_*` and `MEETING_COPILOT_ALLOW_MCP_START` environment variable names.

@@ -1,0 +1,24 @@
+name: Idea or feature request
+description: Suggest a change, or offer to build one
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read the "What will not be merged" section of
+        [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md) first: recording is always explicit, and audio stays on
+        the machine.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What is awkward or missing today, from the point of view of someone in a meeting.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. How you would solve it, and whether you would like to build it.
+    validations:
+      required: false
