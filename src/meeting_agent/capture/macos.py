@@ -60,6 +60,11 @@ class MacOSAudioCapture(ThreadedAudioCapture):
             finally:
                 if self.process and self.process.poll() is None:
                     self.process.terminate()
+                    try:
+                        self.process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait()
                 self.process = None
         self._status("stopped")
 
@@ -75,8 +80,38 @@ def list_devices() -> dict[str, object]:
     return {"backend": "screencapturekit", "default_speaker": "macOS system audio", "default_microphone": "macOS default microphone", "speakers": [], "microphones": []}
 
 
+def capture_probe(speaker: str, config, seconds: float = 0.6) -> tuple[bool, str]:
+    """Run the helper briefly so doctor verifies permissions and real audio output."""
+    try:
+        command = helper_command(speaker, config)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (OSError, RuntimeError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    try:
+        stdout, stderr = process.communicate(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+    if stdout:
+        return True, f"captured {len(stdout)} bytes in {seconds:.1f}s"
+    message = stderr.decode("utf-8", "replace").strip().splitlines()
+    return False, message[0] if message else "captured no audio data"
+
+
 def probe(config) -> list[dict[str, str]]:
     helper = helper_path()
     if not helper:
         return [{"name": "ScreenCaptureKit audio", "state": "failed", "detail": "native helper not installed"}]
-    return [{"name": "ScreenCaptureKit audio", "state": "ok", "detail": f"{helper}; Screen Recording and Microphone permissions are required"}]
+    checks = []
+    for name, speaker in (("System audio (ScreenCaptureKit)", "REMOTE"), ("Microphone (ScreenCaptureKit)", "ME")):
+        working, detail = capture_probe(speaker, config)
+        checks.append({
+            "name": name,
+            "state": "ok" if working else "failed",
+            "detail": f"{helper}; {detail}",
+        })
+    return checks

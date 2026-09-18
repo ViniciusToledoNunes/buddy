@@ -1,6 +1,7 @@
 import sys
 
 from meeting_agent.capture import linux
+from meeting_agent.capture import macos
 from meeting_agent.config import AudioConfig
 
 
@@ -66,3 +67,29 @@ def test_probe_fails_when_the_capture_command_produces_nothing(monkeypatch):
     monkeypatch.setattr(linux, "capture_probe", lambda speaker, config: (False, "captured no audio data"))
     states = {check["name"]: check["state"] for check in linux.probe(AudioConfig())}
     assert set(states.values()) == {"failed"}
+
+
+def test_macos_capture_probe_reports_a_stream_that_produces_audio(monkeypatch):
+    monkeypatch.setattr(macos, "helper_path", lambda: "/usr/local/bin/meeting-audio-macos")
+    monkeypatch.setattr(
+        macos,
+        "helper_command",
+        lambda speaker, config: _script(
+            "import sys, time; sys.stdout.buffer.write(bytes(4096)); sys.stdout.buffer.flush(); time.sleep(30)"
+        ),
+    )
+    working, detail = macos.capture_probe("REMOTE", AudioConfig(), seconds=3.0)
+    assert working is True
+    assert "4096 bytes" in detail
+
+
+def test_macos_probe_reports_permission_or_stream_failures(monkeypatch):
+    monkeypatch.setattr(macos, "helper_path", lambda: "/usr/local/bin/meeting-audio-macos")
+    monkeypatch.setattr(
+        macos,
+        "helper_command",
+        lambda speaker, config: _script("import sys; print('Screen Recording permission denied', file=sys.stderr); sys.exit(1)"),
+    )
+    checks = macos.probe(AudioConfig())
+    assert [check["state"] for check in checks] == ["failed", "failed"]
+    assert all("permission denied" in check["detail"] for check in checks)
