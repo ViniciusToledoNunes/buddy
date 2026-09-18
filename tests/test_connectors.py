@@ -229,14 +229,14 @@ def test_the_billing_project_falls_back_to_the_gcloud_variable(monkeypatch):
 
 
 def test_datasets_are_listed_per_data_project(monkeypatch):
-    payload = json.dumps([{"datasetReference": {"datasetId": "dior_cdc"}}])
+    payload = json.dumps([{"datasetReference": {"datasetId": "orders_cdc"}}])
     connector, calls = _bq(monkeypatch, [(0, payload, "")])
-    monkeypatch.setattr(type(connector), "data_projects", property(lambda self: ["trr-analytics-237016"]))
+    monkeypatch.setattr(type(connector), "data_projects", property(lambda self: ["analytics-warehouse-42"]))
 
     result = connector.list_datasets()
 
-    assert "trr-analytics-237016.dior_cdc" in result
-    assert "trr-analytics-237016" in calls[0]
+    assert "analytics-warehouse-42.orders_cdc" in result
+    assert "analytics-warehouse-42" in calls[0]
 
 
 # ------------------------------------------------------------------ datadog

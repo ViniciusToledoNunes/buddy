@@ -41,9 +41,9 @@ def test_env_files_are_sourced_and_expand_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     (tmp_path / ".config").mkdir()
-    (tmp_path / ".config" / "trr-jira.env").write_text("JIRA_API_TOKEN=from-file\n", encoding="utf-8")
+    (tmp_path / ".config" / "team-jira.env").write_text("JIRA_API_TOKEN=from-file\n", encoding="utf-8")
 
-    loaded = load_env_files(Settings(env_files=["~/.config/trr-jira.env", "~/.config/absent.env"]))
+    loaded = load_env_files(Settings(env_files=["~/.config/team-jira.env", "~/.config/absent.env"]))
 
     import os
 

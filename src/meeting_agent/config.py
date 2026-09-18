@@ -145,7 +145,8 @@ class UIConfig(BaseModel):
 
 
 class BenchmarkConfig(BaseModel):
-    source: str = r"C:\Users\vinic\Videos\trr01.mp4"
+    # Any recording of your own: `buddy benchmark` measures the ASR models against it.
+    source: str = "samples/meeting.mp4"
     seconds: int = Field(60, ge=5, le=600)
     models: list[str] = ["tiny.en", "base.en", "distil-small.en"]
 

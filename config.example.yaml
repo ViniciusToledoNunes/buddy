@@ -121,6 +121,6 @@ ui:
   overlay: false
 
 benchmark:
-  source: C:\Users\vinic\Videos\trr01.mp4
+  source: samples/meeting.mp4   # a recording of your own, to compare ASR models
   seconds: 60
   models: [tiny.en, base.en, distil-small.en]

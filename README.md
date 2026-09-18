@@ -1,78 +1,59 @@
-# Buddy - Meeting Copilot
+# Buddy — Meeting Copilot
 
 [![CI](https://github.com/ViniciusToledoNunes/buddy/actions/workflows/ci.yml/badge.svg)](https://github.com/ViniciusToledoNunes/buddy/actions/workflows/ci.yml)
 
-Buddy é um copiloto de reuniões multiplataforma, ativado explicitamente, que transcreve áudio do sistema e microfone em fluxos separados e conecta a conversa ao contexto real dos seus projetos por meio de Codex ou Claude.
+Buddy keeps your microphone attentive for "Hey Buddy", records meetings when you ask, and turns the coding
+agent you already have open into a meeting copilot: it suggests what you could say next, grounded in your own
+repositories, tickets and dashboards rather than in generic advice.
 
-Ele funciona localmente por padrão, identifica as fontes como `ME` e `REMOTE`, salva a transcrição incrementalmente e mantém captura, ASR, armazenamento, interface e LLM isolados para que uma falha não derrube toda a sessão.
+Audio never leaves the machine. Transcription is always local, with `faster-whisper`/CTranslate2 on CPU or GPU;
+there is no cloud ASR mode. What reaches a model is text: the recent transcript, the meeting memory, and
+whatever the agent decides to read with the read-only tools you allow it.
 
-## O que o Buddy faz hoje
+> **Project status.** A personal project, developed in the open. Windows 11 is the validated platform. Linux and
+> macOS capture backends are implemented and exercised in CI, but not yet tested end to end with real audio. The
+> listening mode needs [Claude Code](https://claude.com/claude-code) today; making it work with Codex, Cursor and
+> other agents is the next milestone (see [the roadmap](docs/ROADMAP.md)).
 
-Há dois modos de uso.
+## Two ways to run it
 
-- **Modo escuta (`buddy listen`)** — o recomendado. O microfone fica atento a "Hey Buddy"; reuniões são gravadas
-  quando você pede; uma sessão do Claude Code que você já tem aberta recebe os eventos e age. Sem tela própria.
-- **Modo sessão (`buddy start`)** — uma reunião por vez, com TUI no terminal e o Claude chamado em modo headless.
+**Listening mode (`buddy listen`) — recommended.** A small background process keeps the microphone open for the
+wake phrase. Speech that is neither a command nor part of a meeting is transcribed in memory and dropped. What
+it notices goes to an append-only event log, and an agent session you already have open reads that log and acts:
+it answers your voice commands and, during a meeting, suggests what to say. No window of its own.
 
-- Captura separada do microfone (`ME`) e do áudio reproduzido pelo computador (`REMOTE`).
-- Transcrição **sempre local** com `faster-whisper`/CTranslate2 em CPU ou GPU compatível. Não existe modo de
-  transcrição em nuvem: o áudio nunca sai da máquina.
-- **O seu Claude Code é o cérebro.** A cada fala nova, o Buddy chama o Claude Code em modo headless no diretório
-  do seu trabalho. Ele chega sabendo quem você é e como os seus sistemas funcionam — pelo `CLAUDE.md` e pela
-  memória que já usa no dia a dia — e pesquisa Jira, Slack, git, BigQuery e Datadog quando a conversa pede.
-  Roda na sua assinatura, não em crédito de API.
-- **Painel contínuo.** Cada resposta substitui o conjunto inteiro de sugestões, em vez de empilhar; quando o
-  assunto se resolve, o painel é esvaziado. Tudo fica também em `suggestions.md`, para ler depois.
-- **Uma sessão por reunião.** O Claude lembra o que já pesquisou minutos antes e recebe só as falas novas; o
-  contexto compartilhado vem do cache.
-- **Investigação manual via Codex/Claude.** A skill `meeting-copilot-context` e o MCP continuam disponíveis
-  para quando você quiser perguntar diretamente.
-- Memória entre reuniões: o Buddy recupera reuniões anteriores relacionadas usando apenas memória estruturada
-  (resumo, tópicos, decisões, ações, perguntas). Transcrições brutas nunca são indexadas nem enviadas ao provedor.
-- Memória compacta da reunião atual com decisões, ações e perguntas em aberto.
-- Relatório final em Markdown e transcrição incremental em texto e JSONL.
-- TUI em tempo real, overlay opcional e atalhos globais.
-- Benchmark local para escolher modelo e backend de ASR adequados à máquina.
-- Servidor MCP local para consultar status, transcrição ao vivo, reuniões salvas, buscas, contexto do copiloto e
-  reuniões anteriores relacionadas (`find_related_meetings`).
-- Skill `meeting-copilot-context` para Codex e Claude relacionarem a reunião com código, documentação, git e pesquisa externa.
-- Controles seguros: começa parado, `start` via MCP fica desabilitado por padrão e caminhos fora de `meetings_dir` são rejeitados.
+**Session mode (`buddy start`).** One meeting at a time, with a terminal UI of its own and an optional
+always-on-top overlay. Buddy calls the model itself and keeps a live suggestion panel.
 
-## Compatibilidade
+## Requirements
 
-| Plataforma | Áudio do sistema | Microfone | Estado |
+- Python 3.12, 3.13 or 3.14.
+- A microphone and an output device the system recognises.
+- About 2 GB free for the virtual environment, caches and a local ASR model.
+- For the listening mode: Claude Code, signed in.
+- FFmpeg, for the benchmark. Live capture does not need it on every backend.
+
+| Platform | System audio | Microphone | State |
 |---|---|---|---|
-| Windows 10/11 | WASAPI loopback | WASAPI | Validado em hardware real |
-| Linux desktop | PipeWire sink capture | PipeWire source | Implementado; requer validação no hardware alvo |
-| macOS 15+ | ScreenCaptureKit | ScreenCaptureKit | Implementado; requer validação no hardware alvo |
+| Windows 10/11 | WASAPI loopback | WASAPI | Validated on real hardware |
+| Linux desktop | PipeWire sink capture | PipeWire source | Implemented; needs validation on target hardware |
+| macOS 15+ | ScreenCaptureKit | ScreenCaptureKit | Implemented; needs validation on target hardware |
 
-O repositório contém código, dependências Python, instaladores, configuração de exemplo, skill, servidor MCP, testes e documentação. Ele não contém nem deve conter:
+See [docs/PORTABILITY.md](docs/PORTABILITY.md) for per-platform prerequisites.
 
-- chaves de API ou `.env` pessoal;
-- gravações e reuniões salvas;
-- modelos de ASR, que são baixados no primeiro uso;
-- FFmpeg, PipeWire, Python ou Xcode Command Line Tools, que são dependências do sistema;
-- identificadores de dispositivos de outra máquina.
-
-Portanto, o Buddy pode ser instalado em qualquer máquina **dentro da matriz suportada**, desde que os pré-requisitos do sistema sejam atendidos. Consulte [portabilidade e pré-requisitos](docs/PORTABILITY.md) antes de migrar.
-
-## Instalação rápida
-
-Clone o projeto:
+## Install
 
 ```sh
 git clone https://github.com/ViniciusToledoNunes/buddy.git
 cd buddy
 ```
 
-Windows PowerShell:
+Windows (PowerShell):
 
 ```powershell
 .\scripts\install-windows.ps1
 .\.venv\Scripts\Activate.ps1
 buddy doctor
-buddy devices
-buddy start
 ```
 
 Linux:
@@ -81,8 +62,6 @@ Linux:
 ./scripts/install-linux.sh
 . .venv/bin/activate
 buddy doctor
-buddy devices
-buddy start
 ```
 
 macOS 15+:
@@ -91,242 +70,211 @@ macOS 15+:
 ./scripts/install-macos.sh
 . .venv/bin/activate
 buddy doctor
-buddy devices
+```
+
+The installers also copy the skills into `~/.claude/skills/` and `~/.codex/skills/` when those clients exist, and
+register the local MCP server under the name `buddy`. Copy `config.example.yaml` to `config.yaml` and
+`.env.example` to `.env` to configure it; both are gitignored.
+
+## Listening mode
+
+```sh
+buddy listen --detach      # microphone attentive for "Hey Buddy", in the background
+buddy status               # listening, meeting or paused
+buddy listen --stop        # turn it off
+```
+
+Then, in the Claude Code session you keep open, say "turn Buddy on". The `buddy-listener` skill arms a monitor
+over `buddy watch --follow --as claude-code` and starts handling events.
+
+**Talking to it.** A command opens with "Hey Buddy" and closes with **"over and out"** (or "that's all, Buddy").
+Pause mid-sentence as much as you like: nothing is dispatched before the closing phrase, so an instruction is
+never acted on half-finished. "Cancel" or "never mind" drops it. If you forget to close, Buddy sends what it has
+after 10 seconds of silence and tells the session the command may be incomplete. Short tones mark a command
+opening, being sent and being cancelled (`listen.sounds: false` turns them off).
+
+| You say | Handled by | What happens |
+|---|---|---|
+| "Hey Buddy, the meeting is starting" | Buddy, in ~2s | records microphone and system audio |
+| "Hey Buddy, the meeting is over" | Buddy | ends it; the agent writes the summary and the follow-ups |
+| "Hey Buddy, stop listening" | Buddy | closes the microphone until `buddy resume` |
+| "Hey Buddy, stop" / "shut down" / "turn off" | Buddy | ends the process |
+| "Hey Buddy, review PR 123. Over and out." | the agent | investigates and answers in the session |
+| "Hey Buddy, post the update on Slack. Over and out." | the agent | drafts it and waits for you to approve the text |
+| "Hey Buddy, approve 4. Over and out." | the agent | carries out proposal 4 exactly as proposed |
+
+Control commands — meetings, pause, shutdown — take effect immediately, need no closing phrase, and never reach
+the agent. Commands are in English: the ASR uses an English-only model, which is faster and more accurate.
+
+**What is kept.** Speech that does not open with the wake phrase and is not part of a meeting is transcribed in
+memory and discarded. Meetings are recorded in full, about 44 KB of text per hour. System audio is captured only
+while a meeting is being recorded.
+
+**During a meeting**, the session receives a batch of speech at pauses, at most once a minute: one notification
+per utterance would flood the monitor, and an agent turn takes 40 to 90 seconds.
+
+**A forgotten meeting** ends by itself after 10 minutes without speech, or 4 hours of duration
+(`listen.meeting_idle_minutes`, `listen.meeting_max_minutes`).
+
+**Several readers.** Every `buddy watch --as <name>` has its own cursor on disk. A second session does not
+consume the first one's events, and a monitor that expired receives what it missed when it comes back. `--peek`
+looks without advancing.
+
+Other controls: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. The MCP server (`meeting_status`,
+`get_live_transcript`, `stop_meeting`) sees meetings opened by the listener.
+
+## Session mode
+
+```sh
 buddy start
 ```
 
-Os comandos antigos `meeting-agent` e `meeting-agent-mcp` continuam disponíveis como aliases de compatibilidade.
+- `Ctrl+Alt+Space`: ask for a panel update now. If the model is already working, the request is queued rather
+  than interrupting, so research in flight is not thrown away.
+- `Ctrl+Alt+M`: end the session.
+- `buddy stop`, from another terminal: the same.
 
-## Modo escuta
+Each answer replaces the whole suggestion set instead of stacking; when a topic is settled, the panel empties.
+Everything is also written to `suggestions.md`. With `ui.overlay: true`, suggestions also appear in an
+always-on-top window.
 
-```sh
-buddy listen --detach      # microfone atento a "Hey Buddy", em segundo plano
-buddy status               # listening, meeting ou paused
-buddy listen --stop        # desliga
-```
-
-Depois, na sessão do Claude Code que você deixa aberta (a mesma de outros monitores, como o do Slack):
-
-```text
-Liga o Buddy.
-```
-
-A skill `buddy-listener` arma um `Monitor` sobre `buddy watch --follow --as claude-code` e passa a tratar os
-eventos. Para desligar, diga "Desliga o Buddy" na sessão, ou "Hey Buddy, stop" em voz alta: o processo termina e o
-`watch` sai junto, encerrando o `Monitor`.
-
-**Como falar com ele.** Um comando começa em "Hey Buddy" e termina em **"over and out"** (ou "that's all,
-Buddy"). Pode fazer pausas no meio: nada é enviado antes da frase de encerramento. "Cancel" ou "never mind"
-descarta o que foi dito. Se você esquecer de encerrar, o Buddy envia após 10 segundos de silêncio e avisa o Claude
-que o comando pode estar incompleto. Sons curtos marcam o comando aberto, enviado e cancelado
-(`listen.sounds: false` desliga).
-
-| Você diz | Quem trata | O que acontece |
-|---|---|---|
-| "Hey Buddy, the meeting is starting" | o Buddy, em ~2s | passa a gravar microfone e áudio do sistema |
-| "Hey Buddy, the meeting is over" | o Buddy | encerra; o Claude escreve o resumo e as pendências |
-| "Hey Buddy, stop listening" | o Buddy | fecha o microfone até `buddy resume` |
-| "Hey Buddy, stop" / "shut down" / "turn off" | o Buddy | desliga o processo |
-| "Hey Buddy, review PR 123. Over and out." | o Claude | investiga e responde na sessão |
-| "Hey Buddy, post the update on Slack. Over and out." | o Claude | escreve o rascunho e espera você aprovar o texto |
-| "Hey Buddy, approve 4. Over and out." | o Claude | executa a proposta 4 exatamente como proposta |
-
-Os comandos de controle (reunião, pausa, desligar) valem na hora, sem "over and out", e nunca chegam ao Claude.
-Comandos são em inglês: o ASR usa um modelo só-inglês, mais rápido e preciso nas reuniões.
-
-**O que é guardado.** Fala que não começa com "Hey Buddy" e não faz parte de uma reunião é transcrita em memória
-e descartada. Reuniões são gravadas por inteiro — cerca de 44 KB por hora de texto. O áudio do sistema só é
-capturado durante reunião.
-
-**Durante a reunião,** a sessão recebe um lote de falas nas pausas, no máximo um por minuto: uma notificação por
-fala faria o `Monitor` ser interrompido por excesso de eventos, e o Claude leva de 40 a 90 segundos por turno.
-
-**Segurança.** Só o microfone gera comandos: alguém na chamada dizendo "hey buddy, merge it" fica gravado, nunca
-é obedecido. O que sai da máquina — postar, comentar, aprovar, mergear, criar ticket — sempre passa por um
-rascunho que você aprova. A transcrição é tratada como dado, não como instrução.
-
-**Reunião esquecida.** Termina sozinha após 10 minutos sem fala ou 4 horas de duração
-(`listen.meeting_idle_minutes`, `listen.meeting_max_minutes`).
-
-**Vários leitores.** Cada `buddy watch --as <nome>` tem seu próprio cursor em disco. Uma segunda sessão não
-consome os eventos da primeira, e um monitor que expirou recebe, ao ser religado, o que aconteceu no intervalo.
-`--peek` olha sem avançar.
-
-Outros controles: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. O servidor MCP (`meeting_status`,
-`get_live_transcript`, `stop_meeting`) enxerga as reuniões abertas pelo modo escuta.
-
-## Durante a reunião (modo sessão)
-
-- `Ctrl+Alt+Space`: pede uma atualização do painel agora. Se o Claude já estiver trabalhando, o pedido entra na
-  fila em vez de interromper — a pesquisa em curso não é jogada fora.
-- `Ctrl+Alt+M`: encerra a sessão.
-- `buddy stop`: encerra a sessão a partir de outro terminal.
-- `buddy status`: informa se existe captura ativa.
-
-Outros comandos:
+Other commands:
 
 ```sh
-buddy benchmark
+buddy benchmark            # compare ASR models on a recording of your own
 buddy config
 buddy devices
 buddy doctor
 buddy hotkeys
-buddy tool --list          # conectores somente leitura que o Claude usa (BigQuery, Datadog, Jira)
-buddy watch --as nome     # eventos do modo escuta desde a última leitura deste nome
+buddy tool --list          # the read-only connectors the agent may call
+buddy watch --as name      # listening-mode events since this name last read
 ```
 
-As sugestões aparecem na TUI. Com `ui.overlay: true`, também aparecem em uma janela sempre visível. Sugestões produzidas pela skill aparecem na conversa do Codex ou Claude.
+## Privacy and consent
 
-## Codex e Claude
+- **Recording is explicit.** Buddy starts idle. It records only when you ask, by voice or by command. Starting a
+  recording through MCP additionally requires `BUDDY_ALLOW_MCP_START=true` and `confirmed=true` in the call.
+- **Check the law and the room.** Recording rules differ by country and by employer. Get the participants'
+  consent before you record them.
+- **Only your microphone can command Buddy.** Someone on the call saying "hey buddy, merge it" is recorded and
+  never obeyed. A transcript is treated as data, not as instructions.
+- **Anything that leaves the machine takes two steps.** Posting, commenting, approving, merging, creating a
+  ticket: the agent drafts it and acts only after you approve that exact text.
+- **Nothing sensitive belongs in the repository.** Recordings, `config.yaml`, `.env` and ASR models are
+  gitignored.
 
-Os instaladores copiam a skill para `~/.codex/skills/meeting-copilot-context` e `~/.claude/skills/meeting-copilot-context`, quando os clientes estão disponíveis, e registram o MCP local com o nome `buddy`.
+## How the brain works
 
-Depois da instalação, reinicie o cliente e experimente:
+With `llm_provider: claude-code`, every analysis is a headless Claude Code run:
+
+| Decision | Why |
+|---|---|
+| runs in `claude_workdir` | that directory's `CLAUDE.md` describes your work; Buddy has no such knowledge |
+| `--setting-sources project` | does not inherit user allow-rules, which often permit `git push` |
+| `--permission-mode dontAsk` | nobody is watching to approve; whatever is not allowed is denied |
+| `claude_allowed_tools` / `claude_disallowed_tools` | read-only; write verbs of your helpers blocked explicitly |
+| no `ANTHROPIC_API_KEY` in the environment | the key would bill the API instead of using the subscription |
+| native `claude.exe` on Windows | the npm `.cmd` shim truncates the system prompt at the first newline |
+| `--session-id`, then `--resume` | one conversation per meeting; from the second turn the context is cached |
+
+Denied calls show up as `tools: denied` and are recorded in `copilot.json`, so you can decide whether to widen a
+rule. Two consecutive brain failures turn the panel red and the reason is stored — a week of meetings with no
+suggestions once went unnoticed for exactly that reason.
+
+**BigQuery and Datadog** reach the agent through `buddy tool`, which enforces the guards in code: `SELECT` only,
+a mandatory dry run, a refusal above `bigquery_max_scan_gb`, and `--maximum_bytes_billed`. **Jira and Slack** use
+your own helper scripts, allowed only in their read-only subcommands. Credentials that live in files and are
+never exported are loaded through `env_files` in `config.yaml`.
+
+**Latency and cost.** Measured on a working conversation: 86s on the first turn (cold start, with a Datadog
+query) and 43s on the next (Jira and git). It is meant for positioning and for questions left hanging, not for
+instant answers. `claude_model: sonnet` or `claude_effort: medium` bring it down. Nothing is billed per token,
+but each run counts against your subscription limits; `copilot.json` carries a dollar estimate so you can follow
+it. The model runs only when there is new speech, so silence costs nothing.
+
+**Other providers.** `openai`, `anthropic` and `ollama` still work, with the older engine: preloaded context, a
+project index and a background investigator. None of them knows you the way your own agent session does, and
+`auto` never picks `claude-code` — spending the subscription is an explicit choice.
+
+## MCP server and skills
+
+The local MCP server exposes meeting data only, with bounded reads: status, live transcript, saved meetings,
+search, copilot context and related earlier meetings. Project reading is left to the agent's native tools, which
+keeps the access boundary clear.
+
+Two skills are installed:
+
+- `meeting-copilot-context` (Claude Code and Codex) — relate a live or saved meeting to code, docs, git and
+  external research, on demand.
+- `buddy-listener` (Claude Code) — make a session the brain behind the listener: arm the monitor, act on voice
+  commands, suggest during meetings.
+
+## What a meeting produces
+
+Each meeting is a folder under `meetings/YYYY-MM-DD_HHMMSS/`:
 
 ```text
-Use $meeting-copilot-context para relacionar os últimos cinco minutos da reunião com este projeto.
-Use $meeting-copilot-context para verificar no código o risco que acabou de ser mencionado.
-Use $meeting-copilot-context para transformar a última reunião em próximos passos do projeto.
+transcript.txt      readable transcript, written as each utterance lands
+transcript.jsonl    the same, structured
+suggestions.md      everything the panel suggested, with its reasoning
+summary.md          the final report
+metadata.json       start, end, ASR backend and subsystem failures
+copilot.json        memory, current suggestions, usage, last error, denied calls, brain session id
 ```
 
-O MCP fornece somente contexto de reunião com limites definidos. A leitura do projeto é feita pelas ferramentas nativas do agente, mantendo uma fronteira clara de acesso.
+`copilot.json` keeps `brain_session_id`: after the meeting, `claude --resume <id>` in `claude_workdir` reopens
+the same conversation, with everything the agent read during the call. With `save_audio: false`, the default,
+audio is discarded after processing.
 
-## Arquitetura
+## Architecture
 
 ```text
 System audio -> platform capture -> bounded queue --+
-                                                   +-> ASR -> event bus -> TUI / overlay
-Microphone  -> platform capture -> bounded queue --+                 +-> incremental storage
-                                                                     +-> triggers / memory -> LLM
+                                                    +-> ASR -> event bus -> TUI / overlay / event log
+Microphone   -> platform capture -> bounded queue --+                 +-> incremental storage
+                                                                      +-> triggers / memory -> agent
 
-Saved meetings <-> local MCP <-> Codex or Claude <-> current project / docs / git / web
+Saved meetings <-> local MCP <-> your agent session <-> current project / docs / git / web
 ```
 
-Backends de captura:
+Capture, ASR, storage, UI and the model are isolated, so one failing subsystem does not take the session down.
 
-- Windows: WASAPI loopback via `soundcard`.
-- Linux: PipeWire via `pw-record`/`pw-cat`.
-- macOS: helper Swift compilado localmente usando ScreenCaptureKit.
+## Limitations
 
-## Arquivos gerados
+- `ME` and `REMOTE` are physical sources, not people. There is no diarisation.
+- The listening mode needs Claude Code; other agents can read `buddy watch` on request, but nothing wakes them.
+- Suggestion quality during a live meeting has not been measured yet; that is the next test.
+- Each update takes 40 to 90 seconds. The panel follows the meeting; it does not answer a question on the spot.
+- Wake-phrase detection transcribes all microphone speech to decide, then discards it. A dedicated wake-word
+  detector would avoid that and cost less CPU (about 8% at rest today).
+- Permission rules match by command prefix. A helper invoked differently from the rule (`sh ~/bin/jira.sh`
+  rather than `~/bin/jira.sh`) is denied, and shows up in `tool_denials`.
+- No desktop app, system tray or signed installer yet.
+- Calendar, meeting platform, Jira, GitHub and CRM integrations are not automatic.
 
-Cada sessão fica em `meetings/YYYY-MM-DD_HHMMSS/`:
-
-```text
-transcript.txt      transcrição legível, gravada a cada fala
-transcript.jsonl    a mesma, estruturada
-suggestions.md      tudo que o painel sugeriu, com o motivo
-summary.md          relatório final
-metadata.json       início, fim, backend de ASR e falhas de subsistema
-copilot.json        memória, sugestões atuais, uso, último erro, chamadas bloqueadas e id da sessão do Claude
-```
-
-O `copilot.json` guarda o `brain_session_id`. Depois da reunião, no diretório configurado em `claude_workdir`,
-`claude --resume <id>` abre a mesma conversa — com tudo que o Claude leu e pesquisou durante a reunião.
-
-Com `save_audio: false`, padrão do projeto, o áudio é descartado após o processamento. Quando habilitado, são criados `audio_me.wav` e `audio_remote.wav`.
-
-## O cérebro
-
-Com `llm_provider: claude-code`, cada análise é uma execução do Claude Code headless:
-
-| Decisão | Por quê |
-|---|---|
-| roda em `claude_workdir` | é o diretório cujo `CLAUDE.md` descreve o seu trabalho; o Buddy não tem esse conhecimento |
-| `--setting-sources project` | não herda as regras de *allow* do usuário, que costumam liberar `git push` |
-| `--permission-mode dontAsk` | ninguém está olhando para aprovar; o que não está liberado é negado |
-| `claude_allowed_tools` / `claude_disallowed_tools` | só leitura; verbos de escrita dos seus helpers bloqueados explicitamente |
-| sem `ANTHROPIC_API_KEY` no ambiente | a chave faria o Claude Code cobrar a API em vez da assinatura |
-| `claude.exe` nativo no Windows | o shim `.cmd` do npm corta o prompt de sistema na primeira quebra de linha |
-| `--session-id` e depois `--resume` | uma conversa por reunião; do segundo turno em diante o contexto vem do cache |
-
-A transcrição é tratada como dado, nunca como instrução: se alguém na reunião pedir uma ação, o Claude no máximo
-sugere que você a faça.
-
-Chamadas negadas aparecem no STATUS como `tools: denied` e ficam em `copilot.json`, para você decidir se amplia a
-regra ou se ela deve continuar bloqueada. Duas falhas seguidas do cérebro ficam vermelhas e o motivo é gravado —
-uma semana de reuniões sem sugestão passou despercebida justamente por falta disso.
-
-**BigQuery e Datadog** chegam ao Claude pelo `buddy tool`, que aplica as proteções em código: apenas `SELECT`,
-dry-run obrigatório, recusa acima de `bigquery_max_scan_gb` e `--maximum_bytes_billed`. `buddy tool --list` mostra
-o que existe. **Jira e Slack** usam os seus próprios helpers, liberados só nos subcomandos de leitura.
-
-Credenciais que vivem em arquivo e nunca são exportadas entram por `env_files` no `config.yaml`.
-
-### Latência e consumo
-
-Medido numa conversa de trabalho: **86s** no primeiro turno (partida fria, com consulta ao Datadog) e **43s** no
-seguinte (Jira e git). Serve para posicionamento e respostas a perguntas que ficam no ar; não é resposta
-instantânea. `claude_model: sonnet` ou `claude_effort: medium` reduzem o tempo.
-
-Nada é cobrado por token, mas cada execução conta para os limites da sua assinatura. O `usage` em `copilot.json`
-traz uma estimativa em dólares (`cost_usd_estimate`) para você acompanhar: no teste, $0,37 no primeiro turno e
-$0,10 nos seguintes. O Claude só roda quando há fala nova, então silêncio não consome nada.
-
-### Outros provedores
-
-`openai`, `anthropic` e `ollama` continuam disponíveis, com o motor antigo: contexto pré-carregado, índice de
-projeto e investigador em segundo plano. Nenhum deles conhece você, e o `auto` nunca escolhe o `claude-code` —
-gastar a assinatura é uma escolha explícita.
-
-## Provedores e privacidade
-
-O áudio nunca sai da máquina: a transcrição é sempre local e não existe modo de ASR em nuvem.
-
-O que chega ao modelo é texto: a transcrição recente, a memória da reunião e aquilo que o próprio Claude decidir
-ler com as ferramentas liberadas. Com `claude-code`, isso vai para a Anthropic pela sua conta do Claude Code, sob as
-mesmas regras do seu uso normal.
-
-Iniciar por MCP exige `BUDDY_ALLOW_MCP_START=true` e `confirmed=true` na chamada. Verifique consentimento dos
-participantes, legislação local e políticas corporativas antes de gravar.
-
-Os nomes antigos das variáveis `MEETING_AGENT_*` e `MEETING_COPILOT_ALLOW_MCP_START` continuam aceitos.
-
-## Resultado nesta máquina
-
-Validado em 2026-08-26 no Windows 11 Pro, Intel Core i5-1135G7, 16 GB de RAM, Intel Iris Xe e sem CUDA. O backend selecionado foi `faster-whisper base.en`, CPU `int8`, com RTF aproximado de `0.036` para uma amostra de 60 segundos e latência final observada de aproximadamente 1,4 a 1,7 segundo após o fim da fala.
-
-Resultados variam por máquina. Execute `buddy benchmark` para medir o ambiente alvo.
-
-## Limitações atuais
-
-- `ME` e `REMOTE` representam fontes físicas, não pessoas individuais.
-- Não há diarização ou identificação de cada participante remoto.
-- Linux e macOS rodam na CI, mas ainda precisam de teste end-to-end com áudio real antes de serem considerados
-  validados. Captura, ASR e o helper Swift dependem de hardware e não entram no gate automatizado.
-- O Buddy ainda não possui aplicativo desktop completo, bandeja do sistema ou instalador assinado.
-- Integrações com calendário, plataformas de reunião, Jira, GitHub ou CRM ainda não são automáticas.
-- Cada atualização leva de 40 a 90 segundos com o Claude Code. O painel acompanha a reunião, mas não responde
-  na hora a uma pergunta recém-feita.
-- Regras de permissão casam por prefixo do comando. Se o Claude invocar um helper de um jeito diferente do
-  previsto (`sh ~/bin/jira.sh` e não `~/bin/jira.sh`), a chamada é negada e aparece em `tool_denials`.
-- No modo sessão, uma sessão esquecida aberta enquanto o computador toca áudio continua transcrevendo e
-  chamando o Claude. O modo escuta encerra reuniões sozinho.
-- No modo escuta, a detecção de "Hey Buddy" transcreve toda fala do microfone para decidir, ainda que
-  descarte o resto. Um detector dedicado de palavra de ativação evitaria isso e gastaria menos CPU (hoje
-  ~8% em repouso).
-- O `Monitor` pertence à sessão que o criou e expira a cada 30 minutos; a skill o religa. Com a sessão
-  fechada, os eventos esperam em disco.
-
-Veja o [roadmap de capacidades](docs/ROADMAP.md) para as próximas evoluções possíveis.
-
-## Desenvolvimento
+## Development
 
 ```sh
 python -m venv .venv
-# Windows: .\.venv\Scripts\python -m pip install -e ".[dev]"
+# Windows:     .\.venv\Scripts\python -m pip install -e ".[dev]"
 # Linux/macOS: .venv/bin/python -m pip install -e ".[dev]"
 pytest -q --cov --cov-fail-under=80
 ```
 
-O projeto requer Python 3.12, 3.13 ou 3.14.
+CI runs on `ubuntu-latest` (3.12 and 3.13), `windows-latest` and `macos-15`: tests with coverage, a compile check
+of every module, an import check of the current platform's modules, a syntax check of the Swift helper in
+`native/macos/MeetingAudioCapture.swift`, and a CLI smoke test.
 
-A CI roda em `ubuntu-latest` (3.12 e 3.13), `windows-latest` e `macos-15`. Ela executa os testes com cobertura,
-verifica que todo módulo compila e que os módulos da plataforma atual importam, valida a sintaxe do helper Swift em
-`native/macos/MeetingAudioCapture.swift` e confirma que a CLI inicia.
+The 80% coverage gate covers the hardware-independent core: copilot, memory, MCP, TUI, overlay, storage,
+configuration and ASR selection. Audio capture, ASR, benchmark, `doctor`, CLI and session need real devices and
+are verified by `buddy doctor` and the checklist in [docs/PORTABILITY.md](docs/PORTABILITY.md).
 
-O gate de cobertura de 80% cobre o núcleo independente de hardware: copiloto, memória, MCP, TUI, overlay,
-armazenamento, configuração e seleção de ASR. Captura de áudio, ASR, benchmark, `doctor`, CLI e sessão dependem de
-dispositivos reais e são verificados por `buddy doctor` e pela checklist em [docs/PORTABILITY.md](docs/PORTABILITY.md).
+Issues and pull requests are welcome. Please keep personal identifiers, credentials and recordings out of
+anything you submit.
 
-Antes de publicar alterações, execute os testes e valide a skill com o script `quick_validate.py` do `skill-creator`.
+The older `meeting-agent` and `meeting-agent-mcp` commands remain as compatibility aliases, as do the
+`MEETING_AGENT_*` and `MEETING_COPILOT_ALLOW_MCP_START` environment variable names.
+
+## License
+
+[MIT](LICENSE).

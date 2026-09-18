@@ -1,27 +1,29 @@
-# Portabilidade do Buddy
+# Portability
 
-Este documento descreve o que uma máquina nova precisa para executar o Buddy - Meeting Copilot.
+What a new machine needs in order to run Buddy - Meeting Copilot.
 
-## Requisitos compartilhados
+## Shared requirements
 
-- Python 3.12, 3.13 ou 3.14.
-- Git para clonar e atualizar o repositório.
-- Internet durante a primeira instalação e o primeiro download do modelo local.
-- Aproximadamente 2 GB livres para ambiente Python, caches e um modelo local básico. Modelos maiores exigem mais espaço.
-- Um dispositivo de saída e um microfone reconhecidos pelo sistema.
-- FFmpeg é recomendado e necessário para o benchmark baseado em arquivos de mídia; a captura ao vivo não depende dele em todos os backends.
+- Python 3.12, 3.13 or 3.14.
+- Git, to clone and update the repository.
+- Internet during the first install and the first local-model download.
+- About 2 GB free for the Python environment, caches and a basic local model. Larger models need more.
+- An output device and a microphone the system recognises.
+- FFmpeg is recommended, and required for the file-based benchmark; live capture does not depend on it on every
+  backend.
 
-Codex, Claude e chaves de API são opcionais. Sem eles, o Buddy ainda pode transcrever localmente e salvar reuniões, mas não terá pesquisa de projeto via skill nem sugestões de um provedor remoto.
+A coding agent and API keys are optional. Without them Buddy still transcribes locally and saves meetings, but
+there is no project research through the skill and no suggestions from a model.
 
 ## Windows 10/11
 
-Requisitos:
+Requirements:
 
-- PowerShell 5.1 ou mais recente.
-- Python x64 em uma versão suportada; o instalador tenta 3.14, 3.13 e 3.12 nessa ordem.
-- Endpoint WASAPI de saída e microfone.
+- PowerShell 5.1 or newer.
+- 64-bit Python in a supported version; the installer tries 3.14, 3.13 and 3.12, in that order.
+- A WASAPI output endpoint and a microphone.
 
-Instalação e verificação:
+Install and verify:
 
 ```powershell
 .\scripts\install-windows.ps1
@@ -30,27 +32,26 @@ buddy doctor
 buddy devices
 ```
 
-O Windows é a plataforma atualmente validada em hardware real.
+Windows is the platform currently validated on real hardware.
 
 ## Linux desktop
 
-Requisitos:
+Requirements:
 
-- PipeWire ativo na sessão do usuário.
-- `pw-record` ou `pw-cat` disponível no `PATH`.
-- Python e suporte do desktop para os atalhos desejados.
-- `python3-venv`, `python3-dev` e um compilador C: no Linux o `pynput` puxa o
-  `evdev`, que não publica wheels e precisa ser compilado. O `install-linux.sh`
-  verifica isso antes de criar o venv.
+- PipeWire running in the user session.
+- `pw-record` or `pw-cat` on the `PATH`.
+- Python, and desktop support for whichever global hotkeys you want.
+- `python3-venv`, `python3-dev` and a C compiler: on Linux `pynput` pulls in `evdev`, which publishes no wheels
+  and has to be compiled. `install-linux.sh` checks for this before creating the venv.
 
-Verificação prévia:
+Check first:
 
 ```sh
 python3 --version
 command -v pw-record || command -v pw-cat
 ```
 
-Instalação:
+Install:
 
 ```sh
 ./scripts/install-linux.sh
@@ -59,27 +60,26 @@ buddy doctor
 buddy devices
 ```
 
-Em Wayland, atalhos globais podem precisar ser configurados no próprio ambiente gráfico. O nó PipeWire de saída também pode precisar ser escolhido explicitamente em configurações incomuns.
+On Wayland, global hotkeys may have to be configured in the desktop environment itself. In unusual setups the
+output PipeWire node may also need to be chosen explicitly.
 
-`buddy doctor` executa uma captura real e curta em cada fluxo, então `System audio`
-e `Microphone` só ficam `ok` quando o PipeWire de fato entregou bytes. O fluxo
-REMOTE lê o monitor do sink padrão (`stream.capture.sink`), portanto captura o que
-está *tocando*; escolha o sink correto em `audio.system_device` se houver mais de um.
+`buddy doctor` runs a real, short capture on each stream, so `System audio` and `Microphone` turn `ok` only once
+PipeWire actually delivered bytes. The REMOTE stream reads the default sink's monitor (`stream.capture.sink`),
+so it captures what is *playing*; pick the right sink in `audio.system_device` if there is more than one.
 
-Validado em Ubuntu 24.04 (PipeWire 1.0.5, X11, Python 3.12.3): ME e REMOTE são
-gravados em paralelo e transcritos separadamente. Em Wayland o `pynput` não
-registra o atalho global; a sessão continua gravando e o painel STATUS mostra
-`hotkeys: warning`.
+Validated on Ubuntu 24.04 (PipeWire 1.0.5, X11, Python 3.12.3): ME and REMOTE are recorded in parallel and
+transcribed separately. On Wayland `pynput` does not register the global hotkey; the session keeps recording and
+the STATUS panel shows `hotkeys: warning`.
 
-## macOS 15 ou mais recente
+## macOS 15 or newer
 
-Requisitos:
+Requirements:
 
-- Python em uma versão suportada.
-- Xcode Command Line Tools com `swiftc`.
-- Permissões de Screen Recording, Microphone e, para atalhos globais, Accessibility.
+- Python in a supported version.
+- Xcode Command Line Tools, with `swiftc`.
+- Screen Recording and Microphone permissions, plus Accessibility for global hotkeys.
 
-Instalação:
+Install:
 
 ```sh
 xcode-select --install
@@ -89,30 +89,31 @@ buddy doctor
 buddy devices
 ```
 
-O instalador compila `native/macos/MeetingAudioCapture.swift` para `.venv/bin/meeting-audio-macos`. O binário não é armazenado no Git porque depende da plataforma alvo.
+The installer compiles `native/macos/MeetingAudioCapture.swift` into `.venv/bin/meeting-audio-macos`. That binary
+is not stored in Git, because it depends on the target platform.
 
-## O que migrar entre máquinas
+## Moving between machines
 
-Migre:
+Move:
 
-- o repositório Git;
-- alterações próprias em `config.yaml`, revisadas para os novos dispositivos;
-- opcionalmente a pasta `meetings/`, se o histórico também precisar viajar.
+- the Git repository;
+- your own changes to `config.yaml`, reviewed for the new devices;
+- optionally the `meetings/` folder, if the history should travel too.
 
-Não migre pelo repositório:
+Do not move through the repository:
 
-- `.env` ou chaves de API;
+- `.env` or API keys;
 - `.venv`;
-- caches e modelos baixados;
-- `.meeting-agent`, que contém estado transitório;
-- IDs de dispositivo sem validá-los na máquina nova.
+- caches and downloaded models;
+- `.meeting-agent`, which holds transient state;
+- device IDs, without validating them on the new machine.
 
-## Checklist de aceitação em uma máquina nova
+## Acceptance checklist on a new machine
 
-1. O instalador termina sem erros.
-2. `buddy doctor` não mostra falha no backend de áudio.
-3. `buddy devices` lista saída e microfone esperados.
-4. Uma sessão curta distingue `ME` e `REMOTE` e termina com `buddy stop`.
-5. `summary.md` e `transcript.jsonl` são criados.
-6. Se Codex/Claude estiverem instalados, o MCP `buddy` conecta e `meeting_status` responde.
-7. Se nuvem for habilitada, consentimento e opt-in foram verificados antes do teste.
+1. The installer finishes without errors.
+2. `buddy doctor` reports no audio backend failure.
+3. `buddy devices` lists the expected output and microphone.
+4. A short session tells `ME` and `REMOTE` apart and ends with `buddy stop`.
+5. `summary.md` and `transcript.jsonl` are created.
+6. If an agent client is installed, the `buddy` MCP server connects and `meeting_status` answers.
+7. If a remote provider is enabled, consent and opt-in were checked before the test.
