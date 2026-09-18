@@ -121,7 +121,7 @@ async def test_a_full_display_feed_starts_over_instead_of_piling_up(tmp_path):
     for n in range(20):
         log.append("SAID", text=f"line {n} " + "x" * 40)
 
-    assert [p.name for p in tmp_path.iterdir() if p.name.startswith("live")] == ["live.jsonl", "live.meta.json"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["live.jsonl", "live.meta.json"]
 
 
 # ---------------------------------------------------------------- typed
