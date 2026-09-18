@@ -61,12 +61,10 @@ copilot:
   semantic_memory_matches: 3
   output_language: en
   # Tier 1 refreshes the panel every few seconds, so it runs the fastest model.
-  # Runs today: the OpenAI account already has credit.
   openai_model: gpt-5.4-mini
   # gpt-5 models reason by default; on a full meeting prompt that costs tens of
   # seconds. none | low | medium | high | xhigh
   openai_reasoning_effort: none
-  # Ready for a switch of llm_provider once Anthropic credit exists.
   anthropic_model: claude-haiku-4-5
   # Ranked project excerpts are added to the cached prompt prefix. Turn this off to
   # keep source code entirely out of the requests.
@@ -82,15 +80,15 @@ copilot:
   investigation_max_turns: 8
   investigation_timeout_seconds: 180
   investigations_in_flight: 1
-  # Conectores externos. Somente leitura; uma query que varreria mais que o limite
-  # e recusada no dry run gratuito, antes de ser cobrada.
+  # External connectors, read-only. A query that would scan more than the limit is
+  # refused on the free dry run, before it is billed.
   bigquery_enabled: true
   # Pays for the query; empty falls back to GOOGLE_CLOUD_PROJECT.
   bigquery_billing_project: ''
   # Where the data actually lives. Tables are addressed fully qualified.
   bigquery_data_projects: []
   bigquery_max_scan_gb: 20
-  jira_enabled: true          # ativa sozinho quando JIRA_* existir no .env
+  jira_enabled: true          # activates when JIRA_URL, JIRA_EMAIL and JIRA_API_TOKEN exist
   datadog_enabled: true       # activates when DD_SITE, DD_API_KEY and DD_APP_KEY exist
   ollama_model: qwen3:4b
 
@@ -104,6 +102,9 @@ listen:
   command_silence_seconds: 10  # a forgotten closing phrase: sent anyway, marked "may be incomplete"
   command_max_seconds: 120
   sounds: true                 # short tones when a command opens, is sent, or is cancelled (Windows)
+  window: true                 # Buddy's floating window opens with `buddy listen --detach`
+  window_on_top: true
+  window_shows: buddy          # the Claude session's turns to show: buddy (only those Buddy started) or all
   batch_min_seconds: 60        # meeting speech reaches the session at most once per interval
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150

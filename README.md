@@ -20,7 +20,8 @@ whatever the agent decides to read with the read-only tools you allow it.
 **Listening mode (`buddy listen`) — recommended.** A small background process keeps the microphone open for the
 wake phrase. Speech that is neither a command nor part of a meeting is transcribed in memory and dropped. What
 it notices goes to an append-only event log, and an agent session you already have open reads that log and acts:
-it answers your voice commands and, during a meeting, suggests what to say. No window of its own.
+it answers your voice commands and, during a meeting, suggests what to say. A small floating window shows it
+all as it happens, and takes typed commands too.
 
 **Session mode (`buddy start`).** One meeting at a time, with a terminal UI of its own and an optional
 always-on-top overlay. Buddy calls the model itself and keeps a live suggestion panel.
@@ -87,6 +88,26 @@ buddy listen --stop        # turn it off
 Then, in the Claude Code session you keep open, say "turn Buddy on". The `buddy-listener` skill arms a monitor
 over `buddy watch --follow --as claude-code` and starts handling events.
 
+**Buddy's window.** A small floating window opens with the listener, and it is the one place to follow and talk
+to Buddy:
+
+- the meeting as it is said, about 1.5 seconds after each utterance;
+- a command as you dictate it, then when it is sent;
+- what the Claude Code session does with it — each tool it uses, and its reply;
+- the suggestions from its latest reply to meeting speech, pinned on top;
+- a box to type commands, which reach the session exactly like spoken ones, even while the microphone is paused;
+- buttons to record a meeting, pause, and turn Buddy off.
+
+The window thinks about nothing, and costs nothing: the session watching Buddy stays the brain, with everything it
+already knows. To show what that session is doing, the window reads the conversation record Claude Code keeps on
+disk. That format belongs to Claude Code and may change; if it does, the window still shows the meeting and your
+commands, and the replies stay in the chat. By default only the turns Buddy started are shown ("Only Buddy"); the
+rest of the session stays out of the window unless you switch to "All turns".
+
+`buddy window` reopens it; `buddy live` shows the same in a terminal — next to the Claude chat in your editor, for
+example — and `buddy say "review PR 123"` sends a typed command from any shell. The window needs the `window`
+extra, which the installers include (`pip install -e ".[window]"`); on Linux, pywebview also needs GTK or Qt.
+
 **Talking to it.** A command opens with "Hey Buddy" and closes with **"over and out"** (or "that's all, Buddy").
 Pause mid-sentence as much as you like: nothing is dispatched before the closing phrase, so an instruction is
 never acted on half-finished. "Cancel" or "never mind" drops it. If you forget to close, Buddy sends what it has
@@ -102,6 +123,7 @@ opening, being sent and being cancelled (`listen.sounds: false` turns them off).
 | "Hey Buddy, review PR 123. Over and out." | the agent | investigates and answers in the session |
 | "Hey Buddy, post the update on Slack. Over and out." | the agent | drafts it and waits for you to approve the text |
 | "Hey Buddy, approve 4. Over and out." | the agent | carries out proposal 4 exactly as proposed |
+| typed in the window: `review PR 123` | the agent | the same as saying it |
 
 Control commands — meetings, pause, shutdown — take effect immediately, need no closing phrase, and never reach
 the agent. Commands are in English: the ASR uses an English-only model, which is faster and more accurate.
@@ -148,6 +170,9 @@ buddy doctor
 buddy hotkeys
 buddy tool --list          # the read-only connectors the agent may call
 buddy watch --as name      # listening-mode events since this name last read
+buddy window               # Buddy's floating window
+buddy live                 # the same, in a terminal
+buddy say "review PR 123"  # a typed command
 ```
 
 ## Privacy and consent
@@ -156,8 +181,10 @@ buddy watch --as name      # listening-mode events since this name last read
   recording through MCP additionally requires `BUDDY_ALLOW_MCP_START=true` and `confirmed=true` in the call.
 - **Check the law and the room.** Recording rules differ by country and by employer. Get the participants'
   consent before you record them.
-- **Only your microphone can command Buddy.** Someone on the call saying "hey buddy, merge it" is recorded and
-  never obeyed. A transcript is treated as data, not as instructions.
+- **Only you can command Buddy** — your microphone, or what you type in its window. Someone on the call saying
+  "hey buddy, merge it" is recorded and never obeyed. A transcript is treated as data, not as instructions.
+- **The window shows only what Buddy keeps:** meetings and commands. Speech outside a meeting that is not a command
+  is never displayed. Text is always rendered as text, never as markup.
 - **Anything that leaves the machine takes two steps.** Posting, commenting, approving, merging, creating a
   ticket: the agent drafts it and acts only after you approve that exact text.
 - **Nothing sensitive belongs in the repository.** Recordings, `config.yaml`, `.env` and ASR models are

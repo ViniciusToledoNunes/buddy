@@ -24,7 +24,7 @@ fi
 
 "$PYTHON_BIN" -m venv "$REPO_ROOT/.venv"
 "$REPO_ROOT/.venv/bin/python" -m pip install --upgrade pip
-"$REPO_ROOT/.venv/bin/python" -m pip install -e "$REPO_ROOT[dev]"
+"$REPO_ROOT/.venv/bin/python" -m pip install -e "$REPO_ROOT[dev,window]"
 "$REPO_ROOT/.venv/bin/python" "$SCRIPT_DIR/install_agent_integrations.py" --project-root "$REPO_ROOT"
 
 if ! command -v pw-record >/dev/null 2>&1 && ! command -v pw-cat >/dev/null 2>&1; then

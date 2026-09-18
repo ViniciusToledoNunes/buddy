@@ -27,7 +27,7 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
 }
 
 & $VenvPython -m pip install --upgrade pip
-& $VenvPython -m pip install -e "$RepoRoot[dev]"
+& $VenvPython -m pip install -e "$RepoRoot[dev,window]"
 $IntegrationArgs = @("--project-root", $RepoRoot)
 if ($Client -eq "Codex") { $IntegrationArgs += @("--client", "codex") }
 if ($Client -eq "Claude") { $IntegrationArgs += @("--client", "claude") }

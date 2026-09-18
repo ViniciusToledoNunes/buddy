@@ -23,6 +23,10 @@ central rule: recording is explicit.
 - **Commands that wait for you to finish.** A command opens with the wake phrase and is dispatched only on a
   closing phrase ("over and out"), with cancel phrases, a silence fallback marked as possibly incomplete, and
   tones for opened, sent and cancelled. Voice shutdown ends the process, and the watch exits with it.
+- **Buddy's window.** One floating window to follow and talk to Buddy: the meeting as it is said, commands as
+  they are dictated or typed, and what the Claude Code session does with them, read from the session's own
+  record — so the session stays the brain, with its context, and showing costs no model turn. The same view runs
+  in a terminal (`buddy live`).
 
 ## Next
 
@@ -32,9 +36,9 @@ The listening mode depends on Claude Code's monitor tool to wake a session when 
 has an equivalent today (Codex has an open feature request, openai/codex#29922). The goal is for "Hey Buddy" to
 work wherever the user already codes.
 
-- Prefer routes that write into the session the user already has open: Codex's app-server, or a small editor
-  extension that posts events into the chat. A window of Buddy's own is the last resort.
-- Stream the transcript into the session as it is captured, not only batched suggestions.
+- The session stays the brain, because it holds the user's context. Delivering events to it is the open problem
+  (Codex's app-server, or an editor extension); Buddy's window then mirrors it, as it does for Claude Code — Codex
+  also keeps its sessions on disk.
 - Keep one shared skill protocol with a short per-agent "turn on" section, and extend the installer to the other
   clients.
 

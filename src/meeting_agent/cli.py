@@ -264,6 +264,8 @@ def listen(
             state = listener_state(runtime)
             if state:
                 console.print(f"Buddy is listening for \"Hey Buddy\" (pid {state['pid']}).")
+                if load_settings().listen.window:
+                    _open_window(runtime)
                 return
             time.sleep(0.5)
         console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
@@ -295,6 +297,7 @@ def watch(
     room, and a monitor must not outlive the listener it follows.
     """
     from .listener import EventReader, format_event, listener_state
+    from .live import register_brain, unregister_brain
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -304,6 +307,11 @@ def watch(
     cursor = reader.load_cursor()
     settings = load_settings()
     last_type = ""
+    # Run by a Claude Code session, the watch knows which one it is: Buddy's window
+    # mirrors that session's own record to show what it does with each event.
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if follow and not peek and session_id:
+        register_brain(runtime, session_id, safe)
 
     def drain() -> None:
         nonlocal cursor, last_type
@@ -317,19 +325,125 @@ def watch(
         if not peek:
             reader.save_cursor(cursor)
 
-    while True:
-        drain()
-        if listener_state(runtime) is None:
-            # The listener writes LISTENER_DOWN just before it lets go of its state, so one
-            # more read catches it; a crash leaves no such line, and one is printed here.
-            # Exiting ends a Monitor, so nothing keeps watching a listener that is gone.
+    try:
+        while True:
             drain()
-            if last_type != "LISTENER_DOWN":
-                print("LISTENER_DOWN Buddy is not listening; start it with `buddy listen --detach`.", flush=True)
-            return
-        if not follow:
-            return
-        time.sleep(max(0.2, interval))
+            if listener_state(runtime) is None:
+                # The listener writes LISTENER_DOWN just before it lets go of its state, so one
+                # more read catches it; a crash leaves no such line, and one is printed here.
+                # Exiting ends a Monitor, so nothing keeps watching a listener that is gone.
+                drain()
+                if last_type != "LISTENER_DOWN":
+                    print("LISTENER_DOWN Buddy is not listening; start it with `buddy listen --detach`.", flush=True)
+                return
+            if not follow:
+                return
+            time.sleep(max(0.2, interval))
+    finally:
+        if follow and not peek and session_id:
+            unregister_brain(runtime)
+
+
+@app.command()
+def say(text: list[str] = typer.Argument(..., help="The command, as you would say it after \"Hey Buddy\".")) -> None:
+    """Send Buddy a typed command. It reaches the session exactly like a spoken one."""
+    from .listener import submit
+
+    _require_listener()
+    submit(_runtime_dir(), " ".join(text))
+    console.print("Sent.")
+
+
+@app.command()
+def live(
+    show_all: bool = typer.Option(False, "--all", help="Show every turn of the Claude session, not only Buddy's."),
+) -> None:
+    """Follow Buddy in this terminal: the meeting as it is said, commands, and Claude's work.
+
+    Lines typed here are sent to Buddy like `buddy say`. Ctrl+C leaves.
+    """
+    import threading
+
+    from .listener import listener_state, submit
+    from .live import LiveView, terminal_line
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    runtime = _runtime_dir()
+    settings = load_settings()
+    view = LiveView(runtime, "all" if show_all else settings.listen.window_shows)
+    console.print("[dim]Following Buddy. Type a command and press Enter to send it; Ctrl+C leaves.[/dim]")
+
+    def read_typed() -> None:
+        for line in sys.stdin:
+            if line.strip():
+                if listener_state(runtime):
+                    submit(runtime, line.strip())
+                else:
+                    console.print("[red]Buddy is off.[/red]")
+
+    if sys.stdin.isatty():
+        threading.Thread(target=read_typed, name="buddy-live-input", daemon=True).start()
+    shown: list[str] = []
+    try:
+        while True:
+            for item in view.poll():
+                console.print(terminal_line(item), highlight=False)
+            if view.suggestions != shown:
+                shown = list(view.suggestions)
+                if shown:
+                    console.print("[bold]Suggestions[/bold]\n" + "\n".join(f"  {s}" for s in shown), highlight=False)
+            time.sleep(0.3)
+    except KeyboardInterrupt:
+        pass
+
+
+def _open_window(runtime: Path) -> None:
+    """Start the window in its own process, so it outlives the command that opened it."""
+    from .window import window_state
+
+    if window_state(runtime):
+        return
+    try:
+        import webview  # noqa: F401
+    except ImportError:
+        console.print('[yellow]Buddy\'s window needs pywebview: pip install -e ".[window]"[/yellow]')
+        return
+    kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL,
+                    "cwd": str(project_root())}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "window"], **kwargs)
+    console.print("Buddy's window is open.")
+
+
+@app.command()
+def window(
+    detach: bool = typer.Option(False, "--detach", help="Open it in the background and return."),
+    show_all: bool = typer.Option(False, "--all", help="Show every turn of the Claude session, not only Buddy's."),
+) -> None:
+    """Open Buddy's floating window: follow and talk to Buddy in one place."""
+    from .window import run_window, window_state
+
+    runtime = _runtime_dir()
+    if window_state(runtime):
+        console.print("Buddy's window is already open.")
+        return
+    if detach:
+        _open_window(runtime)
+        return
+    try:
+        import webview  # noqa: F401
+    except ImportError:
+        console.print('[red]Buddy\'s window needs pywebview: pip install -e ".[window]"[/red]')
+        raise typer.Exit(code=1)
+    settings = load_settings()
+    runtime.mkdir(parents=True, exist_ok=True)
+    run_window(runtime, "all" if show_all else settings.listen.window_shows, settings.listen.window_on_top)
 
 
 @app.command()

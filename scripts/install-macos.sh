@@ -14,7 +14,7 @@ fi
 
 "$PYTHON_BIN" -m venv "$REPO_ROOT/.venv"
 "$REPO_ROOT/.venv/bin/python" -m pip install --upgrade pip
-"$REPO_ROOT/.venv/bin/python" -m pip install -e "$REPO_ROOT[dev]"
+"$REPO_ROOT/.venv/bin/python" -m pip install -e "$REPO_ROOT[dev,window]"
 swiftc -O -parse-as-library \
     -framework ScreenCaptureKit -framework CoreMedia -framework AVFoundation \
     "$REPO_ROOT/native/macos/MeetingAudioCapture.swift" \

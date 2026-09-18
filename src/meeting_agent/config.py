@@ -122,6 +122,12 @@ class ListenConfig(BaseModel):
     command_max_seconds: float = Field(120.0, ge=10, le=900)
     # A short tone when a command opens, is sent, or is cancelled (Windows).
     sounds: bool = True
+    # Buddy's floating window: the meeting as it is said, commands, and what the Claude
+    # Code session watching Buddy does with them. It opens with `buddy listen --detach`.
+    window: bool = True
+    window_on_top: bool = True
+    # The session's turns to show: only those Buddy started, or all of them.
+    window_shows: Literal["buddy", "all"] = "buddy"
     # A meeting batch goes out at a pause, at most once per interval, and never waits
     # longer than max_wait. A session turn takes 40-90s, so sending faster only queues.
     batch_min_seconds: float = Field(60.0, ge=5, le=900)

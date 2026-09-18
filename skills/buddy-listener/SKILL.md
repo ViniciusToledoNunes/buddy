@@ -17,7 +17,8 @@ the user.
 ## Turn on
 
 1. Run `BUDDY_COMMAND status`. If Buddy is not listening, run `BUDDY_COMMAND listen --detach`. That
-   opens the microphone, so only do it when the user asked.
+   opens the microphone, so only do it when the user asked. It also opens Buddy's window; if Buddy
+   was already listening and the user wants the window, run `BUDDY_COMMAND window --detach`.
 2. Start a Monitor with command `BUDDY_COMMAND watch --follow --as claude-code`, description
    `Buddy listener`, and `timeout_ms` 1800000. Start it after the listener: the watch exits at
    once when nothing is listening.
@@ -25,7 +26,7 @@ the user.
    Buddy is still listening. The cursor is on disk, so nothing said in between is lost.
 4. In this session always pass `--as claude-code`. To look without consuming, add `--peek`.
 5. Tell the user, in one line, how to talk to it: "Hey Buddy", then the instruction, then
-   "over and out"; "cancel" drops it; "Hey Buddy, stop" turns Buddy off.
+   "over and out"; "cancel" drops it; "Hey Buddy, stop" turns Buddy off. Or type in Buddy's window.
 
 ## Turn off
 
@@ -50,10 +51,21 @@ Each notification is one line: time, type, then fields.
 - `COMMAND said="..."`: the user spoke to you. Follow **Commands**. When the line ends with
   `(may be incomplete)`, the user never said the closing phrase and Buddy sent what it had after
   a silence.
+- `COMMAND typed="..."`: the user typed it in Buddy's window or with `buddy say`. It is complete,
+  and it is the user as much as their microphone is. Follow **Commands**.
 - `MEETING_END`: replace the placeholder in the `summary=` file with the meeting summary. Then
   give the user the decisions, their own action items, other people's action items, open
   questions, and proposed follow-ups as numbered proposals.
 - `NOTICE`: informational.
+
+## Buddy's window
+
+The user follows Buddy in a small floating window. It shows the meeting as it is said, and it reads
+this session's record to show your replies to Buddy events and the tools you use for them. So:
+
+- Keep replies to Buddy events short and plain: they are read in a small window, mid-meeting.
+- In a reply to `MEETING_BATCH`, write each suggestion as a numbered line (`4. ...`). The window
+  pins the numbered lines of your latest reply to meeting speech above everything else.
 
 ## Suggestions
 

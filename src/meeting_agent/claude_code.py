@@ -14,8 +14,8 @@ from .config import Settings
 from .copilot import LLMProvider
 
 # Any of these makes Claude Code bill an API account instead of the subscription the
-# user is logged into. The .env Buddy loads carries an Anthropic key with no credit, so
-# letting it through turns every refresh into "credit balance too low".
+# user is logged into. Buddy loads .env, which may hold an Anthropic key for the other
+# providers; on an account without credit, every refresh would read "credit balance too low".
 API_CREDENTIAL_VARIABLES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_WORKSPACE_ID")
 
 BRAIN_SYSTEM_PROMPT = """You are the user's live meeting copilot, running unattended while they

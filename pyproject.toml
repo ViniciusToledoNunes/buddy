@@ -44,6 +44,8 @@ Issues = "https://github.com/ViniciusToledoNunes/buddy/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "pytest-cov>=6,<8"]
+# Buddy's floating window. On Linux, pywebview also needs GTK or Qt bindings from the system.
+window = ["pywebview>=5,<7"]
 
 [project.scripts]
 buddy = "meeting_agent.cli:app"

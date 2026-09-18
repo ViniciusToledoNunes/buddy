@@ -144,10 +144,12 @@ class EventLog:
     monitor that was down catches up on re-arm instead of losing what happened.
     """
 
-    def __init__(self, path: Path, max_bytes: int = 5 * 1024 * 1024) -> None:
+    def __init__(self, path: Path, max_bytes: int = 5 * 1024 * 1024, archive: bool = True) -> None:
         self.path = path
         self.meta = path.with_name(path.stem + ".meta.json")
         self.max_bytes = max_bytes
+        # A full log is set aside for the record, unless it only ever fed a screen.
+        self.archive = archive
 
     def _next_seq(self) -> int:
         return int(_read_json(self.meta).get("seq", 0)) + 1
@@ -157,8 +159,11 @@ class EventLog:
         seq = self._next_seq()
         record = {"seq": seq, "time": utc_now(), "type": kind, **fields}
         if self.path.exists() and self.path.stat().st_size > self.max_bytes:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.path.replace(self.path.with_name(f"{self.path.stem}.{stamp}{self.path.suffix}"))
+            if self.archive:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                self.path.replace(self.path.with_name(f"{self.path.stem}.{stamp}{self.path.suffix}"))
+            else:
+                self.path.unlink()
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         _write_json(self.meta, {"seq": seq})
@@ -181,6 +186,10 @@ class EventReader:
         saved = _read_json(self.cursor_path)
         if saved:
             return {"offset": int(saved.get("offset", 0)), "seq": int(saved.get("seq", 0))}
+        return self.end_cursor()
+
+    def end_cursor(self) -> dict[str, int]:
+        """A position after everything already written: only what happens next is read."""
         size = self.path.stat().st_size if self.path.exists() else 0
         last = int(_read_json(self.path.with_name(self.path.stem + ".meta.json")).get("seq", 0))
         return {"offset": size, "seq": last}
@@ -232,7 +241,9 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         return text
     if kind == "COMMAND":
         ended = record.get("ended", "phrase")
-        # Anything but the closing phrase means the user may not have finished.
+        if ended == "typed":
+            return f'{head} typed="{record.get("text", "")}"'
+        # A dictation that closed on silence or length: the user may not have finished.
         note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
         return f'{head} said="{record.get("text", "")}"{note}'
     if kind in {"MEETING_START", "MEETING_END"}:
@@ -339,6 +350,10 @@ class ListenDaemon:
     "Hey Buddy", or a meeting is being recorded. Everything else is transcribed in
     memory and dropped. System audio is captured only during a meeting. What the
     listener notices goes to the event log, where a Claude Code session picks it up.
+
+    What is kept is also shown as it happens: every meeting utterance and every piece
+    of a dictated command goes to a display feed that Buddy's window and `buddy live`
+    read. Showing needs no model, so it is not batched.
     """
 
     def __init__(
@@ -357,6 +372,7 @@ class ListenDaemon:
         self.control_dir = self.runtime_dir / "listen"
         listen = settings.listen
         self.events = EventLog(self.runtime_dir / "events.jsonl", int(listen.event_log_max_mb * 1024 * 1024))
+        self.live = EventLog(self.runtime_dir / "live.jsonl", 1024 * 1024, archive=False)
         self.bus = EventBus()
         self.clock = clock
         self._factory = stream_factory
@@ -429,14 +445,22 @@ class ListenDaemon:
         for stale in (self.state_file, self.stop_file, self.suggest_file):
             stale.unlink(missing_ok=True)
         if self.control_dir.exists():
-            for flag in self.control_dir.glob("*.flag"):
-                flag.unlink(missing_ok=True)
+            # Requests left by a listener that died are not replayed on the next start.
+            for stale_request in [*self.control_dir.glob("*.flag"), *self.control_dir.glob("command-*.json")]:
+                stale_request.unlink(missing_ok=True)
         self._started_iso = _process_started(os.getpid())
         self._write_listen_state()
 
     def release(self) -> None:
         self.listen_file.unlink(missing_ok=True)
         self.state_file.unlink(missing_ok=True)
+
+    def _show(self, kind: str, **fields: Any) -> None:
+        """Put something on screen. A display that fails must never stop the listening."""
+        try:
+            self.live.append(kind, **fields)
+        except OSError:
+            pass
 
     # --------------------------------------------------------------- listening
 
@@ -553,6 +577,8 @@ class ListenDaemon:
         if event.speaker == "ME":
             matched, remainder = parse_wake(text)
             if self.capture is not None or matched:
+                # Shown as heard, closing phrase included, so the user can see it landed.
+                self._show("DICTATION", text=text)
                 if self.storage is not None:
                     await asyncio.to_thread(self.storage.append, event)
                 if self.capture is None:
@@ -562,7 +588,8 @@ class ListenDaemon:
                     await self.continue_command(remainder if matched else text, now)
                 return
         if self.storage is None:
-            return  # speech outside a meeting is heard, not kept
+            return  # speech outside a meeting is heard, not kept, and not shown
+        self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text)
         await asyncio.to_thread(self.storage.append, event)
         self.batcher.add(f"{event.speaker}: {text}", now)
         self._last_speech = now
@@ -593,6 +620,7 @@ class ListenDaemon:
         if is_cancel(piece):
             self.capture = None
             self.chime("cancel")
+            self._show("CANCELLED")
             return
         body, closed = split_end_phrase(piece, self._end_phrase)
         kind = classify_command(body) if body and not self.capture else "other"
@@ -617,6 +645,7 @@ class ListenDaemon:
         text = " ".join(words).strip()
         if not text:
             self.chime("cancel")
+            self._show("CANCELLED")
             return
         kind = classify_command(text)
         if kind in LOCAL_COMMANDS:
@@ -627,21 +656,37 @@ class ListenDaemon:
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended=ended)
         self.chime("sent")
 
-    async def run_local(self, kind: str) -> None:
-        self.chime("sent")
+    async def run_local(self, kind: str, reason: str = "voice") -> None:
+        if reason == "voice":
+            self.chime("sent")
         if kind == "start_meeting":
-            await self.start_meeting("voice")
+            await self.start_meeting(reason)
         elif kind == "stop_meeting":
-            await self.stop_meeting("voice")
+            await self.stop_meeting(reason)
         elif kind == "pause":
-            await self.pause("voice")
+            await self.pause(reason)
         elif kind == "shutdown":
-            self._shutdown_reason = "voice"
+            self._shutdown_reason = reason
 
     async def command(self, text: str) -> None:
         """Handle a complete command, as if it had been dictated and closed."""
         self.capture = [text]
         await self.send_command("phrase")
+
+    async def typed(self, text: str) -> None:
+        """A command typed in Buddy's window or `buddy say`: complete, so it goes at once.
+
+        It is the user at their own keyboard, so it is trusted like their microphone,
+        and it works while the microphone is paused.
+        """
+        text = text.strip()
+        if not text:
+            return
+        kind = classify_command(text)
+        if kind in LOCAL_COMMANDS:
+            await self.run_local(kind, "typed")
+            return
+        self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
 
     def _play_chime(self, kind: str) -> None:
         """A short tone, so the user knows Buddy heard them without looking at a screen."""
@@ -700,6 +745,11 @@ class ListenDaemon:
         if self.suggest_file.exists():  # the MCP request_suggestion tool
             self.suggest_file.unlink(missing_ok=True)
             self._flush_batch(self.clock())
+        if self.control_dir.exists():
+            for submitted in sorted(self.control_dir.glob("command-*.json")):
+                text = str(_read_json(submitted).get("text", ""))
+                submitted.unlink(missing_ok=True)
+                await self.typed(text)
         shutdown = self.control_dir / "shutdown.flag"
         if shutdown.exists():
             shutdown.unlink(missing_ok=True)
@@ -741,3 +791,11 @@ def request(runtime_dir: Path, name: str) -> None:
     control = runtime_dir / "listen"
     control.mkdir(parents=True, exist_ok=True)
     (control / f"{name}.flag").touch()
+
+
+def submit(runtime_dir: Path, text: str) -> None:
+    """Hand a typed command to the running listener, which alone writes the event log."""
+    control = runtime_dir / "listen"
+    control.mkdir(parents=True, exist_ok=True)
+    # Nanoseconds keep two quick submissions apart and in order.
+    _write_json(control / f"command-{time.time_ns()}.json", {"text": text})
