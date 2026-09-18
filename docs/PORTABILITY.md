@@ -91,6 +91,8 @@ buddy devices
 
 The installer compiles `native/macos/MeetingAudioCapture.swift` into `.venv/bin/meeting-audio-macos`. That binary
 is not stored in Git, because it depends on the target platform.
+`buddy doctor` starts the helper briefly for both system audio and the microphone, so a stream is reported as
+working only when Screen Recording and Microphone permissions allow real audio bytes to arrive.
 
 ## Moving between machines
 
