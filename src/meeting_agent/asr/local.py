@@ -20,6 +20,29 @@ from .selection import ASRSelection
 # would otherwise stay silent for the whole meeting.
 MAX_ADAPTIVE_THRESHOLD_FACTOR = 8.0
 
+# Whisper fills near-silent or noisy segments with lines from its training data (video
+# outros, subtitle credits). The energy gate lets room noise through, so a segment whose
+# whole text is one of these is dropped rather than shown as something the user said.
+KNOWN_HALLUCINATIONS = frozenset(
+    {
+        "thanks for watching",
+        "thank you for watching",
+        "thanks for watching and see you next time",
+        "please subscribe",
+        "subscribe",
+        "you",
+        "obrigado por assistir",
+        "legendas pela comunidade amara org",
+    }
+)
+# Segments Whisper itself rates as probably not speech.
+MAX_NO_SPEECH_PROB = 0.6
+
+
+def is_hallucination(text: str) -> bool:
+    normalized = " ".join(re.findall(r"[a-z0-9à-ú']+", text.lower()))
+    return normalized in KNOWN_HALLUCINATIONS
+
 
 def calibrate_threshold(calibration: list[float], speaker: str, configured_floor: float) -> float:
     """Noise floor for a speaker, taken from the quiet end of the calibration window."""
@@ -77,13 +100,22 @@ class LocalModelPool:
                     best_of=1,
                     temperature=0.0,
                     condition_on_previous_text=False,
-                    vad_filter=False,
+                    # The energy gate already cut the segment; Silero then removes the
+                    # noise inside it, which is what Whisper would otherwise "transcribe".
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
                     word_timestamps=False,
                     repetition_penalty=1.1,
                     no_repeat_ngram_size=3,
                     no_speech_threshold=0.5,
                 )
-                return " ".join(part.text.strip() for part in segments if part.text.strip()).strip()
+                parts = [
+                    part.text.strip()
+                    for part in segments
+                    if part.text.strip() and part.no_speech_prob < MAX_NO_SPEECH_PROB
+                ]
+                text = " ".join(parts).strip()
+                return "" if is_hallucination(text) else text
 
             text = await asyncio.to_thread(infer)
         return text, time.monotonic() - started
