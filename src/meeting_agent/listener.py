@@ -13,7 +13,9 @@ from typing import Any, Callable, Protocol
 import psutil
 
 from .config import Settings, project_root
+from .echo import EchoGuard
 from .events import EventBus, TranscriptEvent, utc_now
+from .screens import ScreenShots, capture_screen
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
@@ -235,7 +237,10 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
     if kind == "MEETING_BATCH":
         lines = [str(line) for line in record.get("lines", [])]
         body = " | ".join(lines)
-        text = f"{head} lines={len(lines)} | {body}"
+        screens = [str(path) for path in record.get("screens", [])]
+        # Before the speech, so a long batch is never truncated past the screenshot path.
+        shown = f" screens={len(screens)} latest_screen={screens[-1]}" if screens else ""
+        text = f"{head} lines={len(lines)}{shown} | {body}"
         if len(text) > max_chars:
             text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
         return text
@@ -280,7 +285,9 @@ class MeetingBatcher:
         if not self.lines:
             self.first_at = now
         self.lines.append(line)
-        self.last_at = now
+        # A line held back for echo checking arrives with an older time; it must not
+        # make the room look quiet while others are still talking.
+        self.last_at = max(self.last_at, now)
 
     def due(self, now: float) -> bool:
         if not self.lines:
@@ -383,6 +390,10 @@ class ListenDaemon:
         self.storage: Any = None
         self.paused = False
         self.batcher = self._new_batcher()
+        self.echo: EchoGuard[TranscriptEvent] = EchoGuard(listen.echo_window_seconds)
+        # Screenshots of the current meeting (listen.screen_capture); None when off.
+        self.screens: ScreenShots | None = None
+        self.screen_capture: Callable[[Path, int], bool] = capture_screen
         # An open command: what the user has said since "Hey Buddy", waiting for the
         # closing phrase. None when no command is being dictated.
         self.capture: list[str] | None = None
@@ -514,6 +525,18 @@ class ListenDaemon:
         self._meeting_started = now
         self._last_speech = now
         self.batcher = self._new_batcher()
+        self.echo = EchoGuard(self.settings.listen.echo_window_seconds)
+        listen = self.settings.listen
+        self.screens = (
+            ScreenShots(
+                self.storage.directory / "screens",
+                listen.screen_interval_seconds,
+                listen.screen_max_per_meeting,
+                lambda path: self.screen_capture(path, listen.screen_max_width),
+            )
+            if listen.screen_capture
+            else None
+        )
         _write_json(
             self.state_file,
             {
@@ -540,12 +563,17 @@ class ListenDaemon:
             self.events.append("NOTICE", reason=reason, text="No meeting is being recorded.")
             return
         now = self.clock()
+        await self._release_held(now, everything=True)
         self._flush_batch(now)
         if self.remote is not None:
             await self.remote.stop()
             self.remote = None
         storage, self.storage = self.storage, None
         storage.metadata["stopped_by"] = reason
+        storage.metadata["echo_lines_dropped"] = self.echo.dropped
+        if self.screens is not None:
+            storage.metadata["screens_captured"] = self.screens.count
+            self.screens = None
         await asyncio.to_thread(storage.finish, SUMMARY_PENDING)
         self.state_file.unlink(missing_ok=True)
         self.stop_file.unlink(missing_ok=True)
@@ -563,8 +591,15 @@ class ListenDaemon:
     def _flush_batch(self, now: float) -> None:
         lines = self.batcher.take(now)
         if lines and self.storage is not None:
+            # Captures taken since the last batch travel with it; without speech they wait.
+            screens = self.screens.take() if self.screens is not None else []
+            extra = {"screens": screens} if screens else {}
             self.events.append(
-                "MEETING_BATCH", meeting=self.meeting_id, lines=lines, transcript=str(self.storage.transcript_txt)
+                "MEETING_BATCH",
+                meeting=self.meeting_id,
+                lines=lines,
+                transcript=str(self.storage.transcript_txt),
+                **extra,
             )
 
     # ----------------------------------------------------------------- speech
@@ -589,10 +624,26 @@ class ListenDaemon:
                 return
         if self.storage is None:
             return  # speech outside a meeting is heard, not kept, and not shown
+        if event.speaker == "REMOTE":
+            self.echo.remote(text, now)  # held ME lines it echoes are simply never written
+        elif self.echo.enabled:
+            self.echo.mine(event, text, now)  # written by _release_held, unless it is an echo
+            return
+        await self._keep(event, now)
+
+    async def _keep(self, event: TranscriptEvent, said_at: float) -> None:
+        text = event.text.strip()
         self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text)
         await asyncio.to_thread(self.storage.append, event)
-        self.batcher.add(f"{event.speaker}: {text}", now)
-        self._last_speech = now
+        # The time it was said, not the time it was released, so a held line does not
+        # look like fresh speech and push back the batch's pause.
+        self.batcher.add(f"{event.speaker}: {text}", said_at)
+        self._last_speech = max(self._last_speech, said_at)
+
+    async def _release_held(self, now: float, everything: bool = False) -> None:
+        for event, said_at in self.echo.release(now, everything):
+            if self.storage is not None:
+                await self._keep(event, said_at)
 
     # --------------------------------------------------------------- commands
 
@@ -719,6 +770,9 @@ class ListenDaemon:
                 await self.send_command("limit")
         if self.storage is None:
             return
+        await self._release_held(now)
+        if self.screens is not None and self.screens.due(now):
+            await asyncio.to_thread(self.screens.shoot, now)
         if self.batcher.due(now):
             self._flush_batch(now)
         if now - self._last_speech >= listen.meeting_idle_minutes * 60:

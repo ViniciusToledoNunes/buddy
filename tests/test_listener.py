@@ -742,3 +742,46 @@ def test_steering_writes_a_request_when_listening(runtime, monkeypatch):
 
     assert result.exit_code == 0
     assert (runtime / "listen" / "stop-meeting.flag").exists()
+
+
+async def test_the_speakers_heard_by_the_microphone_are_not_kept_twice(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, echo_window_seconds=6)
+    await daemon.start_meeting("test")
+
+    await daemon.on_final(_said("ME", "can everyone see my screen right now"))  # echo, finished first
+    clock.now += 2
+    await daemon.on_final(_said("REMOTE", "Can everyone see my screen right now?"))
+    clock.now += 1
+    await daemon.on_final(_said("ME", "can everyone see my screen right now"))  # echo, finished last
+    await daemon.on_final(_said("ME", "Yes, I can see the vendor list."))
+    clock.now += 10
+    await daemon.tick()
+
+    transcript = daemon.storage.transcript_txt.read_text(encoding="utf-8")
+    assert "ME: can everyone see" not in transcript
+    assert "REMOTE: Can everyone see my screen right now?" in transcript
+    assert "ME: Yes, I can see the vendor list." in transcript
+    assert daemon.echo.dropped == 2
+
+
+async def test_held_lines_are_written_when_the_meeting_ends(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, echo_window_seconds=6)
+    await daemon.start_meeting("test")
+    storage = daemon.storage
+
+    await daemon.on_final(_said("ME", "I'll send the notes after this."))
+    await daemon.stop_meeting("test")
+
+    assert "ME: I'll send the notes after this." in storage.transcript_txt.read_text(encoding="utf-8")
+    assert storage.metadata["echo_lines_dropped"] == 0
+
+
+async def test_without_an_echo_window_my_lines_are_written_at_once(tmp_path):
+    daemon, _ = _daemon(tmp_path, echo_window_seconds=0)
+    await daemon.start_meeting("test")
+
+    await daemon.on_final(_said("ME", "Almost done."))
+
+    assert "ME: Almost done." in daemon.storage.transcript_txt.read_text(encoding="utf-8")

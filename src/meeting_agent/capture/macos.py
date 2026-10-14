@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import select
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
 
-from .base import ThreadedAudioCapture
+from .base import CaptureStreamLost, SilenceWatchdog, ThreadedAudioCapture
 
 
 def helper_path() -> str | None:
@@ -41,27 +44,71 @@ class MacOSAudioCapture(ThreadedAudioCapture):
     def _run(self) -> None:
         frames = max(1, int(self.config.sample_rate * self.config.chunk_ms / 1000))
         byte_count = frames * np.dtype("<f4").itemsize
+        # Only the microphone is watched. System audio is legitimately silent whenever
+        # nobody is talking, and reopening it every few seconds would only add gaps.
+        timeout = self.config.silence_reconnect_seconds if self.speaker == "ME" else 0.0
+        watchdog = SilenceWatchdog(timeout)
         sequence = 0
         while not self.stop_event.is_set():
             try:
                 self.process = subprocess.Popen(helper_command(self.speaker, self.config), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 self._status("connected", "ScreenCaptureKit")
                 assert self.process.stdout is not None
+                watchdog.reset(time.monotonic())
                 while not self.stop_event.is_set():
-                    data = self.process.stdout.read(byte_count)
+                    data = read_frame(self.process.stdout, byte_count, timeout or None)
+                    now = time.monotonic()
+                    if data is None:
+                        # After the Mac slept, the helper stayed alive for days without
+                        # sending a byte, so a plain read() blocked forever.
+                        raise CaptureStreamLost(f"no audio from the {self.speaker} helper for {timeout:g}s")
                     if len(data) != byte_count:
                         raise RuntimeError("macOS helper stream ended")
-                    self._emit(np.frombuffer(data, dtype="<f4"), sequence)
+                    samples = np.frombuffer(data, dtype="<f4")
+                    self._emit(samples, sequence)
                     sequence += 1
+                    if watchdog.observe(samples, now):
+                        raise CaptureStreamLost(f"the {self.speaker} stream carried only digital silence for {timeout:g}s")
             except Exception as exc:
                 if not self.stop_event.is_set():
                     self._status("retrying", f"{type(exc).__name__}: {exc}")
                     self.stop_event.wait(1.0)
             finally:
-                if self.process and self.process.poll() is None:
-                    self.process.terminate()
+                end_helper(self.process)
                 self.process = None
         self._status("stopped")
+
+
+def read_frame(stream, byte_count: int, timeout: float | None) -> bytes | None:
+    """Read one frame; None when nothing at all arrives for `timeout` seconds."""
+    if timeout is None:
+        return stream.read(byte_count)
+    chunks: list[bytes] = []
+    remaining = byte_count
+    fd = stream.fileno()
+    while remaining:
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            return None
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break  # end of stream: the caller sees a short frame
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def end_helper(process: subprocess.Popen[bytes] | None) -> None:
+    """Stop a helper and make sure it is gone; a stuck one once outlived its listener by days."""
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=2)
 
 
 def list_devices() -> dict[str, object]:
