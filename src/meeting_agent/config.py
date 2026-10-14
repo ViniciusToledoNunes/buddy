@@ -133,6 +133,10 @@ class ListenConfig(BaseModel):
     batch_min_seconds: float = Field(60.0, ge=5, le=900)
     batch_pause_seconds: float = Field(3.0, ge=0.5, le=60)
     batch_max_wait_seconds: float = Field(150.0, ge=10, le=1800)
+    # Without headphones the microphone also hears the other side. A meeting line from
+    # the microphone is held this long and dropped if the same words arrive as system
+    # audio around it. 0 keeps every line and writes it at once.
+    echo_window_seconds: float = Field(8.0, ge=0, le=30)
     # A meeting nobody ended still ends: silence, or a ceiling on its length.
     meeting_idle_minutes: float = Field(10.0, ge=1, le=240)
     meeting_max_minutes: float = Field(240.0, ge=5, le=1440)

@@ -81,6 +81,9 @@ async def test_meeting_speech_is_shown_as_it_is_said(tmp_path):
 
     await daemon.on_final(_said("REMOTE", "Can everyone see my screen?"))
     await daemon.on_final(_said("ME", "Yes, go ahead."))
+    # A microphone line is shown once it is known not to be an echo of the speakers.
+    assert _shown(daemon) == [("SAID", "REMOTE", "Can everyone see my screen?")]
+    await daemon._release_held(daemon.clock(), everything=True)
 
     assert _shown(daemon) == [("SAID", "REMOTE", "Can everyone see my screen?"), ("SAID", "ME", "Yes, go ahead.")]
 

@@ -13,6 +13,7 @@ from typing import Any, Callable, Protocol
 import psutil
 
 from .config import Settings, project_root
+from .echo import EchoGuard
 from .events import EventBus, TranscriptEvent, utc_now
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
@@ -280,7 +281,9 @@ class MeetingBatcher:
         if not self.lines:
             self.first_at = now
         self.lines.append(line)
-        self.last_at = now
+        # A line held back for echo checking arrives with an older time; it must not
+        # make the room look quiet while others are still talking.
+        self.last_at = max(self.last_at, now)
 
     def due(self, now: float) -> bool:
         if not self.lines:
@@ -383,6 +386,7 @@ class ListenDaemon:
         self.storage: Any = None
         self.paused = False
         self.batcher = self._new_batcher()
+        self.echo: EchoGuard[TranscriptEvent] = EchoGuard(listen.echo_window_seconds)
         # An open command: what the user has said since "Hey Buddy", waiting for the
         # closing phrase. None when no command is being dictated.
         self.capture: list[str] | None = None
@@ -514,6 +518,7 @@ class ListenDaemon:
         self._meeting_started = now
         self._last_speech = now
         self.batcher = self._new_batcher()
+        self.echo = EchoGuard(self.settings.listen.echo_window_seconds)
         _write_json(
             self.state_file,
             {
@@ -540,12 +545,14 @@ class ListenDaemon:
             self.events.append("NOTICE", reason=reason, text="No meeting is being recorded.")
             return
         now = self.clock()
+        await self._release_held(now, everything=True)
         self._flush_batch(now)
         if self.remote is not None:
             await self.remote.stop()
             self.remote = None
         storage, self.storage = self.storage, None
         storage.metadata["stopped_by"] = reason
+        storage.metadata["echo_lines_dropped"] = self.echo.dropped
         await asyncio.to_thread(storage.finish, SUMMARY_PENDING)
         self.state_file.unlink(missing_ok=True)
         self.stop_file.unlink(missing_ok=True)
@@ -589,10 +596,26 @@ class ListenDaemon:
                 return
         if self.storage is None:
             return  # speech outside a meeting is heard, not kept, and not shown
+        if event.speaker == "REMOTE":
+            self.echo.remote(text, now)  # held ME lines it echoes are simply never written
+        elif self.echo.enabled:
+            self.echo.mine(event, text, now)  # written by _release_held, unless it is an echo
+            return
+        await self._keep(event, now)
+
+    async def _keep(self, event: TranscriptEvent, said_at: float) -> None:
+        text = event.text.strip()
         self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text)
         await asyncio.to_thread(self.storage.append, event)
-        self.batcher.add(f"{event.speaker}: {text}", now)
-        self._last_speech = now
+        # The time it was said, not the time it was released, so a held line does not
+        # look like fresh speech and push back the batch's pause.
+        self.batcher.add(f"{event.speaker}: {text}", said_at)
+        self._last_speech = max(self._last_speech, said_at)
+
+    async def _release_held(self, now: float, everything: bool = False) -> None:
+        for event, said_at in self.echo.release(now, everything):
+            if self.storage is not None:
+                await self._keep(event, said_at)
 
     # --------------------------------------------------------------- commands
 
@@ -719,6 +742,7 @@ class ListenDaemon:
                 await self.send_command("limit")
         if self.storage is None:
             return
+        await self._release_held(now)
         if self.batcher.due(now):
             self._flush_batch(now)
         if now - self._last_speech >= listen.meeting_idle_minutes * 60:

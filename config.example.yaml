@@ -108,6 +108,7 @@ listen:
   batch_min_seconds: 60        # meeting speech reaches the session at most once per interval
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150
+  echo_window_seconds: 8       # drop microphone lines that only echo the speakers; 0 turns it off
   meeting_idle_minutes: 10     # a forgotten meeting ends on silence
   meeting_max_minutes: 240
   event_log_max_mb: 5
