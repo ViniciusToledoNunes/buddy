@@ -109,6 +109,10 @@ listen:
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150
   echo_window_seconds: 8       # drop microphone lines that only echo the speakers; 0 turns it off
+  screen_capture: false        # macOS: save a screenshot every interval during a meeting (whole screen)
+  screen_interval_seconds: 60
+  screen_max_width: 1600       # captures are scaled down to this width
+  screen_max_per_meeting: 240
   meeting_idle_minutes: 10     # a forgotten meeting ends on silence
   meeting_max_minutes: 240
   event_log_max_mb: 5

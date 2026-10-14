@@ -15,6 +15,7 @@ import psutil
 from .config import Settings, project_root
 from .echo import EchoGuard
 from .events import EventBus, TranscriptEvent, utc_now
+from .screens import ScreenShots, capture_screen
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
@@ -236,7 +237,10 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
     if kind == "MEETING_BATCH":
         lines = [str(line) for line in record.get("lines", [])]
         body = " | ".join(lines)
-        text = f"{head} lines={len(lines)} | {body}"
+        screens = [str(path) for path in record.get("screens", [])]
+        # Before the speech, so a long batch is never truncated past the screenshot path.
+        shown = f" screens={len(screens)} latest_screen={screens[-1]}" if screens else ""
+        text = f"{head} lines={len(lines)}{shown} | {body}"
         if len(text) > max_chars:
             text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
         return text
@@ -387,6 +391,9 @@ class ListenDaemon:
         self.paused = False
         self.batcher = self._new_batcher()
         self.echo: EchoGuard[TranscriptEvent] = EchoGuard(listen.echo_window_seconds)
+        # Screenshots of the current meeting (listen.screen_capture); None when off.
+        self.screens: ScreenShots | None = None
+        self.screen_capture: Callable[[Path, int], bool] = capture_screen
         # An open command: what the user has said since "Hey Buddy", waiting for the
         # closing phrase. None when no command is being dictated.
         self.capture: list[str] | None = None
@@ -519,6 +526,17 @@ class ListenDaemon:
         self._last_speech = now
         self.batcher = self._new_batcher()
         self.echo = EchoGuard(self.settings.listen.echo_window_seconds)
+        listen = self.settings.listen
+        self.screens = (
+            ScreenShots(
+                self.storage.directory / "screens",
+                listen.screen_interval_seconds,
+                listen.screen_max_per_meeting,
+                lambda path: self.screen_capture(path, listen.screen_max_width),
+            )
+            if listen.screen_capture
+            else None
+        )
         _write_json(
             self.state_file,
             {
@@ -553,6 +571,9 @@ class ListenDaemon:
         storage, self.storage = self.storage, None
         storage.metadata["stopped_by"] = reason
         storage.metadata["echo_lines_dropped"] = self.echo.dropped
+        if self.screens is not None:
+            storage.metadata["screens_captured"] = self.screens.count
+            self.screens = None
         await asyncio.to_thread(storage.finish, SUMMARY_PENDING)
         self.state_file.unlink(missing_ok=True)
         self.stop_file.unlink(missing_ok=True)
@@ -570,8 +591,15 @@ class ListenDaemon:
     def _flush_batch(self, now: float) -> None:
         lines = self.batcher.take(now)
         if lines and self.storage is not None:
+            # Captures taken since the last batch travel with it; without speech they wait.
+            screens = self.screens.take() if self.screens is not None else []
+            extra = {"screens": screens} if screens else {}
             self.events.append(
-                "MEETING_BATCH", meeting=self.meeting_id, lines=lines, transcript=str(self.storage.transcript_txt)
+                "MEETING_BATCH",
+                meeting=self.meeting_id,
+                lines=lines,
+                transcript=str(self.storage.transcript_txt),
+                **extra,
             )
 
     # ----------------------------------------------------------------- speech
@@ -743,6 +771,8 @@ class ListenDaemon:
         if self.storage is None:
             return
         await self._release_held(now)
+        if self.screens is not None and self.screens.due(now):
+            await asyncio.to_thread(self.screens.shoot, now)
         if self.batcher.due(now):
             self._flush_batch(now)
         if now - self._last_speech >= listen.meeting_idle_minutes * 60:

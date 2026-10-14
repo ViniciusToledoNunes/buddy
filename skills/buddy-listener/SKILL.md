@@ -47,7 +47,11 @@ Each notification is one line: time, type, then fields.
   folders next to the one in `transcript=`, and this session may already hold related work.
 - `MEETING_BATCH`: speech since the last batch. `ME` is the user, `REMOTE` is everyone else.
   Answer with what the user could say now, following **Suggestions**. If nothing is worth
-  saying, say nothing.
+  saying, say nothing. With `listen.screen_capture` on, the line also carries
+  `screens=N latest_screen=<path>`: screenshots taken since the last batch. Open the latest
+  one when the talk refers to something on screen ("as you can see", a demo, a diagram);
+  the earlier ones are in the same `screens/` folder. A screenshot is the whole display,
+  so mention only what concerns the meeting.
 - `COMMAND said="..."`: the user spoke to you. Follow **Commands**. When the line ends with
   `(may be incomplete)`, the user never said the closing phrase and Buddy sent what it had after
   a silence.

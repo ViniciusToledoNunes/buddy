@@ -137,6 +137,14 @@ class ListenConfig(BaseModel):
     # the microphone is held this long and dropped if the same words arrive as system
     # audio around it. 0 keeps every line and writes it at once.
     echo_window_seconds: float = Field(8.0, ge=0, le=30)
+    # Screenshots of the main display during a meeting (macOS), saved in the meeting's
+    # `screens/` folder and named in the next batch, so the watching session can see
+    # what is being shared. Off by default: it captures the whole screen. A capture
+    # identical to the previous one is dropped.
+    screen_capture: bool = False
+    screen_interval_seconds: float = Field(60.0, ge=10, le=900)
+    screen_max_width: int = Field(1600, ge=0, le=6000)
+    screen_max_per_meeting: int = Field(240, ge=1, le=5000)
     # A meeting nobody ended still ends: silence, or a ceiling on its length.
     meeting_idle_minutes: float = Field(10.0, ge=1, le=240)
     meeting_max_minutes: float = Field(240.0, ge=5, le=1440)
