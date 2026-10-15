@@ -145,6 +145,13 @@ class ListenConfig(BaseModel):
     screen_interval_seconds: float = Field(60.0, ge=10, le=900)
     screen_max_width: int = Field(1600, ge=0, le=6000)
     screen_max_per_meeting: int = Field(240, ge=1, le=5000)
+    # A question from the other side goes out at once as a QUESTION event instead of
+    # waiting up to batch_max_wait for the next batch. A line counts when it has a "?"
+    # and more than three words ("Right?" is a tag, not a question), or names the user.
+    question_alerts: bool = True
+    question_names: list[str] = []          # e.g. ["Vinicius", "Vinny"]: always alert, even when short
+    question_min_gap_seconds: float = Field(10.0, ge=0, le=600)  # unnamed questions closer than this wait for the batch
+    question_context_seconds: float = Field(90.0, ge=10, le=600)  # recent speech sent along with the question
     # A meeting nobody ended still ends: silence, or a ceiling on its length.
     meeting_idle_minutes: float = Field(10.0, ge=1, le=240)
     meeting_max_minutes: float = Field(240.0, ge=5, le=1440)
