@@ -45,6 +45,15 @@ Each notification is one line: time, type, then fields.
 - `PAUSED`: the microphone is closed but the process is alive. Say so in a line.
 - `MEETING_START`: a recording began. If it helps, prepare briefly: earlier meetings live in the
   folders next to the one in `transcript=`, and this session may already hold related work.
+  `prep=` names the meeting's `prep.md`: see **Ready answers**.
+- `QUESTION q="..."`: someone on the other side just asked something, sent at once instead of
+  waiting for the next batch. `to=ME` means it names the user: answer that one first. The line
+  carries the last minute or so of talk after `context:`. Reply within seconds, **from
+  `prep.md` and what this session already knows, without researching**: one or two lines the
+  user could say out loud, numbered like any suggestion. If a better answer needs a lookup,
+  say so in the same reply and do it afterwards, in a follow-up. When nothing useful can be
+  said, say nothing. The next `MEETING_BATCH` still contains the question; do not answer it
+  twice.
 - `MEETING_BATCH`: speech since the last batch. `ME` is the user, `REMOTE` is everyone else.
   Answer with what the user could say now, following **Suggestions**. If nothing is worth
   saying, say nothing. With `listen.screen_capture` on, the line also carries
@@ -70,6 +79,19 @@ this session's record to show your replies to Buddy events and the tools you use
 - Keep replies to Buddy events short and plain: they are read in a small window, mid-meeting.
 - In a reply to `MEETING_BATCH`, write each suggestion as a numbered line (`4. ...`). The window
   pins the numbered lines of your latest reply to meeting speech above everything else.
+
+## Ready answers
+
+A batch takes up to a couple of minutes to arrive and a researched reply another minute, so the
+answer to a question is prepared before it is asked. Keep the `prep.md` named in `MEETING_START`
+current:
+
+- After `MEETING_START`, and after each `MEETING_BATCH` that moves the conversation, rewrite it
+  with the questions likely to come up next and a short answer to each, drawn from the topics
+  on the table, the user's own work, and anything this session has already researched.
+  Numbers, names, links and decisions are what make an answer usable.
+- Keep it under about forty lines: replace stale entries, do not append forever.
+- Research for it between questions, not while one is waiting.
 
 ## Suggestions
 

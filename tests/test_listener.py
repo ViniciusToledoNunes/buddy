@@ -18,8 +18,10 @@ from meeting_agent.listener import (
     ListenDaemon,
     MeetingBatcher,
     classify_command,
+    classify_question,
     format_event,
     listener_state,
+    names_pattern,
     parse_wake,
     request,
 )
@@ -785,3 +787,102 @@ async def test_without_an_echo_window_my_lines_are_written_at_once(tmp_path):
     await daemon.on_final(_said("ME", "Almost done."))
 
     assert "ME: Almost done." in daemon.storage.transcript_txt.read_text(encoding="utf-8")
+
+
+
+# ------------------------------------------------------------------ questions
+
+
+@pytest.mark.parametrize(
+    "said, expected",
+    [
+        ("Do we have anything else we'd like to add here?", (True, False)),
+        ("How do we make the verification process better? Because it looks like.", (True, False)),
+        ("You know?", (False, False)),  # a tag, not a question
+        ("Right?", (False, False)),
+        ("Vinny, are you also okay?", (True, True)),  # short, but it names the user
+        ("Vinny will take that one.", (False, True)),  # names the user, asks nothing
+        ("We ship on Friday.", (False, False)),
+    ],
+)
+def test_what_counts_as_a_question(said, expected):
+    assert classify_question(said, names_pattern(["Vinicius", "Vinny"])) == expected
+
+
+async def test_a_question_goes_out_at_once_with_its_context(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, question_names=["Vinny"], echo_window_seconds=0)
+    await daemon.start_meeting("test")
+
+    await daemon.on_final(_said("REMOTE", "The PVendor list came back with 83 profiles."))
+    await daemon.on_final(_said("ME", "Those are the ones with two or more."))
+    clock.now += 5
+    await daemon.on_final(_said("REMOTE", "Vinny, can you share that list with Kaitlyn?"))
+
+    question = _events(daemon)[-1]
+    assert question["type"] == "QUESTION" and question["addressed"] is True
+    assert question["text"] == "Vinny, can you share that list with Kaitlyn?"
+    assert question["context"] == [
+        "REMOTE: The PVendor list came back with 83 profiles.",
+        "ME: Those are the ones with two or more.",
+    ]
+    assert question["prep"].endswith("prep.md")
+    assert (daemon.storage.directory / "prep.md").read_text(encoding="utf-8").startswith("# Prep")
+    assert "REMOTE: Vinny, can you share" in daemon.batcher.lines[-1]  # the batch still has it
+
+
+async def test_tags_and_my_own_questions_send_no_alert(tmp_path):
+    daemon, _ = _daemon(tmp_path, echo_window_seconds=0)
+    await daemon.start_meeting("test")
+
+    await daemon.on_final(_said("REMOTE", "Right?"))
+    await daemon.on_final(_said("ME", "Should we move the release to Monday?"))
+
+    assert [e["type"] for e in _events(daemon)] == ["MEETING_START"]
+
+
+async def test_questions_in_a_burst_alert_once_unless_they_name_me(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, question_names=["Vinny"], question_min_gap_seconds=10)
+    await daemon.start_meeting("test")
+
+    await daemon.on_final(_said("REMOTE", "Does anyone know where the PVendor lives?"))
+    clock.now += 3
+    await daemon.on_final(_said("REMOTE", "Is it on the vendor table or the user table?"))
+    clock.now += 1
+    await daemon.on_final(_said("REMOTE", "Vinny, did you check that already?"))
+    clock.now += 20
+    await daemon.on_final(_said("REMOTE", "Can we close this item then?"))
+
+    asked = [e["text"] for e in _events(daemon) if e["type"] == "QUESTION"]
+    assert asked == [
+        "Does anyone know where the PVendor lives?",
+        "Vinny, did you check that already?",
+        "Can we close this item then?",
+    ]
+
+
+async def test_question_alerts_can_be_turned_off(tmp_path):
+    daemon, _ = _daemon(tmp_path, question_alerts=False)
+    await daemon.start_meeting("test")
+
+    await daemon.on_final(_said("REMOTE", "Does anyone know where the PVendor lives?"))
+
+    assert [e["type"] for e in _events(daemon)] == ["MEETING_START"]
+
+
+def test_a_question_renders_on_one_line_question_first():
+    line = format_event(
+        {
+            "time": "2026-10-15T15:00:00+00:00",
+            "type": "QUESTION",
+            "meeting": "m",
+            "addressed": True,
+            "text": "Vinny, can you share that list?",
+            "context": ["REMOTE: The list came back.", "ME: 83 profiles."],
+            "prep": "/m/prep.md",
+            "transcript": "/m/transcript.txt",
+        }
+    )
+    assert "\n" not in line
+    assert ' to=ME q="Vinny, can you share that list?" prep=/m/prep.md | context: REMOTE: The list came back. | ME: 83 profiles.' in line

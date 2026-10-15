@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,10 @@ SUMMARY_PENDING = (
     "# Summary\n\n_Pending: the Claude Code session following Buddy writes this when the "
     "meeting ends._\n"
 )
+PREP_PLACEHOLDER = (
+    "# Prep\n\n_The Claude Code session following Buddy keeps short ready answers here during "
+    "the meeting, for questions likely to come up._\n"
+)
 
 
 def parse_wake(text: str) -> tuple[bool, str]:
@@ -92,6 +97,25 @@ def end_phrase_pattern(phrases: list[str]) -> re.Pattern[str]:
 
     alternatives = [r"\W+".join(word(w) for w in phrase.split()) for phrase in phrases if phrase.strip()]
     return re.compile(rf"(?:^|\W)(?:{'|'.join(alternatives) or '(?!)'})\W*$", re.IGNORECASE)
+
+
+def names_pattern(names: list[str]) -> re.Pattern[str]:
+    alternatives = [re.escape(name.strip()) for name in names if name.strip()]
+    return re.compile(rf"\b(?:{'|'.join(alternatives) or '(?!)'})\b", re.IGNORECASE)
+
+
+def classify_question(text: str, names: re.Pattern[str]) -> tuple[bool, bool]:
+    """(is a question worth an alert, names the user).
+
+    Whisper marks questions with "?" reliably: in the October meetings 243 of 4,964 REMOTE
+    lines had one, nearly all real questions. It sometimes glues the next sentence on ("How
+    do we make this better? Because..."), so a "?" anywhere counts. A short one is usually a
+    tag ("You know?", "Right?", "Correct?" were 44 of them) unless it names the user.
+    """
+    addressed = bool(names.search(text or ""))
+    if "?" not in (text or ""):
+        return False, addressed
+    return addressed or len(re.findall(r"[\w']+", text)) > 3, addressed
 
 
 def split_end_phrase(text: str, pattern: re.Pattern[str]) -> tuple[str, bool]:
@@ -251,8 +275,18 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         # A dictation that closed on silence or length: the user may not have finished.
         note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
         return f'{head} said="{record.get("text", "")}"{note}'
+    if kind == "QUESTION":
+        # The question first and the context last, so truncation only ever cuts context.
+        to = " to=ME" if record.get("addressed") else ""
+        context = " | ".join(str(line) for line in record.get("context", []))
+        text = f'{head}{to} q="{record.get("text", "")}" prep={record.get("prep", "")} | context: {context}'
+        if len(text) > max_chars:
+            text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
+        return text
     if kind in {"MEETING_START", "MEETING_END"}:
         extra = [f"lines={record['lines']}"] if "lines" in record else []
+        if record.get("prep"):
+            extra.append(f"prep={record['prep']}")
         extra.append(f"transcript={record.get('transcript', '')}")
         return " ".join([head, *extra])
     if record.get("text"):
@@ -391,6 +425,9 @@ class ListenDaemon:
         self.paused = False
         self.batcher = self._new_batcher()
         self.echo: EchoGuard[TranscriptEvent] = EchoGuard(listen.echo_window_seconds)
+        self._names = names_pattern(listen.question_names)
+        self._recent: deque[tuple[float, str]] = deque()  # kept meeting lines, for QUESTION context
+        self._last_question = float("-inf")
         # Screenshots of the current meeting (listen.screen_capture); None when off.
         self.screens: ScreenShots | None = None
         self.screen_capture: Callable[[Path, int], bool] = capture_screen
@@ -526,6 +563,11 @@ class ListenDaemon:
         self._last_speech = now
         self.batcher = self._new_batcher()
         self.echo = EchoGuard(self.settings.listen.echo_window_seconds)
+        self._recent.clear()
+        self._last_question = float("-inf")
+        # The watching session keeps short ready answers here between batches, so a
+        # QUESTION can be answered from it without stopping to research.
+        self.prep_md.write_text(PREP_PLACEHOLDER, encoding="utf-8")
         listen = self.settings.listen
         self.screens = (
             ScreenShots(
@@ -555,6 +597,7 @@ class ListenDaemon:
             "MEETING_START",
             meeting=self.meeting_id,
             reason=reason,
+            prep=str(self.prep_md),
             transcript=str(self.storage.transcript_txt),
         )
 
@@ -630,15 +673,52 @@ class ListenDaemon:
             self.echo.mine(event, text, now)  # written by _release_held, unless it is an echo
             return
         await self._keep(event, now)
+        if event.speaker == "REMOTE":
+            self._maybe_question(text, now)
 
     async def _keep(self, event: TranscriptEvent, said_at: float) -> None:
         text = event.text.strip()
         self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text)
         await asyncio.to_thread(self.storage.append, event)
+        line = f"{event.speaker}: {text}"
         # The time it was said, not the time it was released, so a held line does not
         # look like fresh speech and push back the batch's pause.
-        self.batcher.add(f"{event.speaker}: {text}", said_at)
+        self.batcher.add(line, said_at)
+        self._recent.append((said_at, line))
         self._last_speech = max(self._last_speech, said_at)
+
+    def _maybe_question(self, text: str, now: float) -> None:
+        """Send a question from the other side at once; a batch could take minutes.
+
+        The batch still carries the line later, so nothing is lost when an alert is skipped.
+        """
+        listen = self.settings.listen
+        if not listen.question_alerts:
+            return
+        is_question, addressed = classify_question(text, self._names)
+        if not is_question:
+            return
+        if not addressed and now - self._last_question < listen.question_min_gap_seconds:
+            return
+        self._last_question = now
+        while self._recent and now - self._recent[0][0] > listen.question_context_seconds:
+            self._recent.popleft()
+        context = [line for _, line in sorted(self._recent, key=lambda item: item[0])]
+        if context and context[-1] == f"REMOTE: {text}":
+            context.pop()  # the question itself travels as `text`
+        self.events.append(
+            "QUESTION",
+            meeting=self.meeting_id,
+            addressed=addressed,
+            text=text,
+            context=context,
+            prep=str(self.prep_md),
+            transcript=str(self.storage.transcript_txt),
+        )
+
+    @property
+    def prep_md(self) -> Path:
+        return self.storage.directory / "prep.md"
 
     async def _release_held(self, now: float, everything: bool = False) -> None:
         for event, said_at in self.echo.release(now, everything):
