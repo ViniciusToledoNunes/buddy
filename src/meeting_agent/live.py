@@ -15,6 +15,7 @@ anything unreadable is skipped, and the rest of the view keeps working.
 from __future__ import annotations
 
 import json
+from collections import deque
 import os
 import re
 import time
@@ -283,10 +284,13 @@ class SessionMirror:
 class LiveView:
     """Everything on screen, merged in time order, from the moment the view opens."""
 
-    def __init__(self, runtime_dir: Path, show: str = "buddy", home: Path | None = None) -> None:
+    def __init__(self, runtime_dir: Path, show: str = "buddy", home: Path | None = None, keep: int = 3) -> None:
         self.runtime_dir = runtime_dir
         self.show = show
         self.home = home
+        # The last few suggestion sets, oldest first. Replacing the whole box made a set
+        # vanish while it was being read; a new set now goes below the previous ones.
+        self.suggestion_sets: deque[list[str]] = deque(maxlen=max(1, keep))
         self.events = EventReader(runtime_dir / "events.jsonl", runtime_dir / "cursors" / "unused")
         self.event_cursor = self.events.end_cursor()
         self.feed = EventReader(runtime_dir / "live.jsonl", runtime_dir / "cursors" / "unused")
@@ -294,7 +298,10 @@ class LiveView:
         self.mirror: SessionMirror | None = None
         self.session_id = ""
         self._next_lookup = 0.0
-        self.suggestions: list[str] = []
+
+    @property
+    def suggestions(self) -> list[str]:
+        return [line for group in self.suggestion_sets for line in group]
 
     def set_show(self, show: str) -> None:
         self.show = show
@@ -317,7 +324,7 @@ class LiveView:
         records, self.event_cursor = self.events.read(self.event_cursor)
         for record in records:
             if record.get("type") == "MEETING_START":
-                self.suggestions = []  # the last meeting's advice does not carry over
+                self.suggestion_sets.clear()  # the last meeting's advice does not carry over
             item = item_from_event(record)
             if item is not None:
                 items.append(item)
@@ -327,7 +334,9 @@ class LiveView:
         if self.mirror is not None:
             items.extend(self.mirror.poll())
             if self.mirror.suggestions_changed:
-                self.suggestions = list(self.mirror.suggestions)
+                latest = list(self.mirror.suggestions)
+                if not self.suggestion_sets or self.suggestion_sets[-1] != latest:
+                    self.suggestion_sets.append(latest)
                 self.mirror.suggestions_changed = False
         return sorted(items, key=lambda item: item.at)
 
@@ -340,7 +349,9 @@ class LiveView:
             # watching: a session follows Buddy. idle: it did, but its monitor is down, so
             # commands wait on disk until it re-arms. none: no session has ever connected.
             "brain": ("watching" if brain["watching"] else "idle") if brain else "none",
-            "suggestions": list(self.suggestions),
+            "suggestions": self.suggestions,
+            # How many of them, at the end, are the newest set: the window highlights those.
+            "suggestions_latest": len(self.suggestion_sets[-1]) if self.suggestion_sets else 0,
             "show": self.show,
         }
 

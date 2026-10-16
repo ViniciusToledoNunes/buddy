@@ -371,7 +371,7 @@ def live(
         sys.stdout.reconfigure(encoding="utf-8")
     runtime = _runtime_dir()
     settings = load_settings()
-    view = LiveView(runtime, "all" if show_all else settings.listen.window_shows)
+    view = LiveView(runtime, "all" if show_all else settings.listen.window_shows, keep=settings.listen.window_suggestions_kept)
     console.print("[dim]Following Buddy. Type a command and press Enter to send it; Ctrl+C leaves.[/dim]")
 
     def read_typed() -> None:
@@ -443,7 +443,12 @@ def window(
         raise typer.Exit(code=1)
     settings = load_settings()
     runtime.mkdir(parents=True, exist_ok=True)
-    run_window(runtime, "all" if show_all else settings.listen.window_shows, settings.listen.window_on_top)
+    run_window(
+        runtime,
+        "all" if show_all else settings.listen.window_shows,
+        settings.listen.window_on_top,
+        settings.listen.window_suggestions_kept,
+    )
 
 
 @app.command()
