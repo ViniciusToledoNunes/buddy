@@ -498,3 +498,28 @@ def test_a_watch_run_by_a_session_registers_it_as_the_brain(runtime, monkeypatch
     CliRunner().invoke(cli.app, ["watch", "--follow", "--peek", "--as", "claude-code"])
 
     assert registered == [("abc12345-0000", "claude-code")]  # a peek is not the brain
+
+
+async def test_a_new_suggestion_set_goes_below_the_ones_being_read(tmp_path):
+    """A set once vanished mid-read when the next batch's reply replaced the whole box."""
+    daemon = _daemon(tmp_path)
+    runtime = daemon.runtime_dir
+    session = _session(tmp_path)
+    view = LiveView(runtime, home=tmp_path, keep=3)
+    register_brain(runtime, "abc12345-0000", "claude-code")
+    await daemon.start_meeting("test")
+    view.poll()
+
+    for n in range(1, 5):
+        _write(session, _queued(BUDDY_BATCH), _assistant({"type": "text", "text": f"{2 * n - 1}. Say A{n}\n{2 * n}. Say B{n}"}))
+        view.poll()
+        if n == 2:
+            assert view.status()["suggestions"] == ["1. Say A1", "2. Say B1", "3. Say A2", "4. Say B2"]
+            assert view.status()["suggestions_latest"] == 2
+
+    # Only the last three sets stay, oldest first, so the newest is at the bottom.
+    assert view.status()["suggestions"] == ["3. Say A2", "4. Say B2", "5. Say A3", "6. Say B3", "7. Say A4", "8. Say B4"]
+
+    _write(session, _queued(BUDDY_BATCH), _assistant({"type": "text", "text": "7. Say A4\n8. Say B4"}))
+    view.poll()
+    assert len(view.status()["suggestions"]) == 6  # the same set again is not stacked twice

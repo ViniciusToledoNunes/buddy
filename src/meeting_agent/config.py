@@ -128,6 +128,9 @@ class ListenConfig(BaseModel):
     window_on_top: bool = True
     # The session's turns to show: only those Buddy started, or all of them.
     window_shows: Literal["buddy", "all"] = "buddy"
+    # Suggestion sets kept on screen, newest at the bottom: a new set must not wipe the one
+    # the user is still reading.
+    window_suggestions_kept: int = Field(3, ge=1, le=10)
     # A meeting batch goes out at a pause, at most once per interval, and never waits
     # longer than max_wait. A session turn takes 40-90s, so sending faster only queues.
     batch_min_seconds: float = Field(60.0, ge=5, le=900)
@@ -145,13 +148,12 @@ class ListenConfig(BaseModel):
     screen_interval_seconds: float = Field(60.0, ge=10, le=900)
     screen_max_width: int = Field(1600, ge=0, le=6000)
     screen_max_per_meeting: int = Field(240, ge=1, le=5000)
-    # A question from the other side goes out at once as a QUESTION event instead of
-    # waiting up to batch_max_wait for the next batch. A line counts when it has a "?"
-    # and more than three words ("Right?" is a tag, not a question), or names the user.
+    # A question from the other side sends the current batch at once instead of waiting
+    # for the interval. A line counts when it has a "?" and more than three words ("Right?"
+    # is a tag, not a question), or names the user.
     question_alerts: bool = True
-    question_names: list[str] = []          # e.g. ["Vinicius", "Vinny"]: always alert, even when short
-    question_min_gap_seconds: float = Field(10.0, ge=0, le=600)  # unnamed questions closer than this wait for the batch
-    question_context_seconds: float = Field(90.0, ge=10, le=600)  # recent speech sent along with the question
+    question_names: list[str] = []          # e.g. ["Vinicius", "Vinny"]: always count, even when short
+    question_min_gap_seconds: float = Field(10.0, ge=0, le=600)  # unnamed questions closer than this ride in the next batch
     # A meeting nobody ended still ends: silence, or a ceiling on its length.
     meeting_idle_minutes: float = Field(10.0, ge=1, le=240)
     meeting_max_minutes: float = Field(240.0, ge=5, le=1440)

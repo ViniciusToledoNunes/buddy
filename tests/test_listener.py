@@ -317,7 +317,8 @@ async def test_a_voice_command_opens_a_meeting_that_mcp_sees(tmp_path):
 
 async def test_meeting_speech_is_stored_and_batched(tmp_path):
     clock = Clock()
-    daemon, _ = _daemon(tmp_path, clock, batch_min_seconds=30, batch_pause_seconds=2)
+    # The question would send the batch at once; this test is about the interval.
+    daemon, _ = _daemon(tmp_path, clock, batch_min_seconds=30, batch_pause_seconds=2, question_alerts=False)
     await daemon.start_meeting("test")
     daemon.batcher.last_emit = clock.now
 
@@ -452,7 +453,7 @@ async def test_a_voice_shutdown_ends_the_loop(tmp_path):
 
 
 async def test_dictation_does_not_leak_into_the_meeting_batch(tmp_path):
-    daemon, _ = _daemon(tmp_path)
+    daemon, _ = _daemon(tmp_path, question_alerts=False)  # keep the batch open to inspect it
     await daemon.start_meeting("test")
 
     await daemon.on_final(_said("ME", "Hey Buddy, check the dashboard"))
@@ -809,41 +810,61 @@ def test_what_counts_as_a_question(said, expected):
     assert classify_question(said, names_pattern(["Vinicius", "Vinny"])) == expected
 
 
-async def test_a_question_goes_out_at_once_with_its_context(tmp_path):
+def _batches(daemon):
+    return [e for e in _events(daemon) if e["type"] == "MEETING_BATCH"]
+
+
+async def test_a_question_sends_the_batch_at_once(tmp_path):
     clock = Clock()
-    daemon, _ = _daemon(tmp_path, clock, question_names=["Vinny"], echo_window_seconds=0)
+    daemon, _ = _daemon(tmp_path, clock, question_names=["Vinny"], echo_window_seconds=0, batch_min_seconds=60)
     await daemon.start_meeting("test")
+    daemon.batcher.last_emit = clock.now  # a batch just went out: normally the next waits 60 s
 
     await daemon.on_final(_said("REMOTE", "The PVendor list came back with 83 profiles."))
     await daemon.on_final(_said("ME", "Those are the ones with two or more."))
     clock.now += 5
     await daemon.on_final(_said("REMOTE", "Vinny, can you share that list with Kaitlyn?"))
 
-    question = _events(daemon)[-1]
-    assert question["type"] == "QUESTION" and question["addressed"] is True
-    assert question["text"] == "Vinny, can you share that list with Kaitlyn?"
-    assert question["context"] == [
+    batch = _batches(daemon)[-1]
+    assert batch["trigger"] == "question" and batch["addressed"] is True
+    assert batch["question"] == "Vinny, can you share that list with Kaitlyn?"
+    assert batch["lines"] == [  # what led up to it is the context
         "REMOTE: The PVendor list came back with 83 profiles.",
         "ME: Those are the ones with two or more.",
+        "REMOTE: Vinny, can you share that list with Kaitlyn?",
     ]
-    assert question["prep"].endswith("prep.md")
+    assert daemon.batcher.lines == [] and daemon.batcher.last_emit == clock.now  # the interval starts over
     assert (daemon.storage.directory / "prep.md").read_text(encoding="utf-8").startswith("# Prep")
-    assert "REMOTE: Vinny, can you share" in daemon.batcher.lines[-1]  # the batch still has it
 
 
-async def test_tags_and_my_own_questions_send_no_alert(tmp_path):
-    daemon, _ = _daemon(tmp_path, echo_window_seconds=0)
+async def test_any_question_counts_not_only_mine(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, echo_window_seconds=0)
     await daemon.start_meeting("test")
+    daemon.batcher.last_emit = clock.now
+
+    await daemon.on_final(_said("REMOTE", "Does anyone know where the PVendor lives?"))
+
+    batch = _batches(daemon)[-1]
+    assert batch["trigger"] == "question" and "addressed" not in batch
+
+
+async def test_tags_and_my_own_questions_wait_for_the_interval(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, echo_window_seconds=0)
+    await daemon.start_meeting("test")
+    daemon.batcher.last_emit = clock.now
 
     await daemon.on_final(_said("REMOTE", "Right?"))
     await daemon.on_final(_said("ME", "Should we move the release to Monday?"))
 
-    assert [e["type"] for e in _events(daemon)] == ["MEETING_START"]
+    assert _batches(daemon) == []
+    assert daemon.batcher.lines == ["REMOTE: Right?", "ME: Should we move the release to Monday?"]
 
 
-async def test_questions_in_a_burst_alert_once_unless_they_name_me(tmp_path):
+async def test_questions_in_a_burst_send_once_unless_they_name_me(tmp_path):
     clock = Clock()
-    daemon, _ = _daemon(tmp_path, clock, question_names=["Vinny"], question_min_gap_seconds=10)
+    daemon, _ = _daemon(tmp_path, clock, question_names=["Vinny"], question_min_gap_seconds=10, echo_window_seconds=0)
     await daemon.start_meeting("test")
 
     await daemon.on_final(_said("REMOTE", "Does anyone know where the PVendor lives?"))
@@ -854,35 +875,55 @@ async def test_questions_in_a_burst_alert_once_unless_they_name_me(tmp_path):
     clock.now += 20
     await daemon.on_final(_said("REMOTE", "Can we close this item then?"))
 
-    asked = [e["text"] for e in _events(daemon) if e["type"] == "QUESTION"]
-    assert asked == [
-        "Does anyone know where the PVendor lives?",
-        "Vinny, did you check that already?",
-        "Can we close this item then?",
+    sent = [(b["question"], b["lines"]) for b in _batches(daemon)]
+    assert sent == [
+        ("Does anyone know where the PVendor lives?", ["REMOTE: Does anyone know where the PVendor lives?"]),
+        (
+            "Vinny, did you check that already?",
+            ["REMOTE: Is it on the vendor table or the user table?", "REMOTE: Vinny, did you check that already?"],
+        ),
+        ("Can we close this item then?", ["REMOTE: Can we close this item then?"]),
     ]
 
 
-async def test_question_alerts_can_be_turned_off(tmp_path):
-    daemon, _ = _daemon(tmp_path, question_alerts=False)
+async def test_without_questions_batches_keep_their_interval(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, echo_window_seconds=0, batch_min_seconds=60, batch_pause_seconds=2)
     await daemon.start_meeting("test")
+    daemon.batcher.last_emit = clock.now
+
+    await daemon.on_final(_said("REMOTE", "We ship on Friday."))
+    clock.now += 30
+    await daemon.tick()
+    assert _batches(daemon) == []
+    clock.now += 31
+    await daemon.tick()
+    assert "trigger" not in _batches(daemon)[-1]
+
+
+async def test_question_alerts_can_be_turned_off(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, question_alerts=False, echo_window_seconds=0)
+    await daemon.start_meeting("test")
+    daemon.batcher.last_emit = clock.now
 
     await daemon.on_final(_said("REMOTE", "Does anyone know where the PVendor lives?"))
 
-    assert [e["type"] for e in _events(daemon)] == ["MEETING_START"]
+    assert _batches(daemon) == []
 
 
-def test_a_question_renders_on_one_line_question_first():
+def test_a_question_batch_names_the_question_before_the_speech():
     line = format_event(
         {
             "time": "2026-10-15T15:00:00+00:00",
-            "type": "QUESTION",
+            "type": "MEETING_BATCH",
             "meeting": "m",
+            "trigger": "question",
             "addressed": True,
-            "text": "Vinny, can you share that list?",
-            "context": ["REMOTE: The list came back.", "ME: 83 profiles."],
-            "prep": "/m/prep.md",
+            "question": "Vinny, can you share that list?",
+            "lines": ["REMOTE: The list came back.", "REMOTE: Vinny, can you share that list?"],
             "transcript": "/m/transcript.txt",
         }
     )
     assert "\n" not in line
-    assert ' to=ME q="Vinny, can you share that list?" prep=/m/prep.md | context: REMOTE: The list came back. | ME: 83 profiles.' in line
+    assert ' lines=2 trigger=question to=ME q="Vinny, can you share that list?" | REMOTE: The list came back.' in line

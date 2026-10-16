@@ -105,6 +105,7 @@ listen:
   window: true                 # Buddy's floating window opens with `buddy listen --detach`
   window_on_top: true
   window_shows: buddy          # the Claude session's turns to show: buddy (only those Buddy started) or all
+  window_suggestions_kept: 3   # suggestion sets kept in the window, newest at the bottom
   batch_min_seconds: 60        # meeting speech reaches the session at most once per interval
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150
@@ -113,10 +114,9 @@ listen:
   screen_interval_seconds: 60
   screen_max_width: 1600       # captures are scaled down to this width
   screen_max_per_meeting: 240
-  question_alerts: true        # a question from the other side is sent at once, not with the next batch
-  question_names: []           # your names, e.g. [Vinicius, Vinny]: these always alert, even "Vinny, you?"
+  question_alerts: true        # a question from the other side sends the current batch at once
+  question_names: []           # your names, e.g. [Vinicius, Vinny]: these always count, even "Vinny, you?"
   question_min_gap_seconds: 10
-  question_context_seconds: 90
   meeting_idle_minutes: 10     # a forgotten meeting ends on silence
   meeting_max_minutes: 240
   event_log_max_mb: 5

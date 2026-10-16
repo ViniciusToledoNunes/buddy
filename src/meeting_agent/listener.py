@@ -5,7 +5,6 @@ import json
 import os
 import re
 import time
-from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -264,6 +263,10 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         screens = [str(path) for path in record.get("screens", [])]
         # Before the speech, so a long batch is never truncated past the screenshot path.
         shown = f" screens={len(screens)} latest_screen={screens[-1]}" if screens else ""
+        if record.get("trigger") == "question":
+            # Sent early because of this question; named first so truncation never hides it.
+            to = " to=ME" if record.get("addressed") else ""
+            shown = f' trigger=question{to} q="{record.get("question", "")}"' + shown
         text = f"{head} lines={len(lines)}{shown} | {body}"
         if len(text) > max_chars:
             text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
@@ -275,14 +278,6 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         # A dictation that closed on silence or length: the user may not have finished.
         note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
         return f'{head} said="{record.get("text", "")}"{note}'
-    if kind == "QUESTION":
-        # The question first and the context last, so truncation only ever cuts context.
-        to = " to=ME" if record.get("addressed") else ""
-        context = " | ".join(str(line) for line in record.get("context", []))
-        text = f'{head}{to} q="{record.get("text", "")}" prep={record.get("prep", "")} | context: {context}'
-        if len(text) > max_chars:
-            text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
-        return text
     if kind in {"MEETING_START", "MEETING_END"}:
         extra = [f"lines={record['lines']}"] if "lines" in record else []
         if record.get("prep"):
@@ -426,7 +421,6 @@ class ListenDaemon:
         self.batcher = self._new_batcher()
         self.echo: EchoGuard[TranscriptEvent] = EchoGuard(listen.echo_window_seconds)
         self._names = names_pattern(listen.question_names)
-        self._recent: deque[tuple[float, str]] = deque()  # kept meeting lines, for QUESTION context
         self._last_question = float("-inf")
         # Screenshots of the current meeting (listen.screen_capture); None when off.
         self.screens: ScreenShots | None = None
@@ -563,7 +557,6 @@ class ListenDaemon:
         self._last_speech = now
         self.batcher = self._new_batcher()
         self.echo = EchoGuard(self.settings.listen.echo_window_seconds)
-        self._recent.clear()
         self._last_question = float("-inf")
         # The watching session keeps short ready answers here between batches, so a
         # QUESTION can be answered from it without stopping to research.
@@ -631,12 +624,13 @@ class ListenDaemon:
             summary=str(storage.summary_md),
         )
 
-    def _flush_batch(self, now: float) -> None:
+    def _flush_batch(self, now: float, **trigger: Any) -> None:
         lines = self.batcher.take(now)
         if lines and self.storage is not None:
             # Captures taken since the last batch travel with it; without speech they wait.
             screens = self.screens.take() if self.screens is not None else []
             extra = {"screens": screens} if screens else {}
+            extra.update(trigger)
             self.events.append(
                 "MEETING_BATCH",
                 meeting=self.meeting_id,
@@ -684,13 +678,14 @@ class ListenDaemon:
         # The time it was said, not the time it was released, so a held line does not
         # look like fresh speech and push back the batch's pause.
         self.batcher.add(line, said_at)
-        self._recent.append((said_at, line))
         self._last_speech = max(self._last_speech, said_at)
 
     def _maybe_question(self, text: str, now: float) -> None:
-        """Send a question from the other side at once; a batch could take minutes.
+        """A question from the other side sends the batch at once instead of in up to 60 s.
 
-        The batch still carries the line later, so nothing is lost when an alert is skipped.
+        The batch already holds what led up to the question, so it is the context, and the
+        next batch's interval starts over from here. Every question gets a suggested answer,
+        not only the ones naming the user; those are marked so they are answered first.
         """
         listen = self.settings.listen
         if not listen.question_alerts:
@@ -699,22 +694,12 @@ class ListenDaemon:
         if not is_question:
             return
         if not addressed and now - self._last_question < listen.question_min_gap_seconds:
-            return
+            return  # a burst: this one rides in the batch that the first one sent, or the next
         self._last_question = now
-        while self._recent and now - self._recent[0][0] > listen.question_context_seconds:
-            self._recent.popleft()
-        context = [line for _, line in sorted(self._recent, key=lambda item: item[0])]
-        if context and context[-1] == f"REMOTE: {text}":
-            context.pop()  # the question itself travels as `text`
-        self.events.append(
-            "QUESTION",
-            meeting=self.meeting_id,
-            addressed=addressed,
-            text=text,
-            context=context,
-            prep=str(self.prep_md),
-            transcript=str(self.storage.transcript_txt),
-        )
+        trigger: dict[str, Any] = {"trigger": "question", "question": text}
+        if addressed:
+            trigger["addressed"] = True
+        self._flush_batch(now, **trigger)
 
     @property
     def prep_md(self) -> Path:

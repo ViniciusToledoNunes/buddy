@@ -107,14 +107,14 @@ class Pump:
         return True
 
 
-def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True) -> None:  # pragma: no cover
+def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep: int = 3) -> None:  # pragma: no cover
     """Open the window and block until it is closed. Needs a display and pywebview."""
     import webview
 
     if window_state(runtime_dir):
         return
     _write_json(runtime_dir / "window.json", {"pid": os.getpid(), "started": _process_started(os.getpid())})
-    view = LiveView(runtime_dir, show)
+    view = LiveView(runtime_dir, show, keep=keep)
     api = WindowApi(runtime_dir, view)
     width, height = 440, 680
     x = y = None
@@ -193,7 +193,10 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
   border: 1px solid var(--accent); border-radius: var(--radius); }
 #suggestions h2 { margin: 0 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
 #suggestions ol { margin: 0; padding: 0; list-style: none; }
+#suggestions ol { max-height: 34vh; overflow-y: auto; }
 #suggestions li { padding: 3px 0; }
+#suggestions li.older { opacity: .55; }
+#suggestions li.set-start { border-top: 1px dashed var(--accent); margin-top: 4px; padding-top: 6px; }
 
 #feed { flex: 1; overflow-y: auto; padding: 8px 12px 12px; }
 .row { display: flex; gap: 8px; padding: 3px 0; }
@@ -337,13 +340,20 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     $("pause").disabled = !on;
     $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
+    // Earlier sets stay above the newest one, dimmed, so a new set never wipes the one
+    // being read. The newest set is at the bottom and kept in view.
     const list = $("suggestion-list");
-    list.replaceChildren(...(next.suggestions || []).map((text) => {
+    const all = next.suggestions || [];
+    const firstNew = all.length - (next.suggestions_latest || all.length);
+    list.replaceChildren(...all.map((text, i) => {
       const li = document.createElement("li");
       li.textContent = text;
+      if (i < firstNew) li.classList.add("older");
+      if (i === firstNew && i > 0) li.classList.add("set-start");
       return li;
     }));
-    $("suggestions").style.display = (next.suggestions || []).length ? "block" : "none";
+    list.scrollTop = list.scrollHeight;
+    $("suggestions").style.display = all.length ? "block" : "none";
   }
 
   window.buddy = {
