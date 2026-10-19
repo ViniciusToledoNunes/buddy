@@ -114,6 +114,7 @@ listen:
   screen_interval_seconds: 60
   screen_max_width: 1600       # captures are scaled down to this width
   screen_max_per_meeting: 240
+  auto_brain: true             # no Claude Code session following? Buddy's own brain (copilot.claude_*) suggests and writes the summary
   question_alerts: true        # a question from the other side sends the current batch at once
   question_names: []           # your names, e.g. [Vinicius, Vinny]: these always count, even "Vinny, you?"
   question_min_gap_seconds: 10

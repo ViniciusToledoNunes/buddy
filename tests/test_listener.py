@@ -263,6 +263,7 @@ class FakeStream:
 
 def _daemon(tmp_path, clock=None, **listen):
     listen.setdefault("sounds", False)
+    listen.setdefault("auto_brain", False)  # never call Claude from a test
     settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": listen})
     streams = []
     daemon = ListenDaemon(
@@ -275,7 +276,7 @@ def _daemon(tmp_path, clock=None, **listen):
 
 
 def _quiet(tmp_path):
-    return Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False}})
+    return Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False}})
 
 
 def _events(daemon):
@@ -475,7 +476,7 @@ async def test_chimes_play_only_when_enabled(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "winsound", fake)
     quiet = ListenDaemon(_quiet(tmp_path), tmp_path / "a")
     loud = ListenDaemon(
-        Settings.model_validate({"meetings_dir": str(tmp_path / "m"), "listen": {"sounds": True}}), tmp_path / "b"
+        Settings.model_validate({"meetings_dir": str(tmp_path / "m"), "listen": {"sounds": True, "auto_brain": False}}), tmp_path / "b"
     )
 
     quiet.chime("sent")
