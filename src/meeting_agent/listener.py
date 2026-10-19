@@ -8,12 +8,14 @@ import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 import psutil
 
 from .config import Settings, project_root
 from .echo import EchoGuard
+if TYPE_CHECKING:
+    from .autobrain import BrainRunner
 from .events import EventBus, TranscriptEvent, utc_now
 from .screens import ScreenShots, capture_screen
 
@@ -398,8 +400,13 @@ class ListenDaemon:
         runtime_dir: Path | None = None,
         stream_factory: Callable[[str], Stream] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        brain_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.settings = settings
+        self._brain_factory = brain_factory
+        self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
+        self._brain_off = False  # unavailable this meeting; said once
+        self._summary_task: asyncio.Task[None] | None = None
         self.runtime_dir = runtime_dir or DEFAULT_RUNTIME_DIR
         self.state_file = self.runtime_dir / "state.json"  # shared with sessions and MCP
         self.stop_file = self.runtime_dir / "stop.flag"
@@ -611,6 +618,10 @@ class ListenDaemon:
             storage.metadata["screens_captured"] = self.screens.count
             self.screens = None
         await asyncio.to_thread(storage.finish, SUMMARY_PENDING)
+        runner, self.brain, self._brain_off = self.brain, None, False
+        if runner is not None:
+            storage.metadata["brain"] = "built-in"
+            self._summary_task = asyncio.create_task(self._brain_summary(runner, storage))
         self.state_file.unlink(missing_ok=True)
         self.stop_file.unlink(missing_ok=True)
         self._write_listen_state()
@@ -638,6 +649,50 @@ class ListenDaemon:
                 transcript=str(self.storage.transcript_txt),
                 **extra,
             )
+            self._think(lines, trigger)
+
+    # ------------------------------------------------------------- own brain
+
+    def session_watching(self) -> bool:
+        """A Claude Code session is following the listener right now."""
+        state = _read_json(self.runtime_dir / "brain.json")
+        return bool(state.get("session_id")) and process_alive(state)
+
+    def _think(self, lines: list[str], trigger: dict[str, Any]) -> None:
+        """Hand a batch to Buddy's own brain when no session is there to read it."""
+        if not self.settings.listen.auto_brain or self._brain_off or self.session_watching():
+            return
+        if self.brain is None:
+            from .autobrain import AutoBrain, BrainRunner
+
+            brain = self._brain_factory() if self._brain_factory else AutoBrain(self.settings, self.storage.directory.parent)
+            if not brain.available():
+                self._brain_off = True
+                self.events.append("NOTICE", meeting=self.meeting_id,
+                                   text="No Claude Code session is following and the built-in brain is unavailable: no suggestions this meeting.")
+                return
+            self.brain = BrainRunner(brain, self._show_suggestions, self._brain_notice)
+            self.events.append("NOTICE", meeting=self.meeting_id,
+                               text="No Claude Code session is following: Buddy's built-in brain is suggesting.")
+            self._show("BRAIN", text="Built-in brain on: suggestions come from Buddy itself.")
+        self.brain.submit(lines, trigger)
+
+    def _show_suggestions(self, suggestions: list[str]) -> None:
+        self._show("SUGGEST", meeting=self.meeting_id, items=suggestions)
+
+    def _brain_notice(self, text: str) -> None:
+        self.events.append("NOTICE", meeting=self.meeting_id, text=text)
+
+    async def _brain_summary(self, runner: BrainRunner, storage: Any) -> None:
+        """The built-in brain writes the summary a watching session would have written."""
+        await runner.finish(timeout=60)
+        try:
+            transcript = await asyncio.to_thread(storage.transcript_txt.read_text, encoding="utf-8")
+            report = await runner.brain.report(transcript)
+            await asyncio.to_thread(storage.summary_md.write_text, report.rstrip() + "\n", encoding="utf-8")
+            self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain wrote the summary: {storage.summary_md}")
+        except Exception as exc:
+            self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain could not write the summary: {type(exc).__name__}: {exc}")
 
     # ----------------------------------------------------------------- speech
 

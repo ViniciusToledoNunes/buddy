@@ -151,6 +151,10 @@ class ListenConfig(BaseModel):
     # A question from the other side sends the current batch at once instead of waiting
     # for the interval. A line counts when it has a "?" and more than three words ("Right?"
     # is a tag, not a question), or names the user.
+    # When no Claude Code session follows the listener, Buddy runs its own brain (Claude
+    # Code headless, the `copilot.claude_*` settings) on each batch, shows its suggestions
+    # in the window and writes the meeting summary. A watching session always takes over.
+    auto_brain: bool = True
     question_alerts: bool = True
     question_names: list[str] = []          # e.g. ["Vinicius", "Vinny"]: always count, even when short
     question_min_gap_seconds: float = Field(10.0, ge=0, le=600)  # unnamed questions closer than this ride in the next batch

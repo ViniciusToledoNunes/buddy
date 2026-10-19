@@ -39,7 +39,7 @@ class FakeStream:
 
 
 def _daemon(tmp_path):
-    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False}})
+    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False}})
     daemon = ListenDaemon(settings, tmp_path / "runtime", stream_factory=FakeStream)
     daemon.chime = lambda kind: None
     daemon.claim()

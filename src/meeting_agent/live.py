@@ -71,6 +71,10 @@ def item_from_feed(record: dict[str, Any]) -> LiveItem | None:
         return LiveItem("dictation", str(record.get("text", "")), who="ME", at=at)
     if kind == "CANCELLED":
         return LiveItem("cancelled", "Command dropped.", at=at)
+    if kind == "SUGGEST":  # Buddy's own brain, when no session follows
+        return LiveItem("claude", "\n".join(str(item) for item in record.get("items", [])), at=at)
+    if kind == "BRAIN":
+        return LiveItem("state", str(record.get("text", "")), at=at)
     return None
 
 
@@ -330,15 +334,20 @@ class LiveView:
                 items.append(item)
         records, self.feed_cursor = self.feed.read(self.feed_cursor)
         items.extend(item for item in map(item_from_feed, records) if item is not None)
+        for record in records:
+            if record.get("type") == "SUGGEST":
+                self._add_suggestions([str(item) for item in record.get("items", [])])
         self._follow_brain()
         if self.mirror is not None:
             items.extend(self.mirror.poll())
             if self.mirror.suggestions_changed:
-                latest = list(self.mirror.suggestions)
-                if not self.suggestion_sets or self.suggestion_sets[-1] != latest:
-                    self.suggestion_sets.append(latest)
+                self._add_suggestions(list(self.mirror.suggestions))
                 self.mirror.suggestions_changed = False
         return sorted(items, key=lambda item: item.at)
+
+    def _add_suggestions(self, latest: list[str]) -> None:
+        if latest and (not self.suggestion_sets or self.suggestion_sets[-1] != latest):
+            self.suggestion_sets.append(latest)
 
     def status(self) -> dict[str, Any]:
         listener = listener_state(self.runtime_dir)
