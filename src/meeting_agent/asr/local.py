@@ -194,7 +194,7 @@ async def run_local_asr(
             continue
         try:
             speaker = frame.speaker
-            rms = float(np.sqrt(np.mean(np.square(frame.samples), dtype=np.float64)))
+            rms = float(np.sqrt(np.mean(np.square(frame.samples, dtype=np.float64))))
             if len(calibration) < max(5, 1000 // frame_ms):
                 calibration.append(rms)
                 if len(calibration) == max(5, 1000 // frame_ms):

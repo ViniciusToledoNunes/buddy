@@ -104,6 +104,19 @@ func options() -> Options {
     return value
 }
 
+/// ScreenCaptureKit wants the device's unique ID, but people configure the name they see
+/// ("MacBook Pro Microphone"). An unknown ID made the microphone stream fail in a loop, and
+/// each retry interrupted the system-audio stream (SCStreamError -3805).
+func microphoneID(_ configured: String) -> String {
+    let devices = AVCaptureDevice.devices(for: .audio)
+    if devices.contains(where: { $0.uniqueID == configured }) { return configured }
+    if let match = devices.first(where: { $0.localizedName.caseInsensitiveCompare(configured) == .orderedSame }) {
+        return match.uniqueID
+    }
+    FileHandle.standardError.write(Data("microphone \"\(configured)\" not found; using the default\n".utf8))
+    return AVCaptureDevice.default(for: .audio)?.uniqueID ?? configured
+}
+
 @main
 struct MeetingAudioCapture {
     static func main() async throws {
@@ -138,7 +151,7 @@ struct MeetingAudioCapture {
         if opts.source == "microphone" {
             configuration.capturesAudio = false
             configuration.captureMicrophone = true
-            if opts.device != "default" { configuration.microphoneCaptureDeviceID = opts.device }
+            if opts.device != "default" { configuration.microphoneCaptureDeviceID = microphoneID(opts.device) }
             outputType = .microphone
         } else {
             configuration.capturesAudio = true

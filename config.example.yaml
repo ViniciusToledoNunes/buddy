@@ -17,6 +17,10 @@ audio:
   # device is re-resolved. This is what recovers capture when a headset takes the
   # jack and Windows leaves the old endpoint valid but mute. 0 disables the check.
   silence_reconnect_seconds: 20
+  # macOS: a capture helper that sends no bytes at all for this long is restarted.
+  # ScreenCaptureKit sends frames even in silence, so a quiet helper is a dead one.
+  # 0 disables the check.
+  helper_stall_seconds: 10
 
 asr:
   local_model_en: tiny.en

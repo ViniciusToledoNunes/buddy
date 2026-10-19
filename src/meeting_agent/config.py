@@ -18,6 +18,9 @@ class AudioConfig(BaseModel):
     # A capture stream that carries only digital silence for this long is treated as
     # lost and the device is re-resolved. 0 disables the check.
     silence_reconnect_seconds: float = Field(20.0, ge=0, le=600)
+    # macOS: a capture helper that sends no bytes at all for this long is restarted
+    # (ScreenCaptureKit sends frames even in silence). 0 disables the check.
+    helper_stall_seconds: float = Field(10.0, ge=0, le=600)
 
 
 class ASRConfig(BaseModel):
