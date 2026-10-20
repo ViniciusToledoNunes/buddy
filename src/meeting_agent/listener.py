@@ -16,7 +16,7 @@ from .config import Settings, project_root
 from .echo import EchoGuard
 if TYPE_CHECKING:
     from .autobrain import BrainRunner
-from .events import EventBus, TranscriptEvent, utc_now
+from .events import EventBus, StatusEvent, TranscriptEvent, utc_now
 from .screens import ScreenShots, capture_screen
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
@@ -880,6 +880,16 @@ class ListenDaemon:
 
     # ------------------------------------------------------------------ ticks
 
+    def on_status(self, event: StatusEvent) -> None:
+        """Capture that keeps failing used to retry silently for a whole day; say so instead."""
+        if not event.component.startswith("audio-") or event.state not in {"failing", "recovered"}:
+            return
+        prefix = "Audio capture is failing" if event.state == "failing" else "Audio capture recovered"
+        fields: dict[str, Any] = {"text": f"{prefix}: {event.detail}"}
+        if self.meeting_id:
+            fields["meeting"] = self.meeting_id
+        self.events.append("NOTICE", **fields)
+
     async def tick(self) -> None:
         now = self.clock()
         listen = self.settings.listen
@@ -944,6 +954,8 @@ class ListenDaemon:
                     event = None
                 if isinstance(event, TranscriptEvent) and event.final:
                     await self.on_final(event)
+                if isinstance(event, StatusEvent):
+                    self.on_status(event)
                 if not await self.check_controls():
                     reason = self._shutdown_reason
                     break

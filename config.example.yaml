@@ -21,6 +21,12 @@ audio:
   # ScreenCaptureKit sends frames even in silence, so a quiet helper is a dead one.
   # 0 disables the check.
   helper_stall_seconds: 10
+  # macOS: capture failing this long raises a NOTICE in the window and for watchers,
+  # and another when it recovers. 0 disables the alert.
+  capture_alert_seconds: 60
+  # macOS: on that alert, also run `sudo -n killall replayd` (a wedged capture service).
+  # Needs a sudoers rule for exactly that command; see Limitations in the README.
+  restart_capture_service: false
 
 asr:
   local_model_en: tiny.en

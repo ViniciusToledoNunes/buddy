@@ -7,6 +7,7 @@ import select
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -53,6 +54,7 @@ class MacOSAudioCapture(ThreadedAudioCapture):
         corrupted_limit = max(1, int(CORRUPTED_RESTART_SECONDS * 1000 / self.config.chunk_ms))
         sequence = 0
         failures = 0
+        outage = Outage(self.config.capture_alert_seconds)
         if self.speaker == "ME":
             # Two ScreenCaptureKit streams opened at the same instant interrupt each other
             # (SCStreamError -3805): one helper dies, the other stays alive and silent.
@@ -82,6 +84,8 @@ class MacOSAudioCapture(ThreadedAudioCapture):
                     sequence += 1
                     if now - started >= HEALTHY_STREAM_SECONDS:
                         failures = 0
+                        if outage.healthy():
+                            self._status("recovered", f"the {self.speaker} capture is back")
                     if watchdog.observe(samples, now):
                         raise CaptureStreamLost(f"the {self.speaker} stream carried only digital silence for {self.config.silence_reconnect_seconds:g}s")
             except Exception as exc:
@@ -92,8 +96,20 @@ class MacOSAudioCapture(ThreadedAudioCapture):
                         reason = f"{reason} ({error})"
                     failures += 1
                     delay = retry_delay(failures)
+                    if self.speaker == "ME":
+                        # Both helpers fail together when the capture service breaks, and
+                        # equal backoffs would reopen them at the same instant every time.
+                        delay += MICROPHONE_START_DELAY_SECONDS
                     self._status("retrying", reason)
                     print(f"Buddy {self.speaker} capture restarts in {delay:g}s: {reason}", file=sys.stderr, flush=True)
+                    if outage.failed(time.monotonic()):
+                        detail = f"no {self.speaker} audio for {outage.alert_after:g}s; last error: {reason}."
+                        if self.config.restart_capture_service:
+                            detail += " " + restart_capture_service()
+                        else:
+                            detail += f" If it persists, macOS's capture service is likely stuck: run `{RESTART_COMMAND}`."
+                        self._status("failing", detail)
+                        print(f"Buddy {self.speaker} capture is failing: {detail}", file=sys.stderr, flush=True)
                     self.stop_event.wait(delay)
             finally:
                 end_helper(self.process)
@@ -115,6 +131,59 @@ HEALTHY_STREAM_SECONDS = 30.0
 CORRUPTED_RESTART_SECONDS = 3.0
 # Float32 audio stays within [-1, 1]; anything far outside is a broken buffer.
 CORRUPTED_SAMPLE_LIMIT = 8.0
+
+
+# replayd serves every ScreenCaptureKit client. Once it wedged for days and turned each new
+# stream into SCStreamError -3805/-3821 within seconds; restarting the listener did not help,
+# killing replayd (launchd starts a fresh one) did.
+RESTART_COMMAND = "sudo killall replayd"
+# Both speakers fail together, so restart the service at most this often.
+SERVICE_RESTART_GAP_SECONDS = 300.0
+_service_restart_lock = threading.Lock()
+_service_restarted_at: float | None = None
+
+
+class Outage:
+    """Tracks one capture outage: alert once when it lasts, report once when it ends."""
+
+    def __init__(self, alert_after: float) -> None:
+        self.alert_after = alert_after
+        self.since: float | None = None
+        self.announced = False
+
+    def failed(self, now: float) -> bool:
+        """Record a failure; True exactly once, when the outage first lasts `alert_after`."""
+        if self.since is None:
+            self.since = now
+        if self.alert_after <= 0 or self.announced or now - self.since < self.alert_after:
+            return False
+        self.announced = True
+        return True
+
+    def healthy(self) -> bool:
+        """Record a healthy stream; True when it ends an outage that was announced."""
+        announced = self.announced
+        self.since = None
+        self.announced = False
+        return announced
+
+
+def restart_capture_service() -> str:
+    """Kill a stuck replayd without prompting; works only where sudoers allows the command."""
+    global _service_restarted_at
+    with _service_restart_lock:
+        now = time.monotonic()
+        if _service_restarted_at is not None and now - _service_restarted_at < SERVICE_RESTART_GAP_SECONDS:
+            return "The capture service was restarted moments ago."
+        _service_restarted_at = now
+    try:
+        result = subprocess.run(["sudo", "-n", "/usr/bin/killall", "replayd"], capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return f"Could not restart the capture service ({type(exc).__name__}: {exc}); run `{RESTART_COMMAND}`."
+    if result.returncode == 0:
+        return "Restarted macOS's capture service (replayd)."
+    error = (result.stderr or result.stdout).strip().splitlines()
+    return f"Could not restart the capture service ({error[-1] if error else f'exit {result.returncode}'}); run `{RESTART_COMMAND}`."
 
 
 def retry_delay(failures: int) -> float:

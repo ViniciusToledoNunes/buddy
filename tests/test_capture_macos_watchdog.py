@@ -8,7 +8,8 @@ import time
 
 import numpy as np
 
-from meeting_agent.capture.macos import MacOSAudioCapture, end_helper, read_frame, retry_delay, sanitize
+from meeting_agent.capture import macos
+from meeting_agent.capture.macos import MacOSAudioCapture, Outage, end_helper, read_frame, restart_capture_service, retry_delay, sanitize
 from meeting_agent.config import AudioConfig
 
 
@@ -114,3 +115,55 @@ def test_join_ends_a_helper_blocked_on_read(tmp_path, monkeypatch):
         alive = False
     assert not alive
     assert not stream.thread.is_alive()
+
+
+def test_an_outage_alerts_once_after_the_threshold_and_reports_recovery():
+    outage = Outage(60)
+    assert not outage.failed(0)
+    assert not outage.failed(59)
+    assert outage.failed(60)
+    assert not outage.failed(120)
+    assert outage.healthy()
+    assert not outage.healthy()
+    assert not outage.failed(200)
+
+
+def test_a_zero_threshold_never_alerts():
+    outage = Outage(0)
+    assert not outage.failed(0)
+    assert not outage.failed(10_000)
+    assert not outage.healthy()
+
+
+def test_the_capture_service_restart_never_prompts_and_is_rate_limited(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "sudo: a password is required\n")
+
+    monkeypatch.setattr(macos.subprocess, "run", run)
+    monkeypatch.setattr(macos, "_service_restarted_at", None)
+
+    first = restart_capture_service()
+    second = restart_capture_service()
+
+    assert calls == [["sudo", "-n", "/usr/bin/killall", "replayd"]]
+    assert "a password is required" in first and "sudo killall replayd" in first
+    assert "moments ago" in second
+
+
+def test_a_helper_failing_in_a_loop_reports_failing(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUDDY_MACOS_HELPER", fake_helper(tmp_path, "sys.stderr.write('capture stopped: -3805\\n')\nsys.exit(1)"))
+    published = []
+    stream, stop = capture("REMOTE", AudioConfig(capture_alert_seconds=0.5))
+    stream._status = lambda state, detail="": published.append((state, detail))
+    stream.start()
+    deadline = time.monotonic() + 6
+    while time.monotonic() < deadline and not any(state == "failing" for state, _ in published):
+        time.sleep(0.05)
+    stop.set()
+    stream.join()
+    failing = [detail for state, detail in published if state == "failing"]
+    assert len(failing) == 1
+    assert "-3805" in failing[0] and "sudo killall replayd" in failing[0]

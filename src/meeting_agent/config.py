@@ -21,6 +21,12 @@ class AudioConfig(BaseModel):
     # macOS: a capture helper that sends no bytes at all for this long is restarted
     # (ScreenCaptureKit sends frames even in silence). 0 disables the check.
     helper_stall_seconds: float = Field(10.0, ge=0, le=600)
+    # macOS: a capture that keeps failing this long raises a NOTICE (window and watchers),
+    # and another when it recovers. 0 disables the alert.
+    capture_alert_seconds: float = Field(60.0, ge=0, le=3600)
+    # macOS: when that alert fires, also try `sudo -n killall replayd`. Needs a sudoers rule
+    # for exactly that command (see the README); without one it only explains what to run.
+    restart_capture_service: bool = False
 
 
 class ASRConfig(BaseModel):
