@@ -278,6 +278,15 @@ Capture, ASR, storage, UI and the model are isolated, so one failing subsystem d
   rather than `~/bin/jira.sh`) is denied, and shows up in `tool_denials`.
 - No desktop app, system tray or signed installer yet.
 - Calendar, meeting platform, Jira, GitHub and CRM integrations are not automatic.
+- macOS: every ScreenCaptureKit client goes through `replayd`, and it can wedge for days. Then each capture
+  stream dies within seconds (SCStreamError -3805 or -3821) and restarting Buddy does not help. After
+  `audio.capture_alert_seconds` of failure Buddy raises a NOTICE that says so; `sudo killall replayd` fixes it
+  (launchd starts a fresh one). To let Buddy do that itself, set `audio.restart_capture_service: true` and allow
+  exactly that command without a password, with `sudo visudo -f /etc/sudoers.d/buddy-replayd`:
+
+  ```
+  your-user ALL=(root) NOPASSWD: /usr/bin/killall replayd
+  ```
 
 ## Development
 

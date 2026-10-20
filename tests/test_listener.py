@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from meeting_agent import cli
 from meeting_agent.config import Settings
 from meeting_agent.context import MeetingRepository
-from meeting_agent.events import TranscriptEvent
+from meeting_agent.events import StatusEvent, TranscriptEvent
 from meeting_agent.listener import (
     SUMMARY_PENDING,
     EventLog,
@@ -928,3 +928,18 @@ def test_a_question_batch_names_the_question_before_the_speech():
     )
     assert "\n" not in line
     assert ' lines=2 trigger=question to=ME q="Vinny, can you share that list?" | REMOTE: The list came back.' in line
+
+
+def test_a_failing_capture_raises_a_notice_and_its_recovery_another(tmp_path):
+    daemon, _ = _daemon(tmp_path)
+
+    daemon.on_status(StatusEvent("audio-remote", "retrying", "no audio"))
+    daemon.on_status(StatusEvent("audio-remote", "failing", "no REMOTE audio for 60s"))
+    daemon.on_status(StatusEvent("audio-remote", "recovered", "the REMOTE capture is back"))
+    daemon.on_status(StatusEvent("asr", "failing", "not a capture"))
+
+    notices = [e["text"] for e in _events(daemon) if e["type"] == "NOTICE"]
+    assert notices == [
+        "Audio capture is failing: no REMOTE audio for 60s",
+        "Audio capture recovered: the REMOTE capture is back",
+    ]
