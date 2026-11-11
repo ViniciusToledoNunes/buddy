@@ -142,5 +142,9 @@ class MicGate:
             return self.when_unknown == "keep"
         return False
 
+    def indicator(self) -> dict[str, Any]:
+        """What the window's microphone button shows: kept or not, and why."""
+        return {"mode": self.mode, "state": self.state, "app": self.app, "heard": self.heard()}
+
     def describe(self) -> dict[str, Any]:
         return {"mode": self.mode, "state": self.state, "app": self.app, "dropped": self.dropped, "error": self.error}

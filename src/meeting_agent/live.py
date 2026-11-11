@@ -355,6 +355,8 @@ class LiveView:
         return {
             "listener": listener.get("state", "listening") if listener else "off",
             "meeting": listener.get("meeting_id", "") if listener else "",
+            # listen.mic_follows_mute: whether your microphone's lines are being kept now.
+            "mic": listener.get("mic") if listener else None,
             # watching: a session follows Buddy. idle: it did, but its monitor is down, so
             # commands wait on disk until it re-arms. none: no session has ever connected.
             "brain": ("watching" if brain["watching"] else "idle") if brain else "none",

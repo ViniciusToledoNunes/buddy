@@ -435,6 +435,7 @@ class ListenDaemon:
         self.screen_capture: Callable[[Path, int], bool] = capture_screen
         # Whether the meeting app hears you (listen.mic_follows_mute); None when off.
         self.mic_gate: MicGate | None = None
+        self._mic_shown: dict[str, Any] | None = None
         self.mic_gate_factory: Callable[[], MicGate] = lambda: MicGate(
             self.mic_mode_file, self.settings.listen.mic_when_unknown, clock=self.clock
         )
@@ -485,6 +486,7 @@ class ListenDaemon:
                 "state": self.state,
                 "meeting_id": self.meeting_id,
                 "meeting_dir": str(self.storage.directory) if self.storage is not None else "",
+                "mic": self.mic_gate.indicator() if self.mic_gate is not None else None,
                 "updated": utc_now(),
             },
         )
@@ -912,6 +914,9 @@ class ListenDaemon:
                 await self.send_command("limit")
         if self.storage is None:
             return
+        if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:
+            self._mic_shown = self.mic_gate.indicator()
+            self._write_listen_state()  # the window's microphone button follows the app
         await self._release_held(now)
         if self.screens is not None and self.screens.due(now):
             await asyncio.to_thread(self.screens.shoot, now)

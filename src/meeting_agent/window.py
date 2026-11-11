@@ -68,6 +68,15 @@ class WindowApi:
         self._send_control(self._runtime_dir, action)
         return {"ok": True}
 
+    def set_mic(self, mode: str) -> dict[str, Any]:
+        """The microphone button: follow the meeting app (auto), always keep (on), never (off)."""
+        from .mic_gate import MODES, write_mode
+
+        if mode not in MODES:
+            return {"ok": False, "error": f"Unknown microphone mode: {mode}"}
+        write_mode(self._runtime_dir / "listen" / "mic.json", mode)
+        return {"ok": True, "mode": mode}
+
     def set_show(self, show: str) -> dict[str, Any]:
         if show in {"buddy", "all"}:
             self._view.set_show(show)
@@ -177,6 +186,14 @@ button { font: inherit; color: inherit; background: none; border: 1px solid var(
 button:hover { background: var(--accent-soft); }
 button.on { background: var(--accent-soft); border-color: var(--accent); }
 button.danger.armed { background: var(--rec); color: #fff; border-color: var(--rec); }
+/* The microphone button glows while your lines are kept, dims while you are muted in the
+   meeting app, and turns amber when no app could be read. */
+#mic { display: none; }
+#mic.heard { color: #fff; background: var(--rec); border-color: var(--rec); box-shadow: 0 0 10px var(--rec);
+  animation: glow 1.6s ease-in-out infinite; }
+#mic.muted { opacity: .45; }
+#mic.unknown { border-color: #d9a400; color: #d9a400; }
+@keyframes glow { 50% { box-shadow: 0 0 3px var(--rec); } }
 
 header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel);
   border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -233,6 +250,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   <span id="brain"></span>
   <span class="spacer"></span>
   <span class="tools">
+    <button id="mic" title="Your microphone">🎙</button>
     <button id="meeting" title="Start or end recording a meeting">⏺ Meeting</button>
     <button id="pause" title="Close or reopen the microphone">⏸</button>
     <button id="show" title="Show only what Buddy started, or the whole Claude session">Only Buddy</button>
@@ -340,6 +358,18 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     $("pause").disabled = !on;
     $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
+    const mic = next.mic;
+    const micButton = $("mic");
+    micButton.style.display = mic && state === "meeting" ? "inline-block" : "none";
+    if (mic) {
+      const look = mic.mode !== "auto" ? (mic.heard ? "heard" : "muted")
+        : mic.state === "none" ? "unknown" : (mic.heard ? "heard" : "muted");
+      micButton.className = look;
+      micButton.textContent = mic.mode === "auto" ? "🎙" : (mic.mode === "on" ? "🎙 on" : "🎙 off");
+      const app = mic.app || "no meeting app read";
+      micButton.title = (mic.heard ? "Your lines are kept" : "Your lines are not kept") +
+        ` · ${mic.mode === "auto" ? "following " + app : "set by hand"} · click: auto → on → off`;
+    }
     // Earlier sets stay above the newest one, dimmed, so a new set never wipes the one
     // being read. The newest set is at the bottom and kept in view.
     const list = $("suggestion-list");
@@ -390,6 +420,12 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   const control = async (action) => { const r = await call("control", action); if (!r.ok) showError(r.error); };
   $("meeting").addEventListener("click", () => control(status.listener === "meeting" ? "stop-meeting" : "start-meeting"));
   $("pause").addEventListener("click", () => control(status.listener === "paused" ? "resume" : "pause"));
+  $("mic").addEventListener("click", async () => {
+    const order = ["auto", "on", "off"];
+    const current = (status.mic && status.mic.mode) || "auto";
+    const r = await call("set_mic", order[(order.indexOf(current) + 1) % order.length]);
+    if (!r.ok) showError(r.error);
+  });
   $("show").addEventListener("click", async () => {
     const r = await call("set_show", status.show === "all" ? "buddy" : "all");
     if (r.ok) { status.show = r.show; $("show").textContent = r.show === "all" ? "All turns" : "Only Buddy"; }

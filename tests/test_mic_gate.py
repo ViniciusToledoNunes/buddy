@@ -168,3 +168,27 @@ def test_buddy_mic_sets_and_shows_the_mode(tmp_path, monkeypatch):
     assert "Microphone: off" in runner.invoke(cli.app, ["mic", "off"]).stdout
     assert read_mode(tmp_path / "runtime" / "listen" / "mic.json") == "off"
     assert runner.invoke(cli.app, ["mic", "loud"]).exit_code == 2
+
+
+async def test_the_window_learns_the_microphone_state_when_it_changes(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, mic_follows_mute=True, echo_window_seconds=0)
+    gate = _gate(tmp_path, clock=clock)
+    daemon.mic_gate_factory = lambda: gate
+    await daemon.start_meeting("requested")
+    gate.update('{"state": "open", "app": "Google Meet"}')
+
+    await daemon.tick()
+    state = json.loads(daemon.listen_file.read_text())
+
+    assert state["mic"] == {"mode": "auto", "state": "open", "app": "Google Meet", "heard": True}
+
+
+def test_the_window_button_sets_the_mode(tmp_path):
+    from meeting_agent.window import WindowApi
+
+    api = WindowApi(tmp_path, view=None)
+
+    assert api.set_mic("off") == {"ok": True, "mode": "off"}
+    assert read_mode(tmp_path / "listen" / "mic.json") == "off"
+    assert api.set_mic("loud")["ok"] is False
