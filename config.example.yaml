@@ -110,6 +110,7 @@ listen:
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150
   echo_window_seconds: 8       # drop microphone lines that only echo the speakers; 0 turns it off
+  wake_phrase: true            # false: the microphone opens only during a meeting (no "Hey Buddy" between meetings)
   screen_capture: false        # macOS: save a screenshot every interval during a meeting (whole screen)
   screen_interval_seconds: 60
   screen_max_width: 1600       # captures are scaled down to this width

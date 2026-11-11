@@ -570,6 +570,34 @@ async def test_pausing_closes_the_microphone_and_ends_the_meeting(tmp_path):
     assert not daemon.paused and streams[-1] == ("start", "ME")
 
 
+async def test_without_the_wake_phrase_the_mic_opens_only_for_meetings(tmp_path):
+    daemon, streams = _daemon(tmp_path, wake_phrase=False)
+    await daemon._close_mic()
+    assert daemon.paused and daemon.mic is None
+
+    await daemon.start_meeting("button")
+    assert not daemon.paused and ("start", "ME") in streams and ("start", "REMOTE") in streams
+
+    await daemon.stop_meeting("button")
+    assert daemon.paused and daemon.mic is None
+    assert [e["type"] for e in _events(daemon)][-1] == "MEETING_END"
+
+
+async def test_the_loop_starts_closed_without_the_wake_phrase(tmp_path):
+    runtime = tmp_path / "runtime"
+    settings = Settings.model_validate(
+        {"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False, "wake_phrase": False}}
+    )
+    streams = []
+    daemon = ListenDaemon(settings, runtime, stream_factory=lambda s: FakeStream(s, streams))
+    stop = asyncio.Event()
+    task = asyncio.create_task(daemon.run(stop))
+    await asyncio.sleep(0.2)
+    assert daemon.paused and streams == []
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+
 async def test_the_cli_and_mcp_can_steer_the_listener(tmp_path):
     clock = Clock()
     daemon, _ = _daemon(tmp_path, clock)
