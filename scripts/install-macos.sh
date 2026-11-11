@@ -19,6 +19,8 @@ swiftc -O -parse-as-library \
     -framework ScreenCaptureKit -framework CoreMedia -framework AVFoundation \
     "$REPO_ROOT/native/macos/MeetingAudioCapture.swift" \
     -o "$REPO_ROOT/.venv/bin/meeting-audio-macos"
+# Reads whether you are muted in the meeting app, for listen.mic_follows_mute (Accessibility).
+swiftc -O "$REPO_ROOT/native/macos/MicState.swift" -o "$REPO_ROOT/.venv/bin/buddy-mic-state"
 "$REPO_ROOT/.venv/bin/python" "$SCRIPT_DIR/install_agent_integrations.py" --project-root "$REPO_ROOT"
 "$REPO_ROOT/.venv/bin/python" -m meeting_agent.cli doctor
 echo "Buddy installed. Grant Screen Recording and Microphone permissions when macOS prompts. macOS 15+ is required."

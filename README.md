@@ -142,6 +142,15 @@ per utterance would flood the monitor, and an agent turn takes 40 to 90 seconds.
 consume the first one's events, and a monitor that expired receives what it missed when it comes back. `--peek`
 looks without advancing.
 
+**Your microphone follows the meeting app's mute.** Most of a call you are muted, and the microphone still hears
+you: someone in the room, or the call itself through the speakers. With `listen.mic_follows_mute: true` (macOS), a
+small helper reads the meeting app's microphone button through the Accessibility permission — "Unmute mic" in
+Teams, "Turn on microphone" in Google Meet (Chrome, Edge, Arc, Brave), "Unmute audio" in Zoom — and your lines are
+kept only while the app can hear you, plus 15 seconds, since a line is transcribed after it ends. Commands to Buddy
+still work while muted. Grant Accessibility to the app that starts Buddy (Terminal, or your editor) in System
+Settings → Privacy & Security → Accessibility. `buddy mic on|off|auto` overrides the app; with no app found,
+`listen.mic_when_unknown` keeps or drops the lines.
+
 Other controls: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. The MCP server (`meeting_status`,
 `get_live_transcript`, `stop_meeting`) sees meetings opened by the listener.
 

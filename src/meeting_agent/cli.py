@@ -484,5 +484,21 @@ def resume() -> None:
     console.print("Resume requested.")
 
 
+@app.command()
+def mic(mode: str = typer.Argument("", help="auto, on or off; empty shows the current setting")) -> None:
+    """Whether your microphone's meeting lines are kept: follow the meeting app's mute (auto), always, or never."""
+    from .mic_gate import MODES, read_mode, write_mode
+
+    path = _runtime_dir() / "listen" / "mic.json"
+    if not mode:
+        console.print(f"Microphone: {read_mode(path)}")
+        return
+    if mode not in MODES:
+        console.print("Use `buddy mic auto`, `buddy mic on` or `buddy mic off`.")
+        raise typer.Exit(code=2)
+    write_mode(path, mode)
+    console.print(f"Microphone: {mode}")
+
+
 if __name__ == "__main__":
     app()

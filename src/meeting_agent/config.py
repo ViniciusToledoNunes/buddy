@@ -148,6 +148,12 @@ class ListenConfig(BaseModel):
     screen_interval_seconds: float = Field(60.0, ge=10, le=900)
     screen_max_width: int = Field(1600, ge=0, le=6000)
     screen_max_per_meeting: int = Field(240, ge=1, le=5000)
+    # Keep your microphone's meeting lines only while the meeting app can hear you (macOS:
+    # Teams, Google Meet in Chrome/Edge/Arc/Brave, Zoom), read from its microphone button
+    # through the Accessibility permission. Commands to Buddy work either way.
+    # `buddy mic on|off|auto` overrides it. With no app read: keep or drop the lines.
+    mic_follows_mute: bool = False
+    mic_when_unknown: Literal["keep", "drop"] = "keep"
     # A question from the other side sends the current batch at once instead of waiting
     # for the interval. A line counts when it has a "?" and more than three words ("Right?"
     # is a tag, not a question), or names the user.
