@@ -50,9 +50,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: Check the macOS capture helper parses
+      - name: Check the macOS helpers parse
         if: runner.os == 'macOS'
-        run: swiftc -parse native/macos/MeetingAudioCapture.swift
+        run: swiftc -parse native/macos/MeetingAudioCapture.swift && swiftc -parse native/macos/MicState.swift
 
       - name: Run tests with coverage
         run: pytest -q --cov --cov-report=term-missing --cov-fail-under=80

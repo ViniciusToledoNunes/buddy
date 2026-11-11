@@ -17,6 +17,7 @@ from .echo import EchoGuard
 if TYPE_CHECKING:
     from .autobrain import BrainRunner
 from .events import EventBus, TranscriptEvent, utc_now
+from .mic_gate import MicGate
 from .screens import ScreenShots, capture_screen
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
@@ -432,6 +433,11 @@ class ListenDaemon:
         # Screenshots of the current meeting (listen.screen_capture); None when off.
         self.screens: ScreenShots | None = None
         self.screen_capture: Callable[[Path, int], bool] = capture_screen
+        # Whether the meeting app hears you (listen.mic_follows_mute); None when off.
+        self.mic_gate: MicGate | None = None
+        self.mic_gate_factory: Callable[[], MicGate] = lambda: MicGate(
+            self.mic_mode_file, self.settings.listen.mic_when_unknown, clock=self.clock
+        )
         # An open command: what the user has said since "Hey Buddy", waiting for the
         # closing phrase. None when no command is being dictated.
         self.capture: list[str] | None = None
@@ -557,6 +563,11 @@ class ListenDaemon:
         )
         self.storage = MeetingStorage(self.settings, info)
         self.storage.metadata["started_by"] = reason
+        if self.settings.listen.mic_follows_mute:
+            gate = self.mic_gate_factory()
+            if not gate.start():
+                self.events.append("NOTICE", text=f"Your microphone is kept whatever the meeting app says: {gate.error}.")
+            self.mic_gate = gate
         self.remote = self._stream("REMOTE")
         self.remote.start()
         now = self.clock()
@@ -613,6 +624,10 @@ class ListenDaemon:
             self.remote = None
         storage, self.storage = self.storage, None
         storage.metadata["stopped_by"] = reason
+        if self.mic_gate is not None:
+            storage.metadata["mic"] = self.mic_gate.describe()
+            await asyncio.to_thread(self.mic_gate.stop)
+            self.mic_gate = None
         storage.metadata["echo_lines_dropped"] = self.echo.dropped
         if self.screens is not None:
             storage.metadata["screens_captured"] = self.screens.count
@@ -716,6 +731,9 @@ class ListenDaemon:
                 return
         if self.storage is None:
             return  # speech outside a meeting is heard, not kept, and not shown
+        if event.speaker == "ME" and self.mic_gate is not None and not self.mic_gate.heard():
+            self.mic_gate.dropped += 1  # muted in the meeting app: not part of the meeting
+            return
         if event.speaker == "REMOTE":
             self.echo.remote(text, now)  # held ME lines it echoes are simply never written
         elif self.echo.enabled:
@@ -755,6 +773,10 @@ class ListenDaemon:
         if addressed:
             trigger["addressed"] = True
         self._flush_batch(now, **trigger)
+
+    @property
+    def mic_mode_file(self) -> Path:
+        return self.control_dir / "mic.json"
 
     @property
     def prep_md(self) -> Path:
