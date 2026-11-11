@@ -16,9 +16,10 @@ from .config import Settings, project_root
 from .echo import EchoGuard
 if TYPE_CHECKING:
     from .autobrain import BrainRunner
-from .events import EventBus, TranscriptEvent, utc_now
+from .events import EventBus, SpeechEvent, TranscriptEvent, utc_now
 from .mic_gate import MicGate
 from .screens import ScreenShots, capture_screen
+from .speakers import VOICE_MODEL_FILE, SpeakerTracker, VoiceBook, VoiceModel
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
@@ -346,11 +347,14 @@ class Stream(Protocol):
 class CaptureStream:
     """One platform capture thread feeding one local ASR task."""
 
-    def __init__(self, speaker: str, settings: Settings, bus: EventBus, pool: Any) -> None:
+    def __init__(
+        self, speaker: str, settings: Settings, bus: EventBus, pool: Any, voice: Callable[[Any], Any] | None = None
+    ) -> None:
         self.speaker = speaker
         self.settings = settings
         self.bus = bus
         self.pool = pool
+        self.voice = voice
         self.capture: Any = None
         self.task: asyncio.Task[None] | None = None
 
@@ -369,7 +373,7 @@ class CaptureStream:
         self.capture = AudioCapture(self.speaker, audio, self.queue, self.capture_stop, self.bus, loop, None)
         self.capture.start()
         self.task = asyncio.create_task(
-            run_local_asr(self.queue, self.pool, self.settings, self.bus, self.asr_stop),
+            run_local_asr(self.queue, self.pool, self.settings, self.bus, self.asr_stop, self.voice),
             name=f"listen-asr-{self.speaker.lower()}",
         )
 
@@ -433,6 +437,13 @@ class ListenDaemon:
         # Screenshots of the current meeting (listen.screen_capture); None when off.
         self.screens: ScreenShots | None = None
         self.screen_capture: Callable[[Path, int], bool] = capture_screen
+        # Who is talking on the other side (listen.speaker_names); None when off.
+        self.speakers: SpeakerTracker | None = None
+        self.voice_model: VoiceModel | None = None
+        self.read_speaker: Callable[[Path], str | None] | None = None  # name on the outlined tile
+        self._sightings: list[tuple[float, str]] = []  # (when, who the screen showed)
+        self._last_look = float("-inf")
+        self._look: asyncio.Task[None] | None = None
         # Whether the meeting app hears you (listen.mic_follows_mute); None when off.
         self.mic_gate: MicGate | None = None
         self._mic_shown: dict[str, Any] | None = None
@@ -465,7 +476,8 @@ class ListenDaemon:
 
             self._selection = select_asr(self.settings)
             self._pool = LocalModelPool(self._selection, self.settings)
-        return CaptureStream(speaker, self.settings, self.bus, self._pool)
+        voice = self.voice_model.embed if speaker == "REMOTE" and self.voice_model is not None else None
+        return CaptureStream(speaker, self.settings, self.bus, self._pool, voice)
 
     @property
     def meeting_id(self) -> str:
@@ -565,6 +577,7 @@ class ListenDaemon:
         )
         self.storage = MeetingStorage(self.settings, info)
         self.storage.metadata["started_by"] = reason
+        self._setup_speakers()
         if self.settings.listen.mic_follows_mute:
             gate = self.mic_gate_factory()
             if not gate.start():
@@ -634,6 +647,7 @@ class ListenDaemon:
         if self.screens is not None:
             storage.metadata["screens_captured"] = self.screens.count
             self.screens = None
+        speakers = await self._finish_speakers(storage)
         await asyncio.to_thread(storage.finish, SUMMARY_PENDING)
         runner, self.brain, self._brain_off = self.brain, None, False
         if runner is not None:
@@ -650,6 +664,7 @@ class ListenDaemon:
             lines=len(storage.final_events),
             transcript=str(storage.transcript_txt),
             summary=str(storage.summary_md),
+            **speakers,
         )
         if not self.settings.listen.wake_phrase:
             await self._close_mic()
@@ -719,6 +734,117 @@ class ListenDaemon:
         except Exception as exc:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain could not write the summary: {type(exc).__name__}: {exc}")
 
+    # --------------------------------------------------------------- speakers
+
+    def _setup_speakers(self) -> None:
+        """Get ready to name the other side for this meeting, as listen.speaker_names says."""
+        listen = self.settings.listen
+        self.speakers, self.voice_model, self.read_speaker = None, None, None
+        self._sightings, self._last_look = [], float("-inf")
+        mode = listen.speaker_names
+        if mode == "off":
+            return
+        problems = []
+        if mode in ("screen", "both"):
+            from . import active_speaker
+
+            if active_speaker.available():
+                self.read_speaker = active_speaker.speaker_on_screen
+            else:
+                problems.append("the screen cannot be read here (macOS with buddy-screen-text, from scripts/install-macos.sh)")
+        if mode in ("voice", "both"):
+            model = VoiceModel(self.voice_model_path)
+            if model.available():
+                self.voice_model = model
+            else:
+                problems.append("the voice model is missing (run `buddy voices setup`)")
+        if problems:
+            self.events.append("NOTICE", meeting=self.meeting_id, text="Speaker names are limited: " + "; ".join(problems) + ".")
+        if self.read_speaker is None and self.voice_model is None:
+            return
+        own = {name.lower() for name in [*listen.speaker_self_names, *listen.question_names]}
+        book = VoiceBook(self.voice_book_path) if listen.remember_voices and self.voice_model is not None else None
+        self.speakers = SpeakerTracker(
+            threshold=listen.voice_threshold,
+            votes_needed=listen.speaker_votes_needed,
+            book=book,
+            exclude=lambda name: any(part.lower() in own for part in name.split()),
+        )
+
+    @property
+    def voice_model_path(self) -> Path:
+        configured = self.settings.listen.voice_model
+        return Path(configured).expanduser() if configured else self.runtime_dir / "models" / VOICE_MODEL_FILE
+
+    @property
+    def voice_book_path(self) -> Path:
+        return self.runtime_dir / "voices.json"
+
+    def on_speech(self, event: SpeechEvent) -> None:
+        """The other side is talking: look at who the screen outlines, at most every few seconds."""
+        if self.storage is None or self.read_speaker is None or event.speaker != "REMOTE":
+            return
+        if self._look is not None and not self._look.done():
+            return  # the previous look is still being read
+        if event.at - self._last_look < self.settings.listen.speaker_screen_seconds:
+            return
+        self._last_look = event.at
+        self._look = asyncio.create_task(self._look_at_screen(event.at), name="speaker-screen")
+
+    async def _look_at_screen(self, at: float) -> None:
+        if self.storage is None or self.read_speaker is None:
+            return
+        path = self.storage.directory / ".speaker" / f"{time.time_ns()}.jpg"
+        reader = self.read_speaker
+        try:
+            taken = await asyncio.to_thread(self.screen_capture, path, self.settings.listen.screen_max_width)
+            name = await asyncio.to_thread(reader, path) if taken else None
+        except Exception:
+            name = None  # a failed look only loses one sighting
+        finally:
+            path.unlink(missing_ok=True)  # read, then gone: these are not the meeting's screenshots
+        if name:
+            self._sightings.append((at, name))
+            del self._sightings[:-120]
+
+    def _attribute(self, event: TranscriptEvent) -> None:
+        """Name a REMOTE line from its voice and the screen sightings while it was said."""
+        if self.speakers is None:
+            return
+        start = event.spoken_from if event.spoken_from is not None else self.clock()
+        end = event.spoken_to if event.spoken_to is not None else start
+        seen = [name for at, name in self._sightings if start - 0.5 <= at <= end + 1.0]
+        embedding = event.embedding if self.voice_model is not None else None
+        who = self.speakers.observe(embedding, seen, event.text)
+        event.name, event.voice, event.name_sure = who.name, who.voice, who.sure
+
+    async def _finish_speakers(self, storage: Any) -> dict[str, Any]:
+        """Keep what was learned about the voices; tell the session which ones nobody named."""
+        tracker, self.speakers = self.speakers, None
+        if self._look is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(self._look, timeout=10)
+            self._look = None
+        with suppress(OSError):
+            (storage.directory / ".speaker").rmdir()
+        if tracker is None:
+            return {}
+        storage.metadata["speakers"] = tracker.summary()
+        if self.voice_model is not None:
+            # The meeting's voices, so `buddy voices name` can name one nobody named here.
+            _write_json(storage.directory / "voices.json", tracker.state())
+        learned = await asyncio.to_thread(tracker.remember)
+        extra: dict[str, Any] = {}
+        names = sorted({entry["name"] for entry in storage.metadata["speakers"] if entry["name"]})
+        if names:
+            extra["speakers"] = names
+        unnamed = [voice.label for voice in tracker.unnamed()]
+        if unnamed:
+            extra["unnamed_voices"] = unnamed
+        if learned:
+            extra["voices_learned"] = learned
+        return extra
+
     # ----------------------------------------------------------------- speech
 
     async def on_final(self, event: TranscriptEvent) -> None:
@@ -745,6 +871,7 @@ class ListenDaemon:
             self.mic_gate.dropped += 1  # muted in the meeting app: not part of the meeting
             return
         if event.speaker == "REMOTE":
+            self._attribute(event)
             self.echo.remote(text, now)  # held ME lines it echoes are simply never written
         elif self.echo.enabled:
             self.echo.mine(event, text, now)  # written by _release_held, unless it is an echo
@@ -755,9 +882,10 @@ class ListenDaemon:
 
     async def _keep(self, event: TranscriptEvent, said_at: float) -> None:
         text = event.text.strip()
-        self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text)
+        shown = {"name": event.name} if event.name else {}
+        self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text, **shown)
         await asyncio.to_thread(self.storage.append, event)
-        line = f"{event.speaker}: {text}"
+        line = f"{event.who}: {text}"
         # The time it was said, not the time it was released, so a held line does not
         # look like fresh speech and push back the batch's pause.
         self.batcher.add(line, said_at)
@@ -983,6 +1111,8 @@ class ListenDaemon:
                     event = None
                 if isinstance(event, TranscriptEvent) and event.final:
                     await self.on_final(event)
+                elif isinstance(event, SpeechEvent):
+                    self.on_speech(event)
                 if not await self.check_controls():
                     reason = self._shutdown_reason
                     break

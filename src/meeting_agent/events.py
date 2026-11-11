@@ -20,9 +20,42 @@ class TranscriptEvent:
     start_seconds: float | None = None
     end_seconds: float | None = None
     latency_seconds: float | None = None
+    # Who on the other side said it (listen.speaker_names): the person, this meeting's
+    # label for the voice ("B"), and whether the name is settled.
+    name: str | None = None
+    voice: str | None = None
+    name_sure: bool = False
+    # In memory only, never written: the voice embedding of a REMOTE line and when it was
+    # spoken (monotonic clock), which is what the screen captures are matched against.
+    embedding: Any = field(default=None, repr=False, compare=False)
+    spoken_from: float | None = field(default=None, repr=False, compare=False)
+    spoken_to: float | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        for transient in ("embedding", "spoken_from", "spoken_to"):
+            data.pop(transient, None)
+        if self.name is None and self.voice is None:
+            for unset in ("name", "voice", "name_sure"):
+                data.pop(unset, None)
+        return data
+
+    @property
+    def who(self) -> str:
+        """The speaker as written in the transcript: "REMOTE (Nick Webb)", "REMOTE (voice B)"."""
+        if self.name:
+            return f"{self.speaker} ({self.name}{'' if self.name_sure else '?'})"
+        if self.voice:
+            return f"{self.speaker} (voice {self.voice})"
+        return self.speaker
+
+
+@dataclass(slots=True)
+class SpeechEvent:
+    """Speech started, or is still going, on one side: the moment to look at the screen."""
+
+    speaker: Literal["ME", "REMOTE"]
+    at: float  # monotonic clock
 
 
 @dataclass(slots=True)
@@ -61,7 +94,7 @@ class StatusEvent:
     timestamp: str = field(default_factory=utc_now)
 
 
-Event = TranscriptEvent | SuggestionEvent | SuggestionBatchEvent | InvestigationEvent | StatusEvent
+Event = TranscriptEvent | SpeechEvent | SuggestionEvent | SuggestionBatchEvent | InvestigationEvent | StatusEvent
 
 
 class EventBus:

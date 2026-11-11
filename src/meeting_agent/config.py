@@ -6,7 +6,7 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AudioConfig(BaseModel):
@@ -152,6 +152,21 @@ class ListenConfig(BaseModel):
     screen_interval_seconds: float = Field(60.0, ge=10, le=900)
     screen_max_width: int = Field(1600, ge=0, le=6000)
     screen_max_per_meeting: int = Field(240, ge=1, le=5000)
+    # Who on the other side is talking. "screen": the name on the tile the meeting app
+    # outlines while someone talks (Teams, macOS). "voice": a local voice model groups
+    # lines by voice ("voice B"). "both": the screen names the voices, and a named voice
+    # keeps its name when the screen shows nobody. Off by default: it captures the screen
+    # while the other side talks, and "voice" computes voice embeddings.
+    speaker_names: Literal["off", "screen", "voice", "both"] = "off"
+    speaker_screen_seconds: float = Field(2.0, ge=0.5, le=30)  # at most one look at the screen this often
+    voice_threshold: float = Field(0.6, ge=0.3, le=0.95)  # cosine similarity for "the same voice"
+    speaker_votes_needed: int = Field(2, ge=1, le=20)  # screen sightings before a voice's name is settled
+    # Keep the voices the screen named (one mean embedding per name, never audio) in the
+    # runtime folder, so they are recognised in later meetings without the screen.
+    # `buddy voices list|forget` shows and deletes them.
+    remember_voices: bool = False
+    voice_model: str = ""  # an ONNX WeSpeaker model; empty: the one `buddy voices setup` downloads
+    speaker_self_names: list[str] = []  # your own tile's name, never given to a REMOTE line
     # Keep your microphone's meeting lines only while the meeting app can hear you (macOS:
     # Teams, Google Meet in Chrome/Edge/Arc/Brave, Zoom), read from its microphone button
     # through the Accessibility permission. Commands to Buddy work either way.
@@ -173,6 +188,11 @@ class ListenConfig(BaseModel):
     meeting_max_minutes: float = Field(240.0, ge=5, le=1440)
     event_log_max_mb: float = Field(5.0, ge=0.1, le=500)
     event_line_max_chars: int = Field(6000, ge=500, le=50_000)
+
+    @field_validator("speaker_names", mode="before")
+    @classmethod
+    def _yaml_off(cls, value: object) -> object:
+        return "off" if value is False else value  # YAML reads a bare `off` as false
 
 
 class HotkeyConfig(BaseModel):

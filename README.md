@@ -156,6 +156,25 @@ still work while muted. Grant Accessibility to the app that starts Buddy (Termin
 Settings → Privacy & Security → Accessibility. `buddy mic on|off|auto` overrides the app; with no app found,
 `listen.mic_when_unknown` keeps or drops the lines.
 
+**Who is talking.** System audio is one stream, so every line from the other side is `REMOTE`. With
+`listen.speaker_names`, Buddy puts a name on it:
+
+- `screen` (macOS, Teams): while the other side talks, Buddy looks at the screen every couple of seconds, finds
+  the tile the meeting app outlines around whoever is speaking, and reads the name on it with the on-device Vision
+  framework. The capture is deleted as soon as it is read.
+- `voice`: a small local voice model (WeSpeaker ResNet34, 26 MB, CC BY 4.0; `buddy voices setup` downloads it)
+  turns each line of a second or more into a voice embedding, and lines with close embeddings are one voice:
+  `REMOTE (voice B)`.
+- `both`: the screen names the voices, and a named voice keeps its name when the screen shows nobody: a shared
+  screen, a camera off, two people at once.
+
+A line reads `REMOTE (Dana Reyes)`, `REMOTE (Dana Reyes?)` while the name is not settled (fewer than
+`listen.speaker_votes_needed` sightings), or `REMOTE (voice B)`. Your own tile is never given to a REMOTE line
+(`listen.speaker_self_names`, plus `listen.question_names`). With `listen.remember_voices: true`, a voice the
+screen named is remembered for later meetings, as one mean embedding per name in `.meeting-agent/voices.json`
+(never audio); `buddy voices list`, `buddy voices forget <name>|--all`. A voice nobody named is listed in
+`MEETING_END` as `unnamed_voices=`; `buddy voices name <meeting> <voice> "<name>"` names it afterwards.
+
 Other controls: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. The MCP server (`meeting_status`,
 `get_live_transcript`, `stop_meeting`) sees meetings opened by the listener.
 
@@ -201,6 +220,10 @@ buddy say "review PR 123"  # a typed command
   is never displayed. Text is always rendered as text, never as markup.
 - **Anything that leaves the machine takes two steps.** Posting, commenting, approving, merging, creating a
   ticket: the agent drafts it and acts only after you approve that exact text.
+- **Naming speakers is opt-in.** `listen.speaker_names` looks at the screen while the other side talks, and its
+  `voice` mode computes voice embeddings, which can identify a person. Both stay on the machine; voices are kept
+  across meetings only with `listen.remember_voices`, and `buddy voices forget --all` deletes them. Tell the
+  participants, as you would about the recording.
 - **Nothing sensitive belongs in the repository.** Recordings, `config.yaml`, `.env` and ASR models are
   gitignored.
 
@@ -259,7 +282,8 @@ transcript.txt      readable transcript, written as each utterance lands
 transcript.jsonl    the same, structured
 suggestions.md      everything the panel suggested, with its reasoning
 summary.md          the final report
-metadata.json       start, end, ASR backend and subsystem failures
+metadata.json       start, end, ASR backend, subsystem failures, and who was named (listen.speaker_names)
+voices.json         each voice's embedding this meeting, for `buddy voices name` (voice mode only)
 copilot.json        memory, current suggestions, usage, last error, denied calls, brain session id
 ```
 
@@ -282,7 +306,9 @@ Capture, ASR, storage, UI and the model are isolated, so one failing subsystem d
 
 ## Limitations
 
-- `ME` and `REMOTE` are physical sources, not people. There is no diarisation.
+- `ME` and `REMOTE` are physical sources, not people, unless `listen.speaker_names` is on. Reading the screen is
+  tuned to Teams' outline on macOS; other apps, or a layout with no outlined tile, leave the voice alone to tell
+  people apart. The voice model was measured on synthetic voices and Teams screenshots, not yet on a full meeting.
 - The listening mode needs Claude Code; other agents can read `buddy watch` on request, but nothing wakes them.
 - Suggestion quality during a live meeting has not been measured yet; that is the next test.
 - Each update takes 40 to 90 seconds. The panel follows the meeting; it does not answer a question on the spot.

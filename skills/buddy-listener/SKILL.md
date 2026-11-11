@@ -47,6 +47,9 @@ Each notification is one line: time, type, then fields.
   folders next to the one in `transcript=`, and this session may already hold related work.
   `prep=` names the meeting's `prep.md`: see **Ready answers**.
 - `MEETING_BATCH`: speech since the last batch. `ME` is the user, `REMOTE` is everyone else.
+  With `listen.speaker_names` on, a REMOTE line names who said it, as Buddy read it from the
+  meeting app or the voice: `REMOTE (Dana Reyes)`; `REMOTE (Dana Reyes?)` is not settled yet,
+  and `REMOTE (voice B)` is a voice nobody named. Use those names; do not guess others.
   Answer with what the user could say now, following **Suggestions**. If nothing is worth
   saying, say nothing. A batch normally comes once a minute, but a question from the other
   side sends it at once: the line then carries `trigger=question q="..."`, plus `to=ME` when
@@ -65,7 +68,10 @@ Each notification is one line: time, type, then fields.
   and it is the user as much as their microphone is. Follow **Commands**.
 - `MEETING_END`: replace the placeholder in the `summary=` file with the meeting summary. Then
   give the user the decisions, their own action items, other people's action items, open
-  questions, and proposed follow-ups as numbered proposals.
+  questions, and proposed follow-ups as numbered proposals. When the line carries
+  `unnamed_voices=`, ask the user once who those voices were (quote a line from each, from the
+  transcript) and, with their answer, run `buddy voices name <meeting> <voice> "<name>"` so the
+  voice is recognised next time.
 - `NOTICE`: informational.
 
 ## Buddy's window

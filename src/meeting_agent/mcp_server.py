@@ -20,7 +20,8 @@ def create_server(repository: MeetingRepository | None = None) -> MCPServer:
         version="0.3.0",
         instructions=(
             "Read live or saved Buddy transcripts and connect them to the host agent's project context. "
-            "Never infer identities beyond ME and REMOTE. Recording must only be started after explicit user consent."
+            "Never infer identities beyond ME, REMOTE and the names Buddy itself attached to REMOTE lines "
+            "(\"REMOTE (name)\"; a trailing ? is not settled). Recording must only be started after explicit user consent."
         ),
     )
 

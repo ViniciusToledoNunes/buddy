@@ -484,6 +484,88 @@ def resume() -> None:
     console.print("Resume requested.")
 
 
+# ------------------------------------------------------------------- voices
+
+voices_app = typer.Typer(no_args_is_help=True, help="Voices Buddy remembers for listen.speaker_names (this machine only).")
+app.add_typer(voices_app, name="voices")
+
+
+def _voice_book():
+    from .speakers import VoiceBook
+
+    return VoiceBook(_runtime_dir() / "voices.json")
+
+
+@voices_app.command("setup")
+def voices_setup() -> None:
+    """Download the local voice model (26 MB, checked against its digest)."""
+    from .speakers import download_model
+
+    settings = load_settings()
+    if settings.listen.voice_model:
+        console.print(f"listen.voice_model is set; using {settings.listen.voice_model}.")
+        return
+    from .speakers import VOICE_MODEL_FILE, VOICE_MODEL_URL
+
+    target = _runtime_dir() / "models"
+    try:
+        path = download_model(target)
+    except OSError as exc:  # no network, or a TLS-inspecting proxy Python does not trust
+        console.print(
+            f"[red]Could not download the voice model: {exc}.[/red]\n"
+            f"Download {VOICE_MODEL_URL} yourself and save it as {target / VOICE_MODEL_FILE} "
+            "then run `buddy voices setup` again to check its digest; or set listen.voice_model."
+        )
+        raise typer.Exit(code=1)
+    console.print(f"Voice model ready: {path}")
+
+
+@voices_app.command("list")
+def voices_list() -> None:
+    """Show the remembered voices."""
+    book = _voice_book()
+    if not book.voices:
+        console.print("No voices remembered.")
+        return
+    table = Table("Name", "Lines heard", "Updated")
+    for name in book.names():
+        entry = book.voices[name]
+        table.add_row(name, str(entry.get("count", "")), str(entry.get("updated", "")))
+    console.print(table)
+
+
+@voices_app.command("forget")
+def voices_forget(
+    name: str = typer.Argument("", help="The name to forget"),
+    everyone: bool = typer.Option(False, "--all", help="Forget every voice"),
+) -> None:
+    """Delete one remembered voice, or all of them."""
+    if not name and not everyone:
+        console.print("Name a voice, or pass --all.")
+        raise typer.Exit(code=2)
+    book = _voice_book()
+    removed = book.forget(None if everyone else name)
+    book.save()
+    console.print(f"Forgot: {', '.join(removed)}" if removed else "Nothing to forget.")
+
+
+@voices_app.command("name")
+def voices_name(
+    meeting: str = typer.Argument(..., help="Meeting folder name, e.g. 2026-01-05_100000"),
+    voice: str = typer.Argument(..., help="The meeting's voice label, e.g. C"),
+    name: str = typer.Argument(..., help="Who it was"),
+) -> None:
+    """Remember a voice the meeting could not name by itself."""
+    from .speakers import name_voice
+
+    settings = load_settings()
+    meetings = Path(settings.meetings_dir).expanduser()
+    if not meetings.is_absolute():
+        meetings = project_root() / meetings
+    if not name_voice(meetings / meeting, voice.upper(), name, _voice_book()):
+        console.print(f"No voice {voice} in {meetings / meeting / 'voices.json'}.")
+        raise typer.Exit(code=1)
+    console.print(f"Voice {voice.upper()} of {meeting} is now remembered as {name}.")
 @app.command()
 def mic(mode: str = typer.Argument("", help="auto, on or off; empty shows the current setting")) -> None:
     """Whether your microphone's meeting lines are kept: follow the meeting app's mute (auto), always, or never."""
