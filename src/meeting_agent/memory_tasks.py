@@ -127,7 +127,7 @@ def _credential_names(home: Path) -> list[str]:
     if not folder.is_dir():
         return []
     names = sorted(
-        str(entry.relative_to(home)) for entry in folder.iterdir()
+        entry.relative_to(home).as_posix() for entry in folder.iterdir()
         if entry.is_file() and CREDENTIAL_NAME.search(entry.name)
     )
     return names[:MAX_LISTED]
@@ -138,7 +138,7 @@ def _repo(path: Path, home: Path) -> dict[str, Any]:
     _, branch = _run(["git", "-C", str(path), "branch", "--show-current"], timeout=5)
     _, last = _run(["git", "-C", str(path), "log", "-1", "--format=%cs"], timeout=5)
     return {
-        "path": f"~/{path.relative_to(home)}",
+        "path": f"~/{path.relative_to(home).as_posix()}",
         "remote": _without_credentials(remote) if "://" in remote or "@" in remote else "",
         "branch": branch,
         "last_commit": last,
