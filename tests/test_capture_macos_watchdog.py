@@ -7,12 +7,18 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
 from meeting_agent.capture import macos
 from meeting_agent.capture.macos import MacOSAudioCapture, Outage, end_helper, read_frame, restart_capture_service, retry_delay, sanitize
 from meeting_agent.config import AudioConfig
 
+# read_frame waits on the helper's pipe with select(), which Windows supports only on
+# sockets. The macOS capture never runs there, so these pipe tests are POSIX-only.
+posix_pipes = pytest.mark.skipif(sys.platform == "win32", reason="select() on a pipe is POSIX-only")
 
+
+@posix_pipes
 def test_a_silent_helper_times_out_instead_of_blocking_forever():
     read_end, write_end = os.pipe()
     try:
@@ -22,6 +28,7 @@ def test_a_silent_helper_times_out_instead_of_blocking_forever():
         os.close(write_end)
 
 
+@posix_pipes
 def test_a_frame_split_across_writes_is_reassembled():
     read_end, write_end = os.pipe()
     os.write(write_end, b"abcd")
@@ -31,6 +38,7 @@ def test_a_frame_split_across_writes_is_reassembled():
     os.close(write_end)
 
 
+@posix_pipes
 def test_the_end_of_the_stream_gives_a_short_frame():
     read_end, write_end = os.pipe()
     os.write(write_end, b"abc")

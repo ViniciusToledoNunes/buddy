@@ -263,6 +263,7 @@ class FakeStream:
 
 def _daemon(tmp_path, clock=None, **listen):
     listen.setdefault("sounds", False)
+    listen.setdefault("wake_phrase", True)  # most of these tests are about "Hey Buddy"
     listen.setdefault("auto_brain", False)  # never call Claude from a test
     settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": listen})
     streams = []
@@ -276,7 +277,7 @@ def _daemon(tmp_path, clock=None, **listen):
 
 
 def _quiet(tmp_path):
-    return Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False}})
+    return Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False, "wake_phrase": True}})
 
 
 def _events(daemon):
@@ -568,6 +569,34 @@ async def test_pausing_closes_the_microphone_and_ends_the_meeting(tmp_path):
 
     await daemon.resume("requested")
     assert not daemon.paused and streams[-1] == ("start", "ME")
+
+
+async def test_without_the_wake_phrase_the_mic_opens_only_for_meetings(tmp_path):
+    daemon, streams = _daemon(tmp_path, wake_phrase=False)
+    await daemon._close_mic()
+    assert daemon.paused and daemon.mic is None
+
+    await daemon.start_meeting("button")
+    assert not daemon.paused and ("start", "ME") in streams and ("start", "REMOTE") in streams
+
+    await daemon.stop_meeting("button")
+    assert daemon.paused and daemon.mic is None
+    assert [e["type"] for e in _events(daemon)][-1] == "MEETING_END"
+
+
+async def test_the_loop_starts_closed_without_the_wake_phrase(tmp_path):
+    runtime = tmp_path / "runtime"
+    settings = Settings.model_validate(
+        {"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False, "wake_phrase": False}}
+    )
+    streams = []
+    daemon = ListenDaemon(settings, runtime, stream_factory=lambda s: FakeStream(s, streams))
+    stop = asyncio.Event()
+    task = asyncio.create_task(daemon.run(stop))
+    await asyncio.sleep(0.2)
+    assert daemon.paused and streams == []
+    stop.set()
+    await asyncio.wait_for(task, 5)
 
 
 async def test_the_cli_and_mcp_can_steer_the_listener(tmp_path):
@@ -943,3 +972,58 @@ def test_a_failing_capture_raises_a_notice_and_its_recovery_another(tmp_path):
         "Audio capture is failing: no REMOTE audio for 60s",
         "Audio capture recovered: the REMOTE capture is back",
     ]
+
+
+# -------------------------------------------------------------- dictation (🎤)
+
+
+async def test_the_window_microphone_turns_speech_into_text_and_closes_again(tmp_path):
+    clock = Clock()
+    daemon, streams = _daemon(tmp_path, clock, wake_phrase=False, dictation_grace_seconds=2)
+    await daemon._close_mic()
+    request(daemon.runtime_dir, "dictate-start")
+    await daemon.check_controls()
+
+    assert streams == [("start", "ME")]
+    await daemon.on_final(_said("ME", "review PR 123"))
+    await daemon.on_final(_said("ME", "and tell me what changed"))
+    state = json.loads(daemon.listen_file.read_text())["dictation"]
+    assert state == {"active": True, "text": "review PR 123 and tell me what changed", "id": 0}
+
+    request(daemon.runtime_dir, "dictate-stop")
+    await daemon.check_controls()
+    await daemon.on_final(_said("ME", "please"))  # the last words, still on their way
+    clock.now += 3
+    await daemon.tick()
+
+    state = json.loads(daemon.listen_file.read_text())["dictation"]
+    assert state == {"active": False, "text": "review PR 123 and tell me what changed please", "id": 1}
+    assert streams[-1] == ("stop", "ME")  # opened only for the dictation
+    assert not [e for e in _events(daemon) if e["type"] == "COMMAND"]  # the user sends it from the box
+
+
+async def test_dictating_in_a_meeting_stays_out_of_the_transcript(tmp_path):
+    clock = Clock()
+    daemon, streams = _daemon(tmp_path, clock, wake_phrase=False, echo_window_seconds=0)
+    await daemon.start_meeting("requested")
+    await daemon.start_dictation()
+    await daemon.on_final(_said("ME", "note that for later"))
+    daemon.stop_dictation()
+    clock.now += 5
+    await daemon.tick()
+    await daemon.on_final(_said("ME", "back in the meeting"))
+    meeting = daemon.storage.directory
+    await daemon.stop_meeting("requested")
+
+    text = (meeting / "transcript.txt").read_text(encoding="utf-8")
+    assert "back in the meeting" in text and "note that for later" not in text
+    assert daemon._dictation_last["text"] == "note that for later"
+
+
+async def test_without_the_wake_phrase_hey_buddy_is_just_speech(tmp_path):
+    daemon, _ = _daemon(tmp_path, wake_phrase=False, echo_window_seconds=0)
+    await daemon.start_meeting("requested")
+    await daemon.on_final(_said("ME", "Hey Buddy, end the meeting"))
+
+    assert daemon.storage is not None  # still recording
+    assert daemon.capture is None

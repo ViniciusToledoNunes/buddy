@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .events import utc_now
-from .listener import EventReader, _process_started, _read_json, _write_json, listener_state, process_alive
+from .listener import EventReader, _process_started, _read_json, _write_json, brain_alive, listener_state, process_alive
 
 # The description the buddy-listener skill gives its Monitor.
 BUDDY_MONITOR = 'Monitor event: "Buddy listener'
@@ -124,8 +124,24 @@ def register_brain(runtime_dir: Path, session_id: str, consumer: str) -> None:
     _write_json(
         runtime_dir / "brain.json",
         {"session_id": session_id, "consumer": consumer, "pid": os.getpid(),
-         "started": _process_started(os.getpid()), "registered": utc_now()},
+         "started": _process_started(os.getpid()), "registered": utc_now(), "seen_at": time.time()},
     )
+
+
+def brain_seen(runtime_dir: Path, session_id: str, consumer: str) -> None:
+    """A one-shot `buddy watch` from a session: it is connected, checking every few seconds.
+
+    A following watch (`--follow`) of the same session already says so by being alive and
+    is left alone; any other record is replaced, since this session is the one reading now.
+    """
+    path = runtime_dir / "brain.json"
+    state = _read_json(path)
+    if state.get("session_id") == session_id and process_alive(state) and state.get("pid") != os.getpid():
+        return
+    same = state.get("session_id") == session_id
+    registered = (state.get("registered") if same else None) or utc_now()
+    _write_json(path, {"session_id": session_id, "consumer": consumer, "pid": os.getpid(),
+                       "started": _process_started(os.getpid()), "registered": registered, "seen_at": time.time()})
 
 
 def unregister_brain(runtime_dir: Path) -> None:
@@ -139,7 +155,7 @@ def brain_state(runtime_dir: Path) -> dict[str, Any] | None:
     state = _read_json(runtime_dir / "brain.json")
     if not state.get("session_id"):
         return None
-    return {**state, "watching": process_alive(state)}
+    return {**state, "watching": brain_alive(state)}
 
 
 def numbered_items(text: str) -> list[str]:
@@ -288,7 +304,10 @@ class SessionMirror:
 class LiveView:
     """Everything on screen, merged in time order, from the moment the view opens."""
 
-    def __init__(self, runtime_dir: Path, show: str = "buddy", home: Path | None = None, keep: int = 3) -> None:
+    def __init__(
+        self, runtime_dir: Path, show: str = "buddy", home: Path | None = None, keep: int = 3, ticket_url: str | None = None
+    ) -> None:
+        self._ticket_url = ticket_url  # None: read listen.board_ticket_url on first use
         self.runtime_dir = runtime_dir
         self.show = show
         self.home = home
@@ -355,6 +374,12 @@ class LiveView:
         return {
             "listener": listener.get("state", "listening") if listener else "off",
             "meeting": listener.get("meeting_id", "") if listener else "",
+            # listen.mic_follows_mute: whether your microphone's lines are being kept now.
+            "mic": listener.get("mic") if listener else None,
+            # The window's 🎤: on, and the words heard so far; `id` grows when one is done.
+            "dictation": listener.get("dictation") if listener else None,
+            # Without the wake phrase, "paused" between meetings is just being ready.
+            "wake_phrase": bool(listener.get("wake_phrase", True)) if listener else True,
             # watching: a session follows Buddy. idle: it did, but its monitor is down, so
             # commands wait on disk until it re-arms. none: no session has ever connected.
             "brain": ("watching" if brain["watching"] else "idle") if brain else "none",
@@ -362,7 +387,34 @@ class LiveView:
             # How many of them, at the end, are the newest set: the window highlights those.
             "suggestions_latest": len(self.suggestion_sets[-1]) if self.suggestion_sets else 0,
             "show": self.show,
+            # Cards the session proposed (buddy propose), newest last; see actions.py.
+            "actions": self.actions(),
+            # The work board (buddy board): now, next, blocked, done today.
+            "board": self.board(),
         }
+
+    def board(self) -> dict[str, Any]:
+        from .board import Board
+
+        if self._ticket_url is None:
+            try:
+                from .config import load_settings
+
+                self._ticket_url = load_settings().listen.board_ticket_url
+            except Exception:
+                self._ticket_url = ""
+        try:
+            return Board(self.runtime_dir).view(self._ticket_url)
+        except OSError:
+            return {}
+
+    def actions(self) -> list[dict[str, Any]]:
+        from .actions import ActionStore
+
+        try:
+            return [action.to_dict() for action in ActionStore(self.runtime_dir).visible()][-20:]
+        except OSError:
+            return []
 
 
 # ------------------------------------------------------------------ terminal

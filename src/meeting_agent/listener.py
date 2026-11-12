@@ -16,8 +16,10 @@ from .config import Settings, project_root
 from .echo import EchoGuard
 if TYPE_CHECKING:
     from .autobrain import BrainRunner
-from .events import EventBus, StatusEvent, TranscriptEvent, utc_now
+from .events import EventBus, SpeechEvent, StatusEvent, TranscriptEvent, utc_now
+from .mic_gate import MicGate
 from .screens import ScreenShots, capture_screen
+from .speakers import VOICE_MODEL_FILE, SpeakerTracker, VoiceBook, VoiceModel, parse_participants
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
@@ -156,6 +158,24 @@ def process_alive(state: dict[str, Any]) -> bool:
         return False
 
 
+# A session that checks for events every few seconds (`buddy watch` in a loop) is as
+# connected as one following them (`buddy watch --follow`): it counts while it was seen
+# this recently.
+BRAIN_SEEN_SECONDS = 90.0
+
+
+def brain_alive(state: dict[str, Any]) -> bool:
+    """Whether the session in brain.json is watching Buddy now."""
+    if not state.get("session_id"):
+        return False
+    try:
+        if time.time() - float(state.get("seen_at", 0)) <= BRAIN_SEEN_SECONDS:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return process_alive(state)
+
+
 def listener_state(runtime_dir: Path = DEFAULT_RUNTIME_DIR) -> dict[str, Any] | None:
     state = _read_json(runtime_dir / "listen.json")
     return state if state and process_alive(state) else None
@@ -280,6 +300,14 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         # A dictation that closed on silence or length: the user may not have finished.
         note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
         return f'{head} said="{record.get("text", "")}"{note}'
+    if kind == "ACTION_APPROVED":
+        # The user clicked Approve on this card: do exactly this, then report back.
+        outward = " outward=yes" if record.get("outward") else ""
+        link = f" link={record['link']}" if record.get("link") else ""
+        detail = str(record.get("detail") or "")
+        text = (f'{head} id={record.get("id")} kind={record.get("action")} mode={record.get("mode")}{outward}{link} '
+                f'title="{record.get("title", "")}"' + (f" | detail: {detail}" if detail else ""))
+        return text if len(text) <= max_chars else text[: max_chars - 40].rstrip() + f" ... (buddy actions show {record.get('id')})"
     if kind in {"MEETING_START", "MEETING_END"}:
         extra = [f"lines={record['lines']}"] if "lines" in record else []
         if record.get("prep"):
@@ -345,11 +373,14 @@ class Stream(Protocol):
 class CaptureStream:
     """One platform capture thread feeding one local ASR task."""
 
-    def __init__(self, speaker: str, settings: Settings, bus: EventBus, pool: Any) -> None:
+    def __init__(
+        self, speaker: str, settings: Settings, bus: EventBus, pool: Any, voice: Callable[[Any], Any] | None = None
+    ) -> None:
         self.speaker = speaker
         self.settings = settings
         self.bus = bus
         self.pool = pool
+        self.voice = voice
         self.capture: Any = None
         self.task: asyncio.Task[None] | None = None
 
@@ -368,7 +399,7 @@ class CaptureStream:
         self.capture = AudioCapture(self.speaker, audio, self.queue, self.capture_stop, self.bus, loop, None)
         self.capture.start()
         self.task = asyncio.create_task(
-            run_local_asr(self.queue, self.pool, self.settings, self.bus, self.asr_stop),
+            run_local_asr(self.queue, self.pool, self.settings, self.bus, self.asr_stop, self.voice),
             name=f"listen-asr-{self.speaker.lower()}",
         )
 
@@ -432,9 +463,27 @@ class ListenDaemon:
         # Screenshots of the current meeting (listen.screen_capture); None when off.
         self.screens: ScreenShots | None = None
         self.screen_capture: Callable[[Path, int], bool] = capture_screen
+        # Who is talking on the other side (listen.speaker_names); None when off.
+        self.speakers: SpeakerTracker | None = None
+        self.voice_model: VoiceModel | None = None
+        self.read_speaker: Callable[[Path], str | None] | None = None  # name on the outlined tile
+        self._sightings: list[tuple[float, str]] = []  # (when, who the screen showed)
+        self._last_look = float("-inf")
+        self._look: asyncio.Task[None] | None = None
+        # Whether the meeting app hears you (listen.mic_follows_mute); None when off.
+        self.mic_gate: MicGate | None = None
+        self.call_reader: MicGate | None = None  # the same helper, also kept for speaker names
+        self._mic_shown: dict[str, Any] | None = None
+        self.mic_gate_factory: Callable[[], MicGate] = lambda: MicGate(
+            self.mic_mode_file, self.settings.listen.mic_when_unknown, clock=self.clock
+        )
         # An open command: what the user has said since "Hey Buddy", waiting for the
         # closing phrase. None when no command is being dictated.
         self.capture: list[str] | None = None
+        # The window's 🎤: what has been said since it was pressed, and whether the
+        # microphone was opened for it (closed again when it is done).
+        self.dictation: dict[str, Any] | None = None
+        self._dictation_last: dict[str, Any] = {"active": False, "text": "", "id": 0}
         self._capture_started = 0.0
         self._capture_last = 0.0
         self._end_phrase = end_phrase_pattern(listen.end_phrases)
@@ -458,7 +507,8 @@ class ListenDaemon:
 
             self._selection = select_asr(self.settings)
             self._pool = LocalModelPool(self._selection, self.settings)
-        return CaptureStream(speaker, self.settings, self.bus, self._pool)
+        voice = self.voice_model.embed if speaker == "REMOTE" and self.voice_model is not None else None
+        return CaptureStream(speaker, self.settings, self.bus, self._pool, voice)
 
     @property
     def meeting_id(self) -> str:
@@ -479,6 +529,9 @@ class ListenDaemon:
                 "state": self.state,
                 "meeting_id": self.meeting_id,
                 "meeting_dir": str(self.storage.directory) if self.storage is not None else "",
+                "mic": self.mic_gate.indicator() if self.mic_gate is not None else None,
+                "dictation": self._dictation_state(),
+                "wake_phrase": self.settings.listen.wake_phrase,
                 "updated": utc_now(),
             },
         )
@@ -557,6 +610,16 @@ class ListenDaemon:
         )
         self.storage = MeetingStorage(self.settings, info)
         self.storage.metadata["started_by"] = reason
+        self._setup_speakers()
+        # The helper that reads the meeting app also lists the call's participants, which
+        # names the other side: started for either feature, it drops lines only for the first.
+        follow = self.settings.listen.mic_follows_mute
+        if follow or self.speakers is not None:
+            gate = self.mic_gate_factory()
+            if not gate.start() and follow:
+                self.events.append("NOTICE", text=f"Your microphone is kept whatever the meeting app says: {gate.error}.")
+            self.call_reader = gate
+            self.mic_gate = gate if follow else None
         self.remote = self._stream("REMOTE")
         self.remote.start()
         now = self.clock()
@@ -613,10 +676,16 @@ class ListenDaemon:
             self.remote = None
         storage, self.storage = self.storage, None
         storage.metadata["stopped_by"] = reason
+        if self.mic_gate is not None:
+            storage.metadata["mic"] = self.mic_gate.describe()
+        if self.call_reader is not None:
+            await asyncio.to_thread(self.call_reader.stop)
+        self.mic_gate, self.call_reader = None, None
         storage.metadata["echo_lines_dropped"] = self.echo.dropped
         if self.screens is not None:
             storage.metadata["screens_captured"] = self.screens.count
             self.screens = None
+        speakers = await self._finish_speakers(storage)
         await asyncio.to_thread(storage.finish, SUMMARY_PENDING)
         runner, self.brain, self._brain_off = self.brain, None, False
         if runner is not None:
@@ -633,7 +702,16 @@ class ListenDaemon:
             lines=len(storage.final_events),
             transcript=str(storage.transcript_txt),
             summary=str(storage.summary_md),
+            **speakers,
         )
+        if not self.settings.listen.wake_phrase:
+            await self._close_mic()
+
+    async def _close_mic(self) -> None:
+        """Without the wake phrase the microphone is open only during a meeting."""
+        await self.stop_listening()
+        self.paused = True
+        self._write_listen_state()
 
     def _flush_batch(self, now: float, **trigger: Any) -> None:
         lines = self.batcher.take(now)
@@ -655,8 +733,7 @@ class ListenDaemon:
 
     def session_watching(self) -> bool:
         """A Claude Code session is following the listener right now."""
-        state = _read_json(self.runtime_dir / "brain.json")
-        return bool(state.get("session_id")) and process_alive(state)
+        return brain_alive(_read_json(self.runtime_dir / "brain.json"))
 
     def _think(self, lines: list[str], trigger: dict[str, Any]) -> None:
         """Hand a batch to Buddy's own brain when no session is there to read it."""
@@ -694,6 +771,119 @@ class ListenDaemon:
         except Exception as exc:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain could not write the summary: {type(exc).__name__}: {exc}")
 
+    # --------------------------------------------------------------- speakers
+
+    def _setup_speakers(self) -> None:
+        """Get ready to name the other side for this meeting, as listen.speaker_names says."""
+        listen = self.settings.listen
+        self.speakers, self.voice_model, self.read_speaker = None, None, None
+        self._sightings, self._last_look = [], float("-inf")
+        mode = listen.speaker_names
+        if mode == "off":
+            return
+        problems = []
+        if mode in ("screen", "both"):
+            from . import active_speaker
+
+            if active_speaker.available():
+                self.read_speaker = active_speaker.speaker_on_screen
+            else:
+                problems.append("the screen cannot be read here (macOS with buddy-screen-text, from scripts/install-macos.sh)")
+        if mode in ("voice", "both"):
+            model = VoiceModel(self.voice_model_path)
+            if model.available():
+                self.voice_model = model
+            else:
+                problems.append("the voice model is missing (run `buddy voices setup`)")
+        if problems:
+            self.events.append("NOTICE", meeting=self.meeting_id, text="Speaker names are limited: " + "; ".join(problems) + ".")
+        if self.read_speaker is None and self.voice_model is None:
+            return
+        own = {name.lower() for name in [*listen.speaker_self_names, *listen.question_names]}
+        book = VoiceBook(self.voice_book_path) if listen.remember_voices and self.voice_model is not None else None
+        self.speakers = SpeakerTracker(
+            threshold=listen.voice_threshold,
+            votes_needed=listen.speaker_votes_needed,
+            book=book,
+            exclude=lambda name: any(part.lower() in own for part in name.split()),
+        )
+
+    @property
+    def voice_model_path(self) -> Path:
+        configured = self.settings.listen.voice_model
+        return Path(configured).expanduser() if configured else self.runtime_dir / "models" / VOICE_MODEL_FILE
+
+    @property
+    def voice_book_path(self) -> Path:
+        return self.runtime_dir / "voices.json"
+
+    def on_speech(self, event: SpeechEvent) -> None:
+        """The other side is talking: look at who the screen outlines, at most every few seconds."""
+        if self.storage is None or self.read_speaker is None or event.speaker != "REMOTE":
+            return
+        if self._look is not None and not self._look.done():
+            return  # the previous look is still being read
+        if event.at - self._last_look < self.settings.listen.speaker_screen_seconds:
+            return
+        self._last_look = event.at
+        self._look = asyncio.create_task(self._look_at_screen(event.at), name="speaker-screen")
+
+    async def _look_at_screen(self, at: float) -> None:
+        if self.storage is None or self.read_speaker is None:
+            return
+        path = self.storage.directory / ".speaker" / f"{time.time_ns()}.jpg"
+        reader = self.read_speaker
+        try:
+            taken = await asyncio.to_thread(self.screen_capture, path, self.settings.listen.screen_max_width)
+            name = await asyncio.to_thread(reader, path) if taken else None
+        except Exception:
+            name = None  # a failed look only loses one sighting
+        finally:
+            path.unlink(missing_ok=True)  # read, then gone: these are not the meeting's screenshots
+        if name:
+            self._sightings.append((at, name))
+            del self._sightings[:-120]
+
+    def _attribute(self, event: TranscriptEvent) -> None:
+        """Name a REMOTE line from its voice and the screen sightings while it was said."""
+        if self.speakers is None:
+            return
+        start = event.spoken_from if event.spoken_from is not None else self.clock()
+        end = event.spoken_to if event.spoken_to is not None else start
+        seen = [name for at, name in self._sightings if start - 0.5 <= at <= end + 1.0]
+        embedding = event.embedding if self.voice_model is not None else None
+        seconds = end - start if event.spoken_from is not None and event.spoken_to is not None else None
+        labels = self.call_reader.participant_labels if self.call_reader is not None else []
+        who = self.speakers.observe(embedding, seen, event.text, seconds=seconds, participants=parse_participants(labels))
+        event.name, event.voice, event.name_sure = who.name, who.voice, who.sure
+
+    async def _finish_speakers(self, storage: Any) -> dict[str, Any]:
+        """Keep what was learned about the voices; tell the session which ones nobody named."""
+        tracker, self.speakers = self.speakers, None
+        if self._look is not None:
+            with suppress(Exception):
+                await asyncio.wait_for(self._look, timeout=10)
+            self._look = None
+        with suppress(OSError):
+            (storage.directory / ".speaker").rmdir()
+        if tracker is None:
+            return {}
+        storage.metadata["speakers"] = tracker.summary()
+        if self.voice_model is not None:
+            # The meeting's voices, so `buddy voices name` can name one nobody named here.
+            _write_json(storage.directory / "voices.json", tracker.state())
+        learned = await asyncio.to_thread(tracker.remember)
+        extra: dict[str, Any] = {}
+        names = sorted({entry["name"] for entry in storage.metadata["speakers"] if entry["name"]})
+        if names:
+            extra["speakers"] = names
+        unnamed = [voice.label for voice in tracker.unnamed()]
+        if unnamed:
+            extra["unnamed_voices"] = unnamed
+        if learned:
+            extra["voices_learned"] = learned
+        return extra
+
     # ----------------------------------------------------------------- speech
 
     async def on_final(self, event: TranscriptEvent) -> None:
@@ -701,7 +891,12 @@ class ListenDaemon:
         if not text:
             return
         now = self.clock()
-        if event.speaker == "ME":
+        if event.speaker == "ME" and self.dictation is not None:
+            # Talking to Buddy through the 🎤: not part of the meeting, and no wake phrase.
+            self.dictation["words"].append(text)
+            self._write_listen_state()
+            return
+        if event.speaker == "ME" and self.settings.listen.wake_phrase:
             matched, remainder = parse_wake(text)
             if self.capture is not None or matched:
                 # Shown as heard, closing phrase included, so the user can see it landed.
@@ -716,7 +911,11 @@ class ListenDaemon:
                 return
         if self.storage is None:
             return  # speech outside a meeting is heard, not kept, and not shown
+        if event.speaker == "ME" and self.mic_gate is not None and not self.mic_gate.heard():
+            self.mic_gate.dropped += 1  # muted in the meeting app: not part of the meeting
+            return
         if event.speaker == "REMOTE":
+            self._attribute(event)
             self.echo.remote(text, now)  # held ME lines it echoes are simply never written
         elif self.echo.enabled:
             self.echo.mine(event, text, now)  # written by _release_held, unless it is an echo
@@ -727,9 +926,10 @@ class ListenDaemon:
 
     async def _keep(self, event: TranscriptEvent, said_at: float) -> None:
         text = event.text.strip()
-        self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text)
+        shown = {"name": event.name} if event.name else {}
+        self._show("SAID", meeting=self.meeting_id, speaker=event.speaker, text=text, **shown)
         await asyncio.to_thread(self.storage.append, event)
-        line = f"{event.speaker}: {text}"
+        line = f"{event.who}: {text}"
         # The time it was said, not the time it was released, so a held line does not
         # look like fresh speech and push back the batch's pause.
         self.batcher.add(line, said_at)
@@ -755,6 +955,10 @@ class ListenDaemon:
         if addressed:
             trigger["addressed"] = True
         self._flush_batch(now, **trigger)
+
+    @property
+    def mic_mode_file(self) -> Path:
+        return self.control_dir / "mic.json"
 
     @property
     def prep_md(self) -> Path:
@@ -859,6 +1063,58 @@ class ListenDaemon:
             return
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
 
+    # ---------------------------------------------------------------- actions
+
+    def _announce_action(self, action_id: Any) -> None:
+        """The user approved a card: tell the session what to do, exactly as approved."""
+        from .actions import ActionStore, approval_event
+
+        try:
+            action = ActionStore(self.runtime_dir).get(int(action_id))
+        except (TypeError, ValueError):
+            return
+        if action is None or action.status != "approved":
+            return  # only an approved card is ever sent, and only once it is approved
+        self.events.append("ACTION_APPROVED", **approval_event(action))
+
+    # -------------------------------------------------------------- dictation
+
+    def _dictation_state(self) -> dict[str, Any]:
+        if self.dictation is None:
+            return self._dictation_last
+        return {"active": True, "text": " ".join(self.dictation["words"]), "id": self._dictation_last["id"]}
+
+    async def start_dictation(self) -> None:
+        """The window's 🎤 was pressed: what the user says next becomes text in the window."""
+        if self.dictation is not None:
+            return
+        opened = self.mic is None
+        if opened:
+            self.mic = self._stream("ME")
+            self.mic.start()
+        self.dictation = {"words": [], "started": self.clock(), "opened": opened, "stop_at": None}
+        self.chime("open")
+        self._write_listen_state()
+
+    def stop_dictation(self) -> None:
+        """Pressed again: the last words are still on their way, so finish a moment later."""
+        if self.dictation is not None and self.dictation["stop_at"] is None:
+            self.dictation["stop_at"] = self.clock() + self.settings.listen.dictation_grace_seconds
+
+    async def _stop_dictation_async(self) -> None:
+        self.stop_dictation()
+
+    async def _finish_dictation(self) -> None:
+        dictation, self.dictation = self.dictation, None
+        if dictation is None:
+            return
+        text = " ".join(dictation["words"]).strip()
+        self._dictation_last = {"active": False, "text": text, "id": self._dictation_last["id"] + 1}
+        if dictation["opened"] and self.storage is None and self.paused and self.mic is not None:
+            await self.stop_listening()  # opened only for this: closed again
+        self.chime("sent" if text else "cancel")
+        self._write_listen_state()
+
     def _play_chime(self, kind: str) -> None:
         """A short tone, so the user knows Buddy heard them without looking at a screen."""
         if not self.settings.listen.sounds:
@@ -898,8 +1154,15 @@ class ListenDaemon:
                 await self.send_command("silence")
             elif now - self._capture_started >= listen.command_max_seconds:
                 await self.send_command("limit")
+        if self.dictation is not None:
+            stop_at = self.dictation["stop_at"]
+            if (stop_at is not None and now >= stop_at) or now - self.dictation["started"] >= listen.command_max_seconds:
+                await self._finish_dictation()
         if self.storage is None:
             return
+        if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:
+            self._mic_shown = self.mic_gate.indicator()
+            self._write_listen_state()  # the window's microphone button follows the app
         await self._release_held(now)
         if self.screens is not None and self.screens.due(now):
             await asyncio.to_thread(self.screens.shoot, now)
@@ -917,6 +1180,8 @@ class ListenDaemon:
             "stop-meeting": lambda: self.stop_meeting("requested"),
             "pause": lambda: self.pause("requested"),
             "resume": lambda: self.resume("requested"),
+            "dictate-start": self.start_dictation,
+            "dictate-stop": self._stop_dictation_async,
         }
         for name, action in flags.items():
             flag = self.control_dir / f"{name}.flag"
@@ -934,6 +1199,11 @@ class ListenDaemon:
                 text = str(_read_json(submitted).get("text", ""))
                 submitted.unlink(missing_ok=True)
                 await self.typed(text)
+        if self.control_dir.exists():
+            for approved in sorted(self.control_dir.glob("action-*.json")):
+                action_id = _read_json(approved).get("id")
+                approved.unlink(missing_ok=True)
+                self._announce_action(action_id)
         shutdown = self.control_dir / "shutdown.flag"
         if shutdown.exists():
             shutdown.unlink(missing_ok=True)
@@ -945,8 +1215,12 @@ class ListenDaemon:
         queue = self.bus.subscribe(maxsize=2048)
         reason = "stopped"
         try:
-            await self.start_listening()
-            self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")
+            if self.settings.listen.wake_phrase:
+                await self.start_listening()
+                self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")
+            else:
+                await self._close_mic()
+                self.events.append("LISTENER_UP", text="Ready: the microphone opens when a meeting starts.")
             while not stop.is_set():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.5)
@@ -954,7 +1228,9 @@ class ListenDaemon:
                     event = None
                 if isinstance(event, TranscriptEvent) and event.final:
                     await self.on_final(event)
-                if isinstance(event, StatusEvent):
+                elif isinstance(event, SpeechEvent):
+                    self.on_speech(event)
+                elif isinstance(event, StatusEvent):
                     self.on_status(event)
                 if not await self.check_controls():
                     reason = self._shutdown_reason
@@ -977,6 +1253,11 @@ def request(runtime_dir: Path, name: str) -> None:
     control = runtime_dir / "listen"
     control.mkdir(parents=True, exist_ok=True)
     (control / f"{name}.flag").touch()
+
+
+def approve_action(runtime_dir: Path, action_id: int) -> None:
+    """Ask the listener to hand an approved action to the session."""
+    _write_json(runtime_dir / "listen" / f"action-{time.time_ns()}.json", {"id": int(action_id)})
 
 
 def submit(runtime_dir: Path, text: str) -> None:

@@ -14,10 +14,46 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from .listener import _process_started, _read_json, _write_json, listener_state, process_alive, request, submit
+from .listener import (
+    _process_started,
+    _read_json,
+    _write_json,
+    approve_action,
+    listener_state,
+    process_alive,
+    request,
+    submit,
+)
 from .live import LiveView
 
-CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown"}
+def copy_text(text: str) -> bool:
+    """Put text on the clipboard with the system's own tool; False when there is none."""
+    import shutil
+    import subprocess
+    import sys
+
+    tool = ["pbcopy"] if sys.platform == "darwin" else ["clip"] if sys.platform == "win32" else ["xclip", "-selection", "clipboard"]
+    if shutil.which(tool[0]) is None:
+        return False
+    try:
+        subprocess.run(tool, input=text.encode("utf-8"), check=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def open_link(url: str) -> bool:
+    import webbrowser
+
+    if not url.startswith(("https://", "http://")):
+        return False
+    try:
+        return webbrowser.open(url)
+    except Exception:
+        return False
+
+
+CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown", "dictate-start", "dictate-stop"}
 MAX_TYPED = 4000
 
 
@@ -35,11 +71,17 @@ class WindowApi:
         view: LiveView,
         send_text: Callable[[Path, str], None] = submit,
         send_control: Callable[[Path, str], None] = request,
+        announce: Callable[[Path, int], None] = approve_action,
+        copy: Callable[[str], bool] = copy_text,
+        open_url: Callable[[str], bool] = open_link,
     ) -> None:
         self._runtime_dir = runtime_dir
         self._view = view
         self._send_text = send_text
         self._send_control = send_control
+        self._announce = announce
+        self._copy = copy
+        self._open = open_url
         self._window: Any = None
 
     def _off(self) -> dict[str, Any] | None:
@@ -67,6 +109,47 @@ class WindowApi:
             return refusal
         self._send_control(self._runtime_dir, action)
         return {"ok": True}
+
+    def set_mic(self, mode: str) -> dict[str, Any]:
+        """The microphone button: follow the meeting app (auto), always keep (on), never (off)."""
+        from .mic_gate import MODES, write_mode
+
+        if mode not in MODES:
+            return {"ok": False, "error": f"Unknown microphone mode: {mode}"}
+        write_mode(self._runtime_dir / "listen" / "mic.json", mode)
+        return {"ok": True, "mode": mode}
+
+    def decide_action(self, action_id: int, approve: bool, detail: str | None = None) -> dict[str, Any]:
+        """A click on a card. Approve hands it to the session; a copy-only reply is done here."""
+        from .actions import ActionStore
+
+        store = ActionStore(self._runtime_dir)
+        current = store.get(int(action_id))
+        if current is None:
+            return {"ok": False, "error": f"No action {action_id}."}
+        if approve and current.mode != "copy":
+            refusal = self._off()
+            if refusal:
+                return refusal
+        try:
+            action = store.decide(int(action_id), bool(approve), None if detail is None else str(detail))
+        except (LookupError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if not approve:
+            return {"ok": True, "status": action.status}
+        if action.mode == "copy":
+            # Nothing here can send it: the reply goes to the clipboard and the thread opens.
+            copied = self._copy(action.detail)
+            opened = self._open(action.link) if action.link else False
+            where = "paste it in the thread" + ("" if opened or not action.link else f": {action.link}")
+            result = f"Copied, {where}." if copied else "Could not copy: select the text on the card."
+            store.report(action.id, "done" if copied else "failed", result, action.link)
+            return {"ok": True, "status": "done" if copied else "failed"}
+        self._announce(self._runtime_dir, action.id)
+        return {"ok": True, "status": action.status}
+
+    def open_url(self, url: str) -> dict[str, Any]:
+        return {"ok": self._open(str(url or ""))}
 
     def set_show(self, show: str) -> dict[str, Any]:
         if show in {"buddy", "all"}:
@@ -177,6 +260,14 @@ button { font: inherit; color: inherit; background: none; border: 1px solid var(
 button:hover { background: var(--accent-soft); }
 button.on { background: var(--accent-soft); border-color: var(--accent); }
 button.danger.armed { background: var(--rec); color: #fff; border-color: var(--rec); }
+/* The microphone button glows while your lines are kept, dims while you are muted in the
+   meeting app, and turns amber when no app could be read. */
+#mic { display: none; }
+#mic.heard { color: #fff; background: var(--rec); border-color: var(--rec); box-shadow: 0 0 10px var(--rec);
+  animation: glow 1.6s ease-in-out infinite; }
+#mic.muted { opacity: .45; }
+#mic.unknown { border-color: #d9a400; color: #d9a400; }
+@keyframes glow { 50% { box-shadow: 0 0 3px var(--rec); } }
 
 header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel);
   border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -189,6 +280,53 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 .spacer { flex: 1; }
 .tools { display: flex; gap: 4px; }
 
+#board { display: none; margin: 10px 12px 0; padding: 8px 10px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); }
+#board .col { margin-top: 4px; }
+#board .col:first-child { margin-top: 0; }
+#board .col-title { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin: 2px 0 1px; }
+#board .col-now .col-title { color: var(--accent); }
+#board .item { display: flex; gap: 6px; align-items: baseline; padding: 2px 0 2px 10px; position: relative; }
+#board .item::before { content: "▸"; position: absolute; left: 0; color: var(--muted); font-size: 10px; top: 4px; }
+#board .item .t { flex: 1; min-width: 0; }
+#board .item .n { color: var(--muted); font-size: 11.5px; }
+#board .tk { font: 11px var(--mono); color: var(--accent); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px;
+  white-space: nowrap; cursor: pointer; text-decoration: none; }
+#board .col-blocked { background: color-mix(in srgb, var(--rec) 10%, transparent); border-radius: 8px; padding: 2px 6px 4px;
+  margin-left: -6px; margin-right: -6px; }
+#board .col-blocked .col-title, #board .col-blocked .item::before { color: var(--rec); }
+#board .col-blocked .why { color: var(--rec); font-size: 12px; display: block; }
+#board .col-done .item { color: var(--muted); }
+#board .col-done .item::before { content: "✓"; color: var(--ok); }
+#board details summary { cursor: pointer; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+#board .compact { display: none; cursor: pointer; font-size: 12px; }
+#board .compact b { color: var(--accent); font-weight: 600; }
+#board .compact .blk { color: var(--rec); margin-left: 6px; }
+#board.small .compact { display: block; }
+#board.small .full { display: none; }
+#actions { display: none; margin: 10px 12px 0; }
+#actions h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 6px; }
+.card .top { display: flex; gap: 6px; align-items: baseline; }
+.card .num { color: var(--muted); font: 11px var(--mono); }
+.card .kind { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; }
+.card .title { font-weight: 600; flex: 1; min-width: 0; }
+.card .badge { font-size: 11px; color: var(--warn); }
+.card .detail { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9.5em; overflow-y: auto;
+  background: var(--bg); border-radius: 8px; padding: 6px 8px; font-size: 12.5px; }
+.card textarea.detail { width: 100%; font: inherit; font-size: 12.5px; color: inherit; border: 1px solid var(--accent); resize: vertical; min-height: 6em; }
+.card .link { display: block; color: var(--muted); font-size: 11.5px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .buttons { display: flex; gap: 6px; margin-top: 8px; }
+.card .approve { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.card .approve.outward { background: var(--claude); border-color: var(--claude); color: #fff; }
+.card .state { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.card.done { border-color: var(--ok); }
+.card.done .state { color: var(--ok); }
+.card.failed { border-color: var(--rec); }
+.card.failed .state { color: var(--rec); }
+.card.finished .detail, .card.finished .buttons { display: none; }
+.card.finished { opacity: .8; padding: 6px 10px; }
 #suggestions { display: none; margin: 10px 12px 0; padding: 10px 12px; background: var(--accent-soft);
   border: 1px solid var(--accent); border-radius: var(--radius); }
 #suggestions h2 { margin: 0 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
@@ -198,6 +336,14 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #suggestions li.older { opacity: .55; }
 #suggestions li.set-start { border-top: 1px dashed var(--accent); margin-top: 4px; padding-top: 6px; }
 
+#activity-head { display: flex; align-items: center; gap: 6px; margin: 8px 12px 0; padding: 0; border: 0;
+  color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; background: none; }
+#activity-head:hover { background: none; color: var(--text); }
+#activity-head .chev { transition: transform .15s; }
+body.activity-closed #activity-head .chev { transform: rotate(-90deg); }
+body.activity-closed #feed, body.activity-closed #jump { display: none !important; }
+#panels { overflow-y: auto; max-height: 58vh; flex: none; }
+body.activity-closed #panels { flex: 1; max-height: none; }
 #feed { flex: 1; overflow-y: auto; padding: 8px 12px 12px; }
 .row { display: flex; gap: 8px; padding: 3px 0; }
 .time { color: var(--muted); font: 11px var(--mono); padding-top: 2px; flex: none; width: 56px; }
@@ -223,6 +369,12 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   border-radius: var(--radius); padding: 7px 10px; max-height: 120px; }
 #input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 #send { background: var(--accent); color: var(--on-accent); border-color: var(--accent); padding: 7px 14px; }
+/* The 🎤 dictation button glows while Buddy is listening to you. */
+#dictate { padding: 7px 10px; }
+#dictate.live { color: #fff; background: var(--rec); border-color: var(--rec); box-shadow: 0 0 10px var(--rec);
+  animation: glow 1.6s ease-in-out infinite; }
+#dictate.finishing { opacity: .6; }
+#input.listening { outline: 2px solid var(--rec); outline-offset: -1px; }
 #error { color: var(--rec); font-size: 12px; min-height: 0; }
 </style>
 </head>
@@ -233,6 +385,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   <span id="brain"></span>
   <span class="spacer"></span>
   <span class="tools">
+    <button id="mic" title="Your microphone">🎙</button>
     <button id="meeting" title="Start or end recording a meeting">⏺ Meeting</button>
     <button id="pause" title="Close or reopen the microphone">⏸</button>
     <button id="show" title="Show only what Buddy started, or the whole Claude session">Only Buddy</button>
@@ -240,12 +393,18 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     <button id="power" class="danger" title="Turn Buddy off">⏻</button>
   </span>
 </header>
+<div id="panels">
+  <section id="actions"><h2 id="actions-title">Actions</h2><div id="action-list"></div></section>
+  <section id="board" title="Your work: now, next, blocked"><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
+</div>
 <section id="suggestions"><h2>Suggestions</h2><ol id="suggestion-list"></ol></section>
-<main id="feed"><div id="empty">Say “Hey Buddy”, or type below.<br>The meeting shows here as it is said.</div></main>
+<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> Activity</button>
+<main id="feed"><div id="empty">Type below, or press 🎤 to talk to Buddy.<br>The meeting shows here as it is said.</div></main>
 <button id="jump">↓ New</button>
 <footer>
   <form id="form">
     <textarea id="input" rows="1" placeholder="Type to Buddy — e.g. review PR 123"></textarea>
+    <button id="dictate" type="button" title="Talk to Buddy: click, speak, click again. The text lands here to read and send.">🎤</button>
     <button id="send" type="submit">Send</button>
   </form>
   <div id="error"></div>
@@ -322,7 +481,8 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     status = next;
     const state = next.listener;
     $("dot").className = "dot " + state;
-    let label = {listening: "Listening", meeting: "Recording", paused: "Paused", off: "Buddy is off"}[state] || state;
+    const ready = state === "paused" && next.wake_phrase === false;  // waiting for a meeting or the 🎤
+    let label = ready ? "Ready" : ({listening: "Listening", meeting: "Recording", paused: "Paused", off: "Buddy is off"}[state] || state);
     if (state === "meeting") {
       const minutes = minutesSince(next.meeting);
       if (minutes !== null) label += " · " + minutes + " min";
@@ -338,8 +498,24 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     $("meeting").disabled = !on;
     $("pause").textContent = state === "paused" ? "▶" : "⏸";
     $("pause").disabled = !on;
+    $("pause").style.display = ready ? "none" : "";
     $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
+    const mic = next.mic;
+    const micButton = $("mic");
+    micButton.style.display = mic && state === "meeting" ? "inline-block" : "none";
+    if (mic) {
+      const look = mic.mode !== "auto" ? (mic.heard ? "heard" : "muted")
+        : mic.state === "none" ? "unknown" : (mic.heard ? "heard" : "muted");
+      micButton.className = look;
+      micButton.textContent = mic.mode === "auto" ? "🎙" : (mic.mode === "on" ? "🎙 on" : "🎙 off");
+      const app = mic.app || "no meeting app read";
+      micButton.title = (mic.heard ? "Your lines are kept" : "Your lines are not kept") +
+        ` · ${mic.mode === "auto" ? "following " + app : "set by hand"} · click: auto → on → off`;
+    }
+    showDictation(next.dictation, on);
+    showActions(next.actions);
+    showBoard(next.board, state === "meeting");
     // Earlier sets stay above the newest one, dimmed, so a new set never wipes the one
     // being read. The newest set is at the bottom and kept in view.
     const list = $("suggestion-list");
@@ -354,6 +530,174 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     }));
     list.scrollTop = list.scrollHeight;
     $("suggestions").style.display = all.length ? "block" : "none";
+  }
+
+  // 🎤: while on, the box shows what is heard; when done, the text stays there to read,
+  // fix and send. `id` grows once per finished dictation, so each lands only once.
+  let dictationSeen = null, dictationBase = "", dictating = false, finishing = false;
+  function showDictation(d, on) {
+    const button = $("dictate");
+    button.disabled = !on;
+    if (!d) return;
+    if (dictationSeen === null) dictationSeen = d.id;  // the window opened after it: nothing to land
+    if (d.active) {
+      if (!dictating) { dictating = true; dictationBase = input.value.trim(); }
+      input.value = (dictationBase + " " + d.text).trim();
+      resize();
+    } else if (d.id !== dictationSeen) {
+      dictationSeen = d.id;
+      input.value = ((dictating ? dictationBase : input.value.trim()) + " " + d.text).trim();
+      resize();
+      dictating = finishing = false;
+      input.focus();
+    } else if (dictating) {
+      dictating = finishing = false;
+    }
+    button.className = d.active ? (finishing ? "finishing" : "live") : "";
+    button.title = d.active ? "Listening… click to finish" : "Talk to Buddy: click, speak, click again. The text lands here to read and send.";
+    input.classList.toggle("listening", !!d.active);
+    input.placeholder = d.active ? "Listening…" : "Type to Buddy — e.g. review PR 123";
+  }
+
+  // Action cards. Rebuilt only when an action changes, and never while you edit it.
+  const KIND = {reply: "Reply", review: "Review", investigate: "Look into", merge: "Merge", post: "Post", ticket: "Jira", run: "Run", other: "Action"};
+  const cards = new Map(), editing = new Set();
+  function card(a) {
+    const el = document.createElement("div");
+    const finished = ["done", "failed"].includes(a.status);
+    el.className = "card " + a.status + (finished ? " finished" : "");
+    const top = document.createElement("div");
+    top.className = "top";
+    const num = document.createElement("span"); num.className = "num"; num.textContent = "#" + a.id;
+    const kind = document.createElement("span"); kind.className = "kind"; kind.textContent = KIND[a.kind] || a.kind;
+    const title = document.createElement("span"); title.className = "title"; title.textContent = a.title;
+    top.append(num, kind, title);
+    if (a.stale) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "from yesterday"; top.append(b); }
+    el.append(top);
+    let detailEl = null;
+    if (a.detail) {
+      detailEl = document.createElement("div"); detailEl.className = "detail"; detailEl.textContent = a.detail;
+      el.append(detailEl);
+    }
+    if (a.link) {
+      const link = document.createElement("a"); link.className = "link"; link.href = a.link; link.textContent = a.link;
+      link.addEventListener("click", (e) => { e.preventDefault(); call("open_url", a.link); });
+      el.append(link);
+    }
+    if (a.status === "proposed") {
+      const buttons = document.createElement("div"); buttons.className = "buttons";
+      const approve = document.createElement("button");
+      approve.className = "approve" + (a.outward && a.mode !== "copy" ? " outward" : "");
+      approve.textContent = a.mode === "copy" ? "Copy & open" : (a.outward ? "Approve & send" : "Approve");
+      approve.title = a.outward ? "Leaves this machine exactly as shown" : "Claude does this now";
+      const edit = document.createElement("button"); edit.textContent = "Edit";
+      const dismiss = document.createElement("button"); dismiss.textContent = "Dismiss";
+      if (!a.detail) edit.style.display = "none";
+      const decide = async (yes) => {
+        approve.disabled = edit.disabled = dismiss.disabled = true;  // one click, one run
+        const area = el.querySelector("textarea.detail");
+        const r = await call("decide_action", a.id, yes, area ? area.value : null);
+        editing.delete(a.id);
+        if (!r.ok) { showError(r.error); approve.disabled = edit.disabled = dismiss.disabled = false; }
+      };
+      approve.addEventListener("click", () => decide(true));
+      dismiss.addEventListener("click", () => decide(false));
+      edit.addEventListener("click", () => {
+        if (el.querySelector("textarea.detail")) return;
+        editing.add(a.id);
+        const area = document.createElement("textarea"); area.className = "detail"; area.value = a.detail;
+        detailEl.replaceWith(area); area.focus();
+        edit.textContent = "Editing…"; edit.disabled = true;
+      });
+      buttons.append(approve, edit, dismiss);
+      el.append(buttons);
+    } else {
+      const state = document.createElement("div"); state.className = "state";
+      const waiting = status.brain === "watching" ? "Claude is on it…" : "Approved, waiting for Claude to pick it up…";
+      state.textContent = {approved: waiting, running: "Claude is on it…", done: "✓ " + (a.result || "Done"),
+        failed: "✗ " + (a.result || "Failed")}[a.status] || a.status;
+      if (a.result_link && finished) {
+        const link = document.createElement("a"); link.className = "link"; link.href = a.result_link; link.textContent = a.result_link;
+        link.addEventListener("click", (e) => { e.preventDefault(); call("open_url", a.result_link); });
+        state.append(link);
+      }
+      el.append(state);
+    }
+    return el;
+  }
+  function showActions(actions) {
+    const shown = (actions || []).filter((a) => a.status !== "dismissed");
+    const open = shown.filter((a) => !["done", "failed"].includes(a.status));
+    const finished = shown.filter((a) => ["done", "failed"].includes(a.status)).slice(-3);
+    const list = $("action-list");
+    const wanted = [...finished, ...open];
+    const keep = new Set(wanted.map((a) => a.id));
+    for (const [id, entry] of cards) if (!keep.has(id)) { entry.el.remove(); cards.delete(id); editing.delete(id); }
+    for (const a of wanted) {
+      const key = JSON.stringify(a) + (a.status === "approved" ? status.brain : "");
+      const entry = cards.get(a.id);
+      if (entry && (entry.key === key || editing.has(a.id))) { list.appendChild(entry.el); continue; }
+      const el = card(a);
+      if (entry) entry.el.replaceWith(el);
+      cards.set(a.id, {el, key});
+      list.appendChild(el);
+    }
+    $("actions-title").textContent = open.length ? `Actions · ${open.filter((a) => a.status === "proposed").length} to approve` : "Actions";
+    $("actions").style.display = wanted.length ? "block" : "none";
+  }
+
+  // The work board. Small during a meeting (one line: what is being done now); a click opens it.
+  let boardOpenInMeeting = false;
+  $("board-compact").addEventListener("click", () => { boardOpenInMeeting = true; setStatus(status); });
+  function ticketChip(item) {
+    const chip = document.createElement(item.link ? "a" : "span");
+    chip.className = "tk";
+    chip.textContent = item.ticket + (item.ticket_status ? " · " + item.ticket_status : "");
+    if (item.ticket_assignee) chip.title = "Assigned to " + item.ticket_assignee;
+    if (item.link) { chip.href = item.link; chip.addEventListener("click", (e) => { e.preventDefault(); call("open_url", item.link); }); }
+    return chip;
+  }
+  function boardItem(item, withWhy) {
+    const row = document.createElement("div"); row.className = "item";
+    const t = document.createElement("span"); t.className = "t"; t.textContent = item.title;
+    if (withWhy && item.blocker) { const why = document.createElement("span"); why.className = "why"; why.textContent = item.blocker; t.append(why); }
+    else if (item.note) { const n = document.createElement("span"); n.className = "n"; n.textContent = " — " + item.note; t.append(n); }
+    if (!item.ticket && item.link) {
+      const chip = document.createElement("a"); chip.className = "tk"; chip.textContent = "link"; chip.href = item.link;
+      chip.addEventListener("click", (e) => { e.preventDefault(); call("open_url", item.link); });
+      row.append(t, chip);
+    } else row.append(t, ...(item.ticket ? [ticketChip(item)] : []));
+    return row;
+  }
+  function showBoard(board, inMeeting) {
+    const b = board || {};
+    const cols = [["now", "Now"], ["blocked", "Blocked"], ["next", "Next"]];
+    const full = $("board-full");
+    full.replaceChildren();
+    for (const [key, name] of cols) {
+      const items = b[key] || [];
+      if (!items.length) continue;
+      const col = document.createElement("div"); col.className = "col col-" + key;
+      const title = document.createElement("div"); title.className = "col-title"; title.textContent = name;
+      col.append(title, ...items.map((i) => boardItem(i, key === "blocked")));
+      full.append(col);
+    }
+    const done = b.done || [];
+    if (done.length) {
+      const det = document.createElement("details"); det.className = "col col-done";
+      const sum = document.createElement("summary"); sum.textContent = `Done today (${done.length})`;
+      det.append(sum, ...done.map((i) => boardItem(i, false)));
+      full.append(det);
+    }
+    const now = b.now || [], blocked = b.blocked || [];
+    const compact = $("board-compact");
+    compact.replaceChildren();
+    const lead = document.createElement("b"); lead.textContent = "Now: ";
+    compact.append(lead, document.createTextNode(now.map((i) => i.title).join(" · ") || "—"));
+    if (blocked.length) { const k = document.createElement("span"); k.className = "blk"; k.textContent = `● ${blocked.length} blocked`; compact.append(k); }
+    if (!inMeeting) boardOpenInMeeting = false;
+    $("board").classList.toggle("small", inMeeting && !boardOpenInMeeting);
+    $("board").style.display = full.children.length ? "block" : "none";
   }
 
   window.buddy = {
@@ -390,6 +734,25 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   const control = async (action) => { const r = await call("control", action); if (!r.ok) showError(r.error); };
   $("meeting").addEventListener("click", () => control(status.listener === "meeting" ? "stop-meeting" : "start-meeting"));
   $("pause").addEventListener("click", () => control(status.listener === "paused" ? "resume" : "pause"));
+  $("dictate").addEventListener("click", async () => {
+    const live = status.dictation && status.dictation.active;
+    if (live) { finishing = true; $("dictate").className = "finishing"; }
+    const r = await call("control", live ? "dictate-stop" : "dictate-start");
+    if (!r.ok) showError(r.error);
+  });
+  const ACTIVITY_KEY = "buddy.activity";
+  const setActivity = (open) => {
+    document.body.classList.toggle("activity-closed", !open);
+    try { localStorage.setItem(ACTIVITY_KEY, open ? "open" : "closed"); } catch (e) {}
+  };
+  try { if (localStorage.getItem(ACTIVITY_KEY) === "closed") document.body.classList.add("activity-closed"); } catch (e) {}
+  $("activity-head").addEventListener("click", () => setActivity(document.body.classList.contains("activity-closed")));
+  $("mic").addEventListener("click", async () => {
+    const order = ["auto", "on", "off"];
+    const current = (status.mic && status.mic.mode) || "auto";
+    const r = await call("set_mic", order[(order.indexOf(current) + 1) % order.length]);
+    if (!r.ok) showError(r.error);
+  });
   $("show").addEventListener("click", async () => {
     const r = await call("set_show", status.show === "all" ? "buddy" : "all");
     if (r.ok) { status.show = r.show; $("show").textContent = r.show === "all" ? "All turns" : "Only Buddy"; }

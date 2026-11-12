@@ -263,8 +263,10 @@ def listen(
         for _ in range(60):
             state = listener_state(runtime)
             if state:
-                console.print(f"Buddy is listening for \"Hey Buddy\" (pid {state['pid']}).")
-                if load_settings().listen.window:
+                settings = load_settings()
+                ready = "listening for \"Hey Buddy\"" if settings.listen.wake_phrase else "ready; the microphone opens for meetings and the 🎤"
+                console.print(f"Buddy is {ready} (pid {state['pid']}).")
+                if settings.listen.window:
                     _open_window(runtime)
                 return
             time.sleep(0.5)
@@ -272,7 +274,8 @@ def listen(
         raise typer.Exit(code=1)
     settings = load_settings()
     daemon = ListenDaemon(settings, runtime)
-    console.print('Listening for "Hey Buddy". Ctrl+C stops.')
+    console.print('Listening for "Hey Buddy". Ctrl+C stops.' if settings.listen.wake_phrase
+                  else "Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
     try:
         asyncio.run(daemon.run(asyncio.Event()))
     except KeyboardInterrupt:
@@ -297,7 +300,7 @@ def watch(
     room, and a monitor must not outlive the listener it follows.
     """
     from .listener import EventReader, format_event, listener_state
-    from .live import register_brain, unregister_brain
+    from .live import brain_seen, register_brain, unregister_brain
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -312,6 +315,8 @@ def watch(
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if follow and not peek and session_id:
         register_brain(runtime, session_id, safe)
+    elif not peek and session_id:
+        brain_seen(runtime, session_id, safe)  # checking in a loop is being connected too
 
     def drain() -> None:
         nonlocal cursor, last_type
@@ -352,6 +357,185 @@ def say(text: list[str] = typer.Argument(..., help="The command, as you would sa
     _require_listener()
     submit(_runtime_dir(), " ".join(text))
     console.print("Sent.")
+
+
+@app.command()
+def propose(
+    title: str = typer.Argument(..., help="What would be done, in a few words: \"Reply to Nick (DM)\"."),
+    kind: str = typer.Option("other", "--kind", "-k", help="reply, review, investigate, merge, post, run or other."),
+    detail: str = typer.Option("", "--detail", "-d", help="Exactly what will be sent or done."),
+    detail_file: Path = typer.Option(None, "--detail-file", help="Read the detail from this file (- for stdin)."),
+    link: str = typer.Option("", "--link", "-l", help="The thread, PR or ticket it is about."),
+    mode: str = typer.Option("run", "--mode", "-m", help="run: the session does it; copy: copy and open the link; send: the session sends it."),
+    outward: bool = typer.Option(None, "--outward/--local", help="Whether it leaves this machine (default: by kind)."),
+    source: str = typer.Option("session", "--source", help="Where it came from: slack, meeting, session."),
+) -> None:
+    """Put an action on Buddy's window for the user to approve with one click."""
+    from .actions import ActionStore
+
+    if detail_file is not None:
+        detail = sys.stdin.read() if str(detail_file) == "-" else detail_file.read_text(encoding="utf-8")
+    try:
+        action = ActionStore(_runtime_dir()).propose(kind, title, detail, link, mode, outward, source)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    console.print(f"Proposed action {action.id}: {action.title}")
+
+
+@app.command("action")
+def action_command(
+    action_id: int = typer.Argument(..., help="The action's number."),
+    status: str = typer.Argument(..., help="running, done or failed; or show."),
+    result: str = typer.Option("", "--result", "-r", help="One line on how it went."),
+    link: str = typer.Option("", "--link", "-l", help="Where the result is: the posted comment, the PR."),
+) -> None:
+    """Report how an approved action went; its card shows it."""
+    from .actions import ActionStore
+
+    store = ActionStore(_runtime_dir())
+    if status == "show":
+        found = store.get(action_id)
+        if found is None:
+            console.print(f"[red]No action {action_id}.[/red]")
+            raise typer.Exit(code=1)
+        console.print_json(json.dumps(found.to_dict(), ensure_ascii=False))
+        return
+    try:
+        updated = store.report(action_id, status, result, link)
+    except (LookupError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    console.print(f"Action {updated.id} is {updated.status}.")
+
+
+@app.command("actions")
+def actions_command(show_all: bool = typer.Option(False, "--all", help="Also the ones finished in the last day and a half.")) -> None:
+    """List the actions on Buddy's window."""
+    from .actions import OPEN, ActionStore
+
+    shown = [a for a in ActionStore(_runtime_dir()).visible() if show_all or a.status in OPEN]
+    if not shown:
+        console.print("No open actions.")
+    for a in shown:
+        stale = " (old)" if a.stale else ""
+        console.print(f"{a.id:>4}  {a.status:<9} {a.kind:<11} {a.title}{stale}")
+
+
+board_app = typer.Typer(help="The work board on Buddy's window: what is being done now, next, and what is blocked.")
+app.add_typer(board_app, name="board")
+
+
+def _board():
+    from .board import Board
+
+    return Board(_runtime_dir())
+
+
+@board_app.callback(invoke_without_command=True)
+def board_show(ctx: typer.Context) -> None:
+    """Show the board (with no subcommand)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    view = _board().view(load_settings().listen.board_ticket_url)
+    if not any(view.values()):
+        console.print("The board is empty. Add: buddy board add \"<title>\" --status now [--ticket KEY-1]")
+    for status, items in view.items():
+        for item in items:
+            ticket = f" [{item['ticket']}{' · ' + item['ticket_status'] if item['ticket_status'] else ''}]" if item["ticket"] else ""
+            extra = f" — blocked: {item['blocker']}" if item["blocker"] else (f" — {item['note']}" if item["note"] else "")
+            console.print(f"{item['id']:>3}  {status:<8} {item['title']}{ticket}{extra}", markup=False)
+
+
+def _board_call(action, key=None):
+    from .board import suggested_move, ticket_move
+
+    board = _board()
+    try:
+        previous = board._find(board.items(), key).status if key is not None else ""
+    except LookupError:
+        previous = ""
+    try:
+        item = action()
+    except (LookupError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    console.print(f"Board item {item.id} ({item.status}): {item.title}", markup=False)
+    target = suggested_move(item, previous)
+    if target:
+        card = ticket_move(_runtime_dir(), item, target, ticket_url=load_settings().listen.board_ticket_url)
+        if card is not None:
+            console.print(f"Proposed action {card.id}: {card.title}", markup=False)
+
+
+@board_app.command("add")
+def board_add(
+    title: str = typer.Argument(..., help="A few words: what is being done."),
+    status: str = typer.Option("next", "--status", "-s", help="now, next, blocked or done."),
+    ticket: str = typer.Option("", "--ticket", "-t", help="Jira key, e.g. QCMVEN-4625."),
+    link: str = typer.Option("", "--link", "-l"),
+    blocker: str = typer.Option("", "--blocker", "-b", help="Why it is blocked, in a few words."),
+    note: str = typer.Option("", "--note", "-n", help="One short line: the next step, a PR."),
+) -> None:
+    """Add an item to the board."""
+    _board_call(lambda: _board().add(title, status, ticket, link, blocker, note))  # new: no move suggested
+
+
+@board_app.command("set")
+def board_set(
+    item: str = typer.Argument(..., help="The item's number or its ticket key."),
+    status: str = typer.Option(None, "--status", "-s", help="now, next, blocked or done."),
+    title: str = typer.Option(None, "--title"),
+    ticket: str = typer.Option(None, "--ticket", "-t"),
+    link: str = typer.Option(None, "--link", "-l"),
+    blocker: str = typer.Option(None, "--blocker", "-b"),
+    note: str = typer.Option(None, "--note", "-n"),
+    ticket_status: str = typer.Option(None, "--ticket-status", help="The ticket's status in Jira."),
+    ticket_assignee: str = typer.Option(None, "--ticket-assignee"),
+) -> None:
+    """Change an item: its status, blocker, note or ticket."""
+    _board_call(lambda: _board().set(item, title, status, ticket, link, blocker, note, ticket_status, ticket_assignee), item)
+
+
+@board_app.command("done")
+def board_done(item: str = typer.Argument(..., help="The item's number or its ticket key.")) -> None:
+    """Mark an item done (shown under Done today, then gone)."""
+    _board_call(lambda: _board().set(item, status="done"), item)
+
+
+@board_app.command("move-ticket")
+def board_move_ticket(
+    item: str = typer.Argument(..., help="The item's number or its ticket key."),
+    target: str = typer.Argument(..., help="The Jira status to move it to, e.g. \"Code Review\"."),
+    reason: str = typer.Option("", "--reason", "-r", help="Why, in a few words: \"PR #18 open\"."),
+) -> None:
+    """Propose moving an item's ticket in Jira: a card to approve, never a move by itself."""
+    from .board import ticket_move
+
+    board = _board()
+    try:
+        found = board._find(board.items(), item)
+    except LookupError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    card = ticket_move(_runtime_dir(), found, target, reason, load_settings().listen.board_ticket_url)
+    if card is None:
+        console.print("Nothing to propose: no ticket, already there, or already waiting on a card.")
+        return
+    console.print(f"Proposed action {card.id}: {card.title}", markup=False)
+
+
+@board_app.command("rm")
+def board_rm(item: str = typer.Argument(..., help="The item's number or its ticket key.")) -> None:
+    """Remove an item."""
+    _board_call(lambda: _board().remove(item))
+
+
+@board_app.command("tickets")
+def board_tickets() -> None:
+    """The open tickets on the board, one per line (for a job that syncs their status)."""
+    for key in _board().tickets():
+        console.print(key)
 
 
 @app.command()
@@ -482,6 +666,104 @@ def resume() -> None:
     _require_listener()
     request(_runtime_dir(), "resume")
     console.print("Resume requested.")
+
+
+# ------------------------------------------------------------------- voices
+
+voices_app = typer.Typer(no_args_is_help=True, help="Voices Buddy remembers for listen.speaker_names (this machine only).")
+app.add_typer(voices_app, name="voices")
+
+
+def _voice_book():
+    from .speakers import VoiceBook
+
+    return VoiceBook(_runtime_dir() / "voices.json")
+
+
+@voices_app.command("setup")
+def voices_setup() -> None:
+    """Download the local voice model (26 MB, checked against its digest)."""
+    from .speakers import download_model
+
+    settings = load_settings()
+    if settings.listen.voice_model:
+        console.print(f"listen.voice_model is set; using {settings.listen.voice_model}.")
+        return
+    from .speakers import VOICE_MODEL_FILE, VOICE_MODEL_URL
+
+    target = _runtime_dir() / "models"
+    try:
+        path = download_model(target)
+    except OSError as exc:  # no network, or a TLS-inspecting proxy Python does not trust
+        console.print(
+            f"[red]Could not download the voice model: {exc}.[/red]\n"
+            f"Download {VOICE_MODEL_URL} yourself and save it as {target / VOICE_MODEL_FILE} "
+            "then run `buddy voices setup` again to check its digest; or set listen.voice_model."
+        )
+        raise typer.Exit(code=1)
+    console.print(f"Voice model ready: {path}")
+
+
+@voices_app.command("list")
+def voices_list() -> None:
+    """Show the remembered voices."""
+    book = _voice_book()
+    if not book.voices:
+        console.print("No voices remembered.")
+        return
+    table = Table("Name", "Lines heard", "Updated")
+    for name in book.names():
+        entry = book.voices[name]
+        table.add_row(name, str(entry.get("count", "")), str(entry.get("updated", "")))
+    console.print(table)
+
+
+@voices_app.command("forget")
+def voices_forget(
+    name: str = typer.Argument("", help="The name to forget"),
+    everyone: bool = typer.Option(False, "--all", help="Forget every voice"),
+) -> None:
+    """Delete one remembered voice, or all of them."""
+    if not name and not everyone:
+        console.print("Name a voice, or pass --all.")
+        raise typer.Exit(code=2)
+    book = _voice_book()
+    removed = book.forget(None if everyone else name)
+    book.save()
+    console.print(f"Forgot: {', '.join(removed)}" if removed else "Nothing to forget.")
+
+
+@voices_app.command("name")
+def voices_name(
+    meeting: str = typer.Argument(..., help="Meeting folder name, e.g. 2026-01-05_100000"),
+    voice: str = typer.Argument(..., help="The meeting's voice label, e.g. C"),
+    name: str = typer.Argument(..., help="Who it was"),
+) -> None:
+    """Remember a voice the meeting could not name by itself."""
+    from .speakers import name_voice
+
+    settings = load_settings()
+    meetings = Path(settings.meetings_dir).expanduser()
+    if not meetings.is_absolute():
+        meetings = project_root() / meetings
+    if not name_voice(meetings / meeting, voice.upper(), name, _voice_book()):
+        console.print(f"No voice {voice} in {meetings / meeting / 'voices.json'}.")
+        raise typer.Exit(code=1)
+    console.print(f"Voice {voice.upper()} of {meeting} is now remembered as {name}.")
+@app.command()
+def mic(mode: str = typer.Argument("", help="auto, on or off; empty shows the current setting")) -> None:
+    """Whether your microphone's meeting lines are kept: follow the meeting app's mute (auto), always, or never."""
+    from .mic_gate import MODES, read_mode, write_mode
+
+    path = _runtime_dir() / "listen" / "mic.json"
+    if not mode:
+        console.print(f"Microphone: {read_mode(path)}")
+        return
+    if mode not in MODES:
+        console.print("Use `buddy mic auto`, `buddy mic on` or `buddy mic off`.")
+        raise typer.Exit(code=2)
+    write_mode(path, mode)
+    console.print(f"Microphone: {mode}")
 
 
 if __name__ == "__main__":

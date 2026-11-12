@@ -67,8 +67,11 @@ work wherever the user already codes.
 
 ### 4. Understand participants, not just sources
 
-- Diarisation of remote participants.
-- Optional voice-to-name association, always confirmed by the user.
+- ~~Diarisation of remote participants.~~ `listen.speaker_names` (voice embeddings, screen outline, or both).
+- ~~Optional voice-to-name association, always confirmed by the user.~~ A name comes only from the meeting
+  app's own label for the outlined tile, or from the user (`buddy voices name`); Buddy never guesses one.
+  Remembering voices across meetings is a separate opt-in (`listen.remember_voices`).
+- Reading the speaker outline in apps other than Teams (Zoom, Meet), and on Windows and Linux.
 - Overlapping-speech detection and better separation of acoustic bleed.
 
 ### 5. Widen the useful context

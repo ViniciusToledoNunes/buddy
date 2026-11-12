@@ -128,6 +128,14 @@ opening, being sent and being cancelled (`listen.sounds: false` turns them off).
 Control commands — meetings, pause, shutdown — take effect immediately, need no closing phrase, and never reach
 the agent. Commands are in English: the ASR uses an English-only model, which is faster and more accurate.
 
+**Microphone only when you ask.** By default (`listen.wake_phrase: false`) the listener waits paused between
+meetings and opens the microphone only while a meeting is recorded (the window's Meeting button, the hotkey or
+`buddy meeting start`) or while the window's 🎤 is on, closing it again after. To give Buddy an instruction by
+voice, click 🎤, speak, and click it again: the words land in the window's box to read, fix and send (Buddy waits
+`listen.dictation_grace_seconds` for the last ones). Dictation never enters the meeting's transcript. Commands are
+otherwise typed in the window or sent with `buddy say`. `listen.wake_phrase: true` brings back the always-on
+"Hey Buddy" between meetings and as a spoken command during them.
+
 **What is kept.** Speech that does not open with the wake phrase and is not part of a meeting is transcribed in
 memory and discarded. Meetings are recorded in full, about 44 KB of text per hour. System audio is captured only
 while a meeting is being recorded.
@@ -141,6 +149,65 @@ per utterance would flood the monitor, and an agent turn takes 40 to 90 seconds.
 **Several readers.** Every `buddy watch --as <name>` has its own cursor on disk. A second session does not
 consume the first one's events, and a monitor that expired receives what it missed when it comes back. `--peek`
 looks without advancing.
+
+**Your microphone follows the meeting app's mute.** Most of a call you are muted, and the microphone still hears
+you: someone in the room, or the call itself through the speakers. With `listen.mic_follows_mute: true` (macOS), a
+small helper reads the meeting app's microphone button through the Accessibility permission — "Unmute mic" in
+Teams, "Turn on microphone" in Google Meet (Chrome, Edge, Arc, Brave), "Unmute audio" in Zoom — and your lines are
+kept only while the app can hear you, plus 15 seconds, since a line is transcribed after it ends. Commands to Buddy
+still work while muted. Grant Accessibility to the app that starts Buddy (Terminal, or your editor) in System
+Settings → Privacy & Security → Accessibility. `buddy mic on|off|auto` overrides the app; with no app found,
+`listen.mic_when_unknown` keeps or drops the lines.
+
+**Who is talking.** System audio is one stream, so every line from the other side is `REMOTE`. With
+`listen.speaker_names`, Buddy puts a name on it:
+
+- `screen` (macOS, Teams): while the other side talks, Buddy looks at the screen every couple of seconds, finds
+  the tile the meeting app outlines around whoever is speaking, and reads the name on it with the on-device Vision
+  framework. The capture is deleted as soon as it is read.
+- `voice`: a small local voice model (WeSpeaker ResNet34, 26 MB, CC BY 4.0; `buddy voices setup` downloads it)
+  turns each line of a second or more into a voice embedding, and lines with close embeddings are one voice:
+  `REMOTE (voice B)`.
+- `both`: the screen names the voices, and a named voice keeps its name when the screen shows nobody: a shared
+  screen, a camera off, two people at once.
+
+In Teams, Buddy also reads the call's participant list through the Accessibility permission (the same helper and
+permission as `listen.mic_follows_mute`). A name read off the screen must then be one of the participants, which
+turns a label the app cut short ("Thornton, Bra...") into the full name and drops text read off a shared slide;
+and when exactly one person on the other side is unmuted, the line is theirs. A line under three seconds joins
+the closest voice but never starts a new one.
+
+A line reads `REMOTE (Dana Reyes)`, `REMOTE (Dana Reyes?)` while the name is not settled (fewer than
+`listen.speaker_votes_needed` sightings), or `REMOTE (voice B)`. Your own tile is never given to a REMOTE line
+(`listen.speaker_self_names`, plus `listen.question_names`). With `listen.remember_voices: true`, a voice the
+screen named is remembered for later meetings, as one mean embedding per name in `.meeting-agent/voices.json`
+(never audio); `buddy voices list`, `buddy voices forget <name>|--all`. A voice nobody named is listed in
+`MEETING_END` as `unnamed_voices=`; `buddy voices name <meeting> <voice> "<name>"` names it afterwards.
+
+**Work board.** A few lines at the top of Buddy's window show where your work stands: **Now**, **Next**,
+**Blocked** (in red, with the reason) and **Done today**, each with its ticket key when there is one (linked
+through `listen.board_ticket_url`, e.g. `https://example.atlassian.net/browse/{key}`, and with its status when a
+job keeps it in sync). During a meeting it shrinks to one line, "Now: …". The watching session keeps it current
+as things happen: `buddy board add "<title>" --status now|next|blocked|done [--ticket KEY-1] [--note ...]`,
+`buddy board set <n|KEY-1> --status blocked --blocker "<why>"`, `buddy board done <n>`, `buddy board rm <n>`;
+`buddy board` prints it and `buddy board tickets` lists its open tickets. It lives in `.meeting-agent/board.json`.
+When ticketed work moves on, Buddy proposes moving the ticket too, as a card to approve: `board done` suggests Done,
+moving an item to now suggests In Progress (when Jira still says To Do), and the session proposes others as they
+happen (`buddy board move-ticket <n|KEY-1> "Code Review" --reason "PR #18 open"`). A ticket is never moved without
+that click.
+
+**Action cards.** What the watching Claude Code session proposes to do for you (reply to a thread, review a
+PR, look into an error, merge, comment) shows as a card in Buddy's window, with the exact text when it leaves your
+machine, and **Approve**, **Edit** and **Dismiss**. Approving sends `ACTION_APPROVED` to the session, which does
+exactly what the card shows and reports back; the card turns green with the result, or red with why it failed.
+A reply nothing here can send (`--mode copy`) is copied to the clipboard and its thread opened instead. The session
+creates cards with `buddy propose "<title>" --kind reply|review|investigate|merge|post|run|other --detail "..."
+--link <url>` and reports with `buddy action <n> running|done|failed --result "..."`; `buddy actions` lists them.
+Cards live in `.meeting-agent/actions/`, one file each; a proposal runs at most once, and one from yesterday is
+marked as such.
+
+The window says "Claude connected" while a session follows Buddy (`buddy watch --follow`) or checks for events in
+a loop (`buddy watch`, seen in the last 90 seconds); otherwise the built-in brain answers meetings.
 
 Other controls: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. The MCP server (`meeting_status`,
 `get_live_transcript`, `stop_meeting`) sees meetings opened by the listener.
@@ -187,6 +254,10 @@ buddy say "review PR 123"  # a typed command
   is never displayed. Text is always rendered as text, never as markup.
 - **Anything that leaves the machine takes two steps.** Posting, commenting, approving, merging, creating a
   ticket: the agent drafts it and acts only after you approve that exact text.
+- **Naming speakers is opt-in.** `listen.speaker_names` looks at the screen while the other side talks, and its
+  `voice` mode computes voice embeddings, which can identify a person. Both stay on the machine; voices are kept
+  across meetings only with `listen.remember_voices`, and `buddy voices forget --all` deletes them. Tell the
+  participants, as you would about the recording.
 - **Nothing sensitive belongs in the repository.** Recordings, `config.yaml`, `.env` and ASR models are
   gitignored.
 
@@ -245,7 +316,8 @@ transcript.txt      readable transcript, written as each utterance lands
 transcript.jsonl    the same, structured
 suggestions.md      everything the panel suggested, with its reasoning
 summary.md          the final report
-metadata.json       start, end, ASR backend and subsystem failures
+metadata.json       start, end, ASR backend, subsystem failures, and who was named (listen.speaker_names)
+voices.json         each voice's embedding this meeting, for `buddy voices name` (voice mode only)
 copilot.json        memory, current suggestions, usage, last error, denied calls, brain session id
 ```
 
@@ -268,7 +340,9 @@ Capture, ASR, storage, UI and the model are isolated, so one failing subsystem d
 
 ## Limitations
 
-- `ME` and `REMOTE` are physical sources, not people. There is no diarisation.
+- `ME` and `REMOTE` are physical sources, not people, unless `listen.speaker_names` is on. Reading the screen is
+  tuned to Teams' outline on macOS; other apps, or a layout with no outlined tile, leave the voice alone to tell
+  people apart. The voice model was measured on synthetic voices and Teams screenshots, not yet on a full meeting.
 - The listening mode needs Claude Code; other agents can read `buddy watch` on request, but nothing wakes them.
 - Suggestion quality during a live meeting has not been measured yet; that is the next test.
 - Each update takes 40 to 90 seconds. The panel follows the meeting; it does not answer a question on the spot.

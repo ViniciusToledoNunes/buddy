@@ -39,7 +39,7 @@ class FakeStream:
 
 
 def _daemon(tmp_path):
-    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False}})
+    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False, "wake_phrase": True}})
     daemon = ListenDaemon(settings, tmp_path / "runtime", stream_factory=FakeStream)
     daemon.chime = lambda kind: None
     daemon.claim()
@@ -422,10 +422,22 @@ def test_the_window_sends_typed_commands_and_controls(tmp_path):
     assert api.send("   ")["ok"] is False
     assert api.send("x" * 5000)["ok"] is False
     assert api.control("start-meeting") == {"ok": True}
+    assert api.control("dictate-start") == {"ok": True}
+    assert api.control("dictate-stop") == {"ok": True}
     assert api.control("rm -rf")["ok"] is False
 
     assert sent == ["review PR 123"]
-    assert controlled == ["start-meeting"]
+    assert controlled == ["start-meeting", "dictate-start", "dictate-stop"]
+
+
+async def test_the_window_sees_the_dictation_as_it_is_said(tmp_path):
+    daemon = _daemon(tmp_path)
+    view = LiveView(daemon.runtime_dir)
+    await daemon.start_dictation()
+    await daemon.on_final(TranscriptEvent("ME", "review PR 123", True, "u"))
+
+    assert view.status()["dictation"] == {"active": True, "text": "review PR 123", "id": 0}
+    assert 'id="dictate"' in PAGE and 'id="activity-head"' in PAGE
 
 
 def test_the_window_filters_and_pins(tmp_path):
@@ -523,3 +535,19 @@ async def test_a_new_suggestion_set_goes_below_the_ones_being_read(tmp_path):
     _write(session, _queued(BUDDY_BATCH), _assistant({"type": "text", "text": "7. Say A4\n8. Say B4"}))
     view.poll()
     assert len(view.status()["suggestions"]) == 6  # the same set again is not stacked twice
+
+
+def test_a_session_checking_in_a_loop_counts_as_connected(tmp_path, monkeypatch):
+    import time as clock
+
+    from meeting_agent import listener
+    from meeting_agent.live import brain_seen, brain_state
+
+    runtime = tmp_path / "runtime"
+    brain_seen(runtime, "session-1", "claude-code")
+    monkeypatch.setattr(listener, "process_alive", lambda state: False)  # the one-shot watch has exited
+    assert brain_state(runtime)["watching"] is True  # its watch process has exited, but it was just seen
+
+    later = clock.time() + 120
+    monkeypatch.setattr(clock, "time", lambda: later)
+    assert brain_state(runtime)["watching"] is False  # not seen for two minutes: gone

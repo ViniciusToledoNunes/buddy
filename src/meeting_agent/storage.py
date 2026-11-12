@@ -57,7 +57,7 @@ class MeetingStorage:
             self._final_events.append(event)
             local_time = datetime.fromisoformat(event.timestamp).astimezone().strftime("%H:%M:%S")
             with self.transcript_txt.open("a", encoding="utf-8") as handle:
-                handle.write(f"[{local_time}] {event.speaker}: {event.text}\n")
+                handle.write(f"[{local_time}] {event.who}: {event.text}\n")
 
     def finish(self, summary: str) -> None:
         self.summary_md.write_text(summary.rstrip() + "\n", encoding="utf-8")

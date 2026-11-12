@@ -55,18 +55,20 @@ final class AudioOutput: NSObject, SCStreamOutput, SCStreamDelegate {
                 resampler = Resampler(inputRate: description.mSampleRate, outputRate: targetRate)
             }
         }
-        var lengthAtOffset = 0
-        var totalLength = 0
-        var pointer: UnsafeMutablePointer<Int8>?
-        let status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &pointer)
-        guard status == kCMBlockBufferNoErr, let pointer, totalLength > 0 else { return }
-        guard let resampler else {
-            FileHandle.standardOutput.write(Data(bytes: pointer, count: totalLength))
-            return
-        }
+        // A block buffer can hold its audio in several pieces. Reading `totalLength` bytes from
+        // the first piece's pointer ran past it into unrelated memory, which reached the ASR as
+        // huge sample values and silenced the transcript; copy every piece instead.
+        let totalLength = CMBlockBufferGetDataLength(block)
         let count = totalLength / MemoryLayout<Float>.size
-        let input = pointer.withMemoryRebound(to: Float.self, capacity: count) {
-            Array(UnsafeBufferPointer(start: $0, count: count))
+        guard count > 0 else { return }
+        var input = [Float](repeating: 0, count: count)
+        let status = input.withUnsafeMutableBytes {
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: count * MemoryLayout<Float>.size, destination: $0.baseAddress!)
+        }
+        guard status == kCMBlockBufferNoErr else { return }
+        guard let resampler else {
+            input.withUnsafeBytes { FileHandle.standardOutput.write(Data($0)) }
+            return
         }
         let output = resampler.process(input)
         if !output.isEmpty { output.withUnsafeBytes { FileHandle.standardOutput.write(Data($0)) } }
