@@ -83,6 +83,33 @@ def buddy_tool_command() -> str:
     return Path(found).as_posix() if found else "buddy"
 
 
+def brain_system_prompt(settings: Settings, meetings_dir: Path | None) -> str:
+    """The brain's instructions, the same whichever harness runs it."""
+    copilot = settings.copilot
+    parts = [BRAIN_SYSTEM_PROMPT.replace("{language}", copilot.output_language)]
+    if meetings_dir is not None:
+        parts.append(
+            f"Earlier meetings live in {meetings_dir.as_posix()}/<meeting id>/, each with "
+            "transcript.txt, summary.md and copilot.json. Grep them when the conversation "
+            "revisits earlier work."
+        )
+    if copilot.claude_connectors:
+        command = buddy_tool_command()
+        parts.append(
+            f"For BigQuery and Datadog, run exactly `{command} tool <name> '<json arguments>'`; "
+            f"`{command} tool --list` shows the tools. They are read-only and refuse any query "
+            "that would scan too much."
+        )
+    from .working_memory import memory_prompt
+
+    memory = memory_prompt(settings.memory.directory(), sources=settings.memory.source_paths())
+    if memory:
+        parts.append(memory)
+    if copilot.claude_instructions.strip():
+        parts.append(copilot.claude_instructions.strip())
+    return "\n\n".join(parts)
+
+
 async def _terminate(process: Any) -> None:
     """Stop a Claude Code run and everything it started.
 
@@ -131,8 +158,7 @@ class ClaudeCodeProvider(LLMProvider):
 
     @property
     def workdir(self) -> Path:
-        configured = self.settings.copilot.claude_workdir.strip()
-        return Path(configured).expanduser() if configured else Path.home()
+        return self.settings.brain.directory()
 
     def available(self) -> bool:
         return claude_binary() is not None and self.workdir.is_dir()
@@ -155,24 +181,7 @@ class ClaudeCodeProvider(LLMProvider):
         return tools
 
     def system_prompt(self) -> str:
-        copilot = self.settings.copilot
-        parts = [BRAIN_SYSTEM_PROMPT.replace("{language}", copilot.output_language)]
-        if self.meetings_dir is not None:
-            parts.append(
-                f"Earlier meetings live in {self.meetings_dir.as_posix()}/<meeting id>/, each with "
-                "transcript.txt, summary.md and copilot.json. Grep them when the conversation "
-                "revisits earlier work."
-            )
-        if copilot.claude_connectors:
-            command = buddy_tool_command()
-            parts.append(
-                f"For BigQuery and Datadog, run exactly `{command} tool <name> '<json arguments>'`; "
-                f"`{command} tool --list` shows the tools. They are read-only and refuse any query "
-                "that would scan too much."
-            )
-        if copilot.claude_instructions.strip():
-            parts.append(copilot.claude_instructions.strip())
-        return "\n\n".join(parts)
+        return brain_system_prompt(self.settings, self.meetings_dir)
 
     def command(self, system: str) -> list[str]:
         copilot = self.settings.copilot
@@ -195,13 +204,18 @@ class ClaudeCodeProvider(LLMProvider):
         else:
             self.session_id = self.session_id or str(uuid.uuid4())
             command += ["--session-id", self.session_id]
-        if copilot.claude_model:
-            command += ["--model", copilot.claude_model]
-        if copilot.claude_effort:
-            command += ["--effort", copilot.claude_effort]
+        brain = self.settings.brain
+        if brain.model:
+            command += ["--model", brain.model]
+        if brain.effort:
+            command += ["--effort", brain.effort]
         if not copilot.claude_mcp:
             command.append("--strict-mcp-config")
         directories = [str(Path(d).expanduser()) for d in copilot.claude_extra_dirs]
+        memory = self.settings.memory.directory()
+        if memory.is_dir():
+            directories.insert(0, str(memory))
+        directories += [str(path) for path in self.settings.memory.source_paths() if path.is_dir()]
         if self.meetings_dir is not None:
             directories.insert(0, str(self.meetings_dir))
         if directories:

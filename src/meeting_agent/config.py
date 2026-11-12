@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -64,11 +67,7 @@ class CopilotConfig(BaseModel):
     investigations_in_flight: int = Field(1, ge=1, le=4)
     # Connectors reach real company data, so they are read-only and a query that would
     # scan more than the limit is refused on the free dry run instead of being billed.
-    # The brain: the user's own Claude Code, run headless (llm_provider: claude-code).
-    # It runs in claude_workdir so it loads the CLAUDE.md that describes the user's work.
-    claude_workdir: str = ""
-    claude_model: str = ""
-    claude_effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
+    # Options of the Claude Code harness (brain.harness: claude-code).
     claude_timeout_seconds: float = Field(240.0, ge=20, le=900)
     # User-level settings are left out on purpose: they commonly allow git push and
     # similar, which an unattended run must never inherit.
@@ -183,9 +182,9 @@ class ListenConfig(BaseModel):
     # A question from the other side sends the current batch at once instead of waiting
     # for the interval. A line counts when it has a "?" and more than three words ("Right?"
     # is a tag, not a question), or names the user.
-    # When no Claude Code session follows the listener, Buddy runs its own brain (Claude
-    # Code headless, the `copilot.claude_*` settings) on each batch, shows its suggestions
-    # in the window and writes the meeting summary. A watching session always takes over.
+    # When no agent session follows the listener, Buddy runs its own brain (the `brain`
+    # harness, headless) on each batch, shows its suggestions in the window and writes the
+    # meeting summary. A watching session always takes over.
     auto_brain: bool = True
     question_alerts: bool = True
     question_names: list[str] = []          # e.g. ["Vinicius", "Vinny"]: always count, even when short
@@ -219,15 +218,94 @@ class BenchmarkConfig(BaseModel):
     models: list[str] = ["tiny.en", "base.en", "distil-small.en"]
 
 
+class CursorBrainConfig(BaseModel):
+    """Options of the Cursor harness (brain.harness: cursor)."""
+
+    # Without it the CLI refuses every shell command, and the agent spent 56s of one
+    # turn retrying a refused command instead of answering.
+    force: bool = True
+    timeout_seconds: float = Field(240.0, ge=20, le=900)
+
+
+class BrainConfig(BaseModel):
+    """The agent Buddy runs headless as its brain (llm_provider: harness, and the auto brain)."""
+
+    harness: Literal["claude-code", "cursor"] = "claude-code"
+    model: str = ""  # empty: the harness's own default
+    # Claude Code only; Cursor names the effort in the model, as in gpt-5.3-codex-high.
+    effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
+    # The brain runs here, so it loads the context files that describe the user's work.
+    workdir: str = ""
+    cursor: CursorBrainConfig = CursorBrainConfig()
+
+    def directory(self) -> Path:
+        configured = self.workdir.strip()
+        return Path(configured).expanduser() if configured else Path.home()
+
+
+class MemoryConfig(BaseModel):
+    """The user's working memory, read and kept by Buddy's brain and the user's coding agents."""
+
+    # memory/ is gitignored: it holds the user's work. memory.example/ is the empty skeleton
+    # it starts from. A relative path is taken from the Buddy folder.
+    dir: str = "memory"
+    # While the listener runs, changes from any agent go into the folder's own git, so a bad
+    # write is one `git revert` away. 0 turns it off.
+    autocommit_seconds: float = Field(60.0, ge=0, le=3600)
+    # Folders the brain may read for context and never changes: past agent conversations,
+    # agent rules, repositories. Leave out anything that holds credentials.
+    sources: list[str] = []
+    # Local times (HH:MM) when the brain checks the memory against the real state of the work.
+    refresh_at: list[str] = []
+
+    @field_validator("refresh_at")
+    @classmethod
+    def _times(cls, value: list[str]) -> list[str]:
+        for moment in value:
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", moment):
+                raise ValueError(f"refresh_at takes HH:MM times, not {moment!r}")
+        return sorted(set(value))
+
+    def source_paths(self) -> list[Path]:
+        """The sources that exist here, files or folders."""
+        return [path for path in (Path(s).expanduser() for s in self.sources) if path.exists()]
+
+    def directory(self) -> Path:
+        path = Path(self.dir).expanduser()
+        return path if path.is_absolute() else project_root() / path
+
+
+class SlackConfig(BaseModel):
+    """New Slack messages, from the log a separate Slack watcher writes (see slack_watch.py)."""
+
+    enabled: bool = False
+    # The watcher's log, one file per day: {date} becomes YYYY-MM-DD.
+    log: str = ""
+    # Bots and busy channels that never need the user; everything else goes to the brain,
+    # which decides with the user's memory what deserves a card.
+    ignore_channels: list[str] = []
+    ignore_authors: list[str] = []
+    # How the brain reads a conversation, builds a link to a message, and what it must never run.
+    instructions: str = ""
+    poll_seconds: float = Field(15.0, ge=2, le=600)
+
+
+# Configuration written before the harness could be chosen named Claude Code's settings.
+LEGACY_BRAIN_KEYS = {"claude_workdir": "workdir", "claude_model": "model", "claude_effort": "effort"}
+
+
 class Settings(BaseModel):
     language: Literal["en", "pt", "auto"] = "en"
     asr_mode: Literal["auto", "local-gpu", "local-cpu"] = "auto"
-    llm_provider: Literal["auto", "claude-code", "openai", "anthropic", "ollama", "disabled"] = "auto"
+    llm_provider: Literal["auto", "harness", "openai", "anthropic", "ollama", "disabled"] = "auto"
     save_audio: bool = False
     meetings_dir: str = "meetings"
     # Extra env files to load, the way a wrapper script sources them. Credentials that
     # live in a file and are never exported are invisible to a plain environment read.
     env_files: list[str] = []
+    brain: BrainConfig = BrainConfig()
+    memory: MemoryConfig = MemoryConfig()
+    slack: SlackConfig = SlackConfig()
     audio: AudioConfig = AudioConfig()
     asr: ASRConfig = ASRConfig()
     copilot: CopilotConfig = CopilotConfig()
@@ -235,6 +313,33 @@ class Settings(BaseModel):
     hotkeys: HotkeyConfig = HotkeyConfig()
     ui: UIConfig = UIConfig()
     benchmark: BenchmarkConfig = BenchmarkConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_brain(cls, data: object) -> object:
+        """`llm_provider: claude-code` and `copilot.claude_workdir/model/effort` still work.
+
+        They become the Claude Code harness and its `brain` settings; a key the `brain`
+        block sets itself wins over its legacy twin.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        raw_brain = data.get("brain")
+        brain = dict(raw_brain) if isinstance(raw_brain, dict) else {}
+        copilot = data.get("copilot")
+        if isinstance(copilot, dict):
+            copilot = dict(copilot)
+            for legacy, key in LEGACY_BRAIN_KEYS.items():
+                if legacy in copilot:
+                    brain.setdefault(key, copilot.pop(legacy))
+            data["copilot"] = copilot
+        if data.get("llm_provider") == "claude-code":
+            data["llm_provider"] = "harness"
+            brain.setdefault("harness", "claude-code")
+        if brain and (raw_brain is None or isinstance(raw_brain, dict)):
+            data["brain"] = brain
+        return data
 
 
 def anthropic_workspace_id() -> str:
@@ -280,6 +385,58 @@ def load_settings(path: Path | None = None) -> Settings:
     settings = Settings.model_validate(data)
     load_env_files(settings)
     return settings
+
+
+_BRAIN_BLOCK = re.compile(r"^brain:[ \t]*(#.*)?$")
+_BLOCK_KEY = re.compile(r"^(\s+)(\w+):\s*([^#]*?)(\s*#.*)?$")
+
+
+def _yaml_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _with_brain_choice(text: str, values: dict[str, str]) -> str:
+    lines = text.splitlines()
+    if any(line.startswith("brain:") and not _BRAIN_BLOCK.match(line) for line in lines):
+        raise ValueError("the brain block is written inline; edit it by hand")
+    start = next((i for i, line in enumerate(lines) if _BRAIN_BLOCK.match(line)), None)
+    if start is None:
+        block = ["brain:", *(f"  {key}: {_yaml_quoted(value)}" for key, value in values.items())]
+        return text.rstrip("\n") + "\n\n" + "\n".join(block) + "\n"
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end][0] in " \t"):
+        end += 1
+    children = [line for line in lines[start + 1:end] if line.strip() and not line.lstrip().startswith("#")]
+    indent = min((len(line) - len(line.lstrip()) for line in children), default=2)
+    pending = dict(values)
+    for index in range(start + 1, end):
+        match = _BLOCK_KEY.match(lines[index])
+        if match and len(match.group(1)) == indent and match.group(2) in pending:
+            key = match.group(2)
+            lines[index] = f"{match.group(1)}{key}: {_yaml_quoted(pending.pop(key))}{match.group(4) or ''}"
+    lines[start + 1:start + 1] = [f"{' ' * indent}{key}: {_yaml_quoted(value)}" for key, value in pending.items()]
+    return "\n".join(lines) + "\n"
+
+
+def choose_brain(harness: str, model: str = "", path: Path | None = None) -> Path | None:
+    """Writes brain.harness and brain.model into the configuration, keeping its comments.
+
+    The model is written even when empty: model names differ between harnesses, so the
+    previous harness's model would be refused by the next one. Returns the backup made of
+    the file it changed, if there was one.
+    """
+    target = path or config_path()
+    source = target if target.exists() else project_root() / "config.example.yaml"
+    updated = _with_brain_choice(source.read_text(encoding="utf-8"), {"harness": harness, "model": model})
+    written = Settings.model_validate(yaml.safe_load(updated) or {}).brain
+    if (written.harness, written.model) != (harness, model):
+        raise ValueError(f"could not write the brain choice into {target}; edit its brain block by hand")
+    backup = None
+    if target.exists():
+        backup = target.with_name(f"{target.name}.bak-{datetime.now():%Y%m%d-%H%M%S}")
+        shutil.copy2(target, backup)
+    target.write_text(updated, encoding="utf-8")
+    return backup
 
 
 def load_env_files(settings: Settings) -> list[str]:

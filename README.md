@@ -263,11 +263,20 @@ buddy say "review PR 123"  # a typed command
 
 ## How the brain works
 
-With `llm_provider: claude-code`, every analysis is a headless Claude Code run:
+With `llm_provider: harness`, every analysis is a headless run of the agent named in `brain.harness`; the
+listener's auto brain runs the same one. The harness is Claude Code (`claude-code`) or Cursor (`cursor`):
+`buddy brain cursor --model composer-2.5` switches it in `config.yaml`, keeping its comments and a backup, and
+`buddy brain` shows which one runs and whether it can. The listener rereads the choice when a meeting starts.
+Older configs that say `llm_provider: claude-code` and set `copilot.claude_workdir`, `claude_model` or
+`claude_effort` keep working: they become the `brain` settings.
+
+Cursor runs as `cursor-agent -p` in `brain.workdir`, with your Cursor rules, hooks and MCP servers, one chat
+per meeting. Its CLI has no system-prompt option, so the instructions go in the chat's first message.
+`brain.cursor.force` (on by default) lets it run shell commands, which the CLI otherwise refuses. A Claude Code run:
 
 | Decision | Why |
 |---|---|
-| runs in `claude_workdir` | that directory's `CLAUDE.md` describes your work; Buddy has no such knowledge |
+| runs in `brain.workdir` | that directory's `CLAUDE.md` describes your work; Buddy has no such knowledge |
 | `--setting-sources project` | does not inherit user allow-rules, which often permit `git push` |
 | `--permission-mode dontAsk` | nobody is watching to approve; whatever is not allowed is denied |
 | `claude_allowed_tools` / `claude_disallowed_tools` | read-only; write verbs of your helpers blocked explicitly |
@@ -286,13 +295,42 @@ never exported are loaded through `env_files` in `config.yaml`.
 
 **Latency and cost.** Measured on a working conversation: 86s on the first turn (cold start, with a Datadog
 query) and 43s on the next (Jira and git). It is meant for positioning and for questions left hanging, not for
-instant answers. `claude_model: sonnet` or `claude_effort: medium` bring it down. Nothing is billed per token,
+instant answers. `brain.model: sonnet` or `brain.effort: medium` bring it down. Nothing is billed per token,
 but each run counts against your subscription limits; `copilot.json` carries a dollar estimate so you can follow
 it. The model runs only when there is new speech, so silence costs nothing.
 
+**Working memory.** Buddy keeps a memory of your work in `memory/`: `global/` (who you are and how you want
+things done) and `work/` (the plan, projects, people, decisions), each with a `MEMORY.md` index, plus the rules
+every agent follows in `CONVENTIONS.md`. The first `buddy listen` creates it from the empty `memory.example/`
+skeleton. `memory/` is gitignored, so your work never reaches Buddy's repository; it has its own local git, and
+the listener commits any change every minute, so a bad write is one `git revert` away. The meeting brain reads
+it; the brain that answers your commands also keeps it, and updates it from each meeting's summary. Point your
+coding agents at the same folder (for Claude Code, a symlink from its project memory to `memory/work` and an
+`@` import of `memory/global/MEMORY.md` in `~/.claude/CLAUDE.md`) and they all share one memory.
+
+A new memory is filled from the machine: Buddy looks at which tools are installed, which logins are active
+(`gh`, `gcloud`), the names of credential files (never their content), your agent folders and your
+repositories, and the brain writes how to reach each tool (`work/reference_access.md`), who you are and your
+current plan, checking with read-only commands. `buddy memory onboard` runs it again (`--probe` only prints
+what was found), and `buddy memory` shows the memory and its last changes. `memory.refresh_at` (for example
+`["08:30", "17:30"]`) has the brain check the plan against the real state of the work at those times: pull
+requests, tickets, commits, meetings, open Slack threads and cards. A missed time still runs within three
+hours; `buddy memory refresh` runs one now. Both run even while a session follows Buddy, in a queue of their
+own, so your commands are not held up. `memory.sources` lists folders the brain may read for context and
+never changes: past agent conversations (`~/.claude/projects`, `~/.cursor/projects`), agent rules, your
+repositories. Leave out anything that holds credentials, such as `~/.claude.json` or an MCP config.
+
+**Slack.** Buddy holds no Slack credential. A separate watcher (launchd or cron) appends each round of new
+messages to a dated log, and with `slack.enabled` the listener follows it: each round, minus
+`ignore_channels` and `ignore_authors`, shows in the window and goes to the brain, which reads the
+conversation when it needs to and proposes a reply card (`--mode copy`: approving copies the text and opens
+the thread; you send it). A round in the log is a `=== ... ===` line, one `MM-DD HH:MM  author  #channel|DM:id
+[em thread]  ts=<ts>` line per message with its text indented four spaces, and `(N mensagens novas)` or
+`(nada novo)`. `slack.instructions` tells the brain how to read a thread and what it must never run.
+
 **Other providers.** `openai`, `anthropic` and `ollama` still work, with the older engine: preloaded context, a
 project index and a background investigator. None of them knows you the way your own agent session does, and
-`auto` never picks `claude-code` — spending the subscription is an explicit choice.
+`auto` never picks `harness` — spending the subscription is an explicit choice.
 
 ## MCP server and skills
 
@@ -321,7 +359,7 @@ voices.json         each voice's embedding this meeting, for `buddy voices name`
 copilot.json        memory, current suggestions, usage, last error, denied calls, brain session id
 ```
 
-`copilot.json` keeps `brain_session_id`: after the meeting, `claude --resume <id>` in `claude_workdir` reopens
+`copilot.json` keeps `brain_session_id`: after the meeting, `claude --resume <id>` in `brain.workdir` reopens
 the same conversation, with everything the agent read during the call. With `save_audio: false`, the default,
 audio is discarded after processing.
 

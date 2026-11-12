@@ -23,6 +23,12 @@ from .speakers import VOICE_MODEL_FILE, SpeakerTracker, VoiceBook, VoiceModel, p
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
+MEMORY_AFTER_MEETING = """The meeting {meeting} has ended: its summary is {summary} and its transcript \
+{transcript}. Update the user's working memory from it, following CONVENTIONS.md: decisions, what the \
+user committed to or was asked to do, changes in their plan (work/project_open_items.md), and new facts \
+about people or projects. Keep only what will matter later. Then reply with one line saying what you \
+changed, or exactly NOTHING when nothing was worth keeping."""
+
 # "Hey Buddy" opens the utterance. Whisper spells the name a few ways, and "buddy" alone
 # is too common in English conversation to be trusted without the "hey".
 WAKE = re.compile(
@@ -300,6 +306,14 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         # A dictation that closed on silence or length: the user may not have finished.
         note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
         return f'{head} said="{record.get("text", "")}"{note}'
+    if kind == "SLACK":
+        lines = " | ".join(
+            f'{m.get("at")} {m.get("who")} in {m.get("channel")}{" (thread)" if m.get("thread") else ""} '
+            f'ts={m.get("ts")}: {m.get("text", "")}'
+            for m in record.get("messages", [])
+        )
+        text = f"{head} {record.get('text', '')} | {lines}"
+        return text if len(text) <= max_chars else text[: max_chars - 3].rstrip() + "..."
     if kind == "ACTION_APPROVED":
         # The user clicked Approve on this card: do exactly this, then report back.
         outward = " outward=yes" if record.get("outward") else ""
@@ -432,9 +446,26 @@ class ListenDaemon:
         stream_factory: Callable[[str], Stream] | None = None,
         clock: Callable[[], float] = time.monotonic,
         brain_factory: Callable[[], Any] | None = None,
+        brain_settings: Callable[[], Settings] | None = None,
+        answer_commands: bool = False,
+        keep_memory: bool = False,
     ) -> None:
         self.settings = settings
         self._brain_factory = brain_factory
+        # Rereads the configuration when a meeting starts its brain, so `buddy brain`
+        # switches harness or model without restarting the listener.
+        self._brain_settings = brain_settings
+        # The built-in brain also answers the user's commands when no session follows.
+        self._answer_commands = answer_commands
+        self._commands: Any = None
+        self._chores: Any = None
+        # The user's working memory (working_memory.py): created if missing, committed while running.
+        self._memory_dir = settings.memory.directory() if keep_memory else None
+        self._memory_committed = 0.0
+        self._refresh: Any = None
+        self._refresh_checked = 0.0
+        self._slack: Any = None
+        self._slack_polled = 0.0
         self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
         self._brain_off = False  # unavailable this meeting; said once
         self._summary_task: asyncio.Task[None] | None = None
@@ -742,17 +773,32 @@ class ListenDaemon:
         if self.brain is None:
             from .autobrain import AutoBrain, BrainRunner
 
-            brain = self._brain_factory() if self._brain_factory else AutoBrain(self.settings, self.storage.directory.parent)
+            from .harness import harness_for
+
+            settings = self._current_brain_settings()
+            label = harness_for(settings).label
+            brain = self._brain_factory() if self._brain_factory else AutoBrain(settings, self.storage.directory.parent)
             if not brain.available():
                 self._brain_off = True
                 self.events.append("NOTICE", meeting=self.meeting_id,
-                                   text="No Claude Code session is following and the built-in brain is unavailable: no suggestions this meeting.")
+                                   text=f"No Claude Code session is following and the built-in brain is unavailable ({label}): no suggestions this meeting.")
                 return
             self.brain = BrainRunner(brain, self._show_suggestions, self._brain_notice)
             self.events.append("NOTICE", meeting=self.meeting_id,
-                               text="No Claude Code session is following: Buddy's built-in brain is suggesting.")
+                               text=f"No Claude Code session is following: Buddy's built-in brain is suggesting ({label}).")
             self._show("BRAIN", text="Built-in brain on: suggestions come from Buddy itself.")
         self.brain.submit(lines, trigger)
+
+    def _current_brain_settings(self) -> Settings:
+        if self._brain_settings is None:
+            return self.settings
+        try:
+            brain = self._brain_settings().brain
+        except Exception as exc:  # a config caught mid-edit must not cost the meeting its brain
+            self.events.append("NOTICE", meeting=self.meeting_id,
+                               text=f"Could not reread the brain settings, keeping the ones loaded at start: {exc}")
+            return self.settings
+        return self.settings.model_copy(update={"brain": brain})
 
     def _show_suggestions(self, suggestions: list[str]) -> None:
         self._show("SUGGEST", meeting=self.meeting_id, items=suggestions)
@@ -770,6 +816,93 @@ class ListenDaemon:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain wrote the summary: {storage.summary_md}")
         except Exception as exc:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain could not write the summary: {type(exc).__name__}: {exc}")
+            return
+        if self._memory_dir is not None:
+            self._hand_to_brain(MEMORY_AFTER_MEETING.format(
+                meeting=storage.directory.name, summary=storage.summary_md, transcript=storage.transcript_txt,
+            ), quiet=True)
+
+    # ----------------------------------------------------------------- memory
+
+    async def _start_memory(self) -> None:
+        if self._memory_dir is None:
+            return
+        from .working_memory import ensure_memory
+
+        try:
+            created = await asyncio.to_thread(ensure_memory, self._memory_dir)
+        except Exception as exc:  # the memory is a help; listening must go on without it
+            self.events.append("NOTICE", text=f"Could not start the working memory: {type(exc).__name__}: {exc}")
+            self._memory_dir = None
+            return
+        if self._answer_commands and self.settings.memory.refresh_at:
+            from .memory_tasks import RefreshSchedule
+
+            self._refresh = RefreshSchedule(self.settings.memory.refresh_at, self.runtime_dir / "memory-refresh.json")
+        if created:
+            self.events.append("NOTICE", text=f"Started the working memory in {self._memory_dir}.")
+            await self._onboard()
+
+    async def _onboard(self) -> None:
+        """A new memory is empty: the brain fills it from what this machine has."""
+        from .memory_tasks import onboard_prompt, probe_machine
+
+        if not (self._answer_commands and self.settings.listen.auto_brain):
+            return
+        try:
+            probe = await asyncio.to_thread(probe_machine)
+        except Exception as exc:
+            self.events.append("NOTICE", text=f"Could not look around the machine: {type(exc).__name__}: {exc}")
+            return
+        self.events.append("NOTICE", text="Setting up the working memory from this machine; `buddy memory` shows it.")
+        self._hand_to_brain(onboard_prompt(probe), chore=True)
+
+    def _refresh_memory(self, slot: str) -> None:
+        from .claude_code import buddy_tool_command
+        from .memory_tasks import refresh_prompt
+
+        self.events.append("NOTICE", text=f"Checking the working memory against the real state of the work ({slot}).")
+        self._hand_to_brain(refresh_prompt(slot, self._meetings_dir(), buddy_tool_command()), quiet=True, chore=True)
+
+    # ------------------------------------------------------------------ slack
+
+    def _start_slack(self) -> None:
+        slack = self.settings.slack
+        if not (self._answer_commands and slack.enabled and slack.log.strip()):
+            return
+        from .slack_watch import SlackFollower
+
+        self._slack = SlackFollower(slack.log.strip())
+
+    async def _poll_slack(self) -> None:
+        from .slack_watch import keep
+
+        slack = self.settings.slack
+        try:
+            rounds = await asyncio.to_thread(self._slack.poll)
+        except Exception as exc:  # an unreadable log must never stop the listening
+            self.events.append("NOTICE", text=f"Could not read the Slack log: {type(exc).__name__}: {exc}")
+            return
+        for messages in rounds:
+            messages = keep(messages, slack.ignore_channels, slack.ignore_authors)
+            if messages:
+                self._on_slack(messages)
+
+    def _on_slack(self, messages: list[Any]) -> None:
+        from .claude_code import buddy_tool_command
+        from .slack_watch import slack_prompt
+
+        who = ", ".join(dict.fromkeys(f"{m.who} ({m.channel})" for m in messages))
+        self.events.append("SLACK", text=f"{len(messages)} new: {who}", messages=[m.to_dict() for m in messages])
+        self._hand_to_brain(slack_prompt(messages, buddy_tool_command(), self.settings.slack.instructions), quiet=True)
+
+    async def _commit_memory(self) -> None:
+        from .working_memory import commit_memory
+
+        try:
+            await asyncio.to_thread(commit_memory, self._memory_dir)
+        except Exception as exc:
+            self.events.append("NOTICE", text=f"Could not commit the working memory: {type(exc).__name__}: {exc}")
 
     # --------------------------------------------------------------- speakers
 
@@ -1030,6 +1163,8 @@ class ListenDaemon:
         # anything said without "Hey Buddy" never becomes a command.
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended=ended)
         self.chime("sent")
+        unsure = "" if ended == "phrase" else " (sent after a silence; it may be incomplete)"
+        self._hand_to_brain(f'The user said to Buddy{unsure}: "{text}"')
 
     async def run_local(self, kind: str, reason: str = "voice") -> None:
         if reason == "voice":
@@ -1062,6 +1197,39 @@ class ListenDaemon:
             await self.run_local(kind, "typed")
             return
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
+        self._hand_to_brain(f'The user typed in Buddy\'s window: "{text}"')
+
+    def _meetings_dir(self) -> Path:
+        meetings = Path(self.settings.meetings_dir)
+        return meetings if meetings.is_absolute() else project_root() / meetings
+
+    def _hand_to_brain(self, prompt: str, quiet: bool = False, chore: bool = False) -> None:
+        """A command no session will read goes to Buddy's own brain, which replies in the window.
+
+        Chores (onboarding, the scheduled refresh) are Buddy's own work: they run even while a
+        session follows, in a queue of their own so a long one never holds up the user's commands.
+        """
+        if not self._answer_commands or not self.settings.listen.auto_brain:
+            return
+        if not chore and self.session_watching():
+            return
+        runner = self._chores if chore else self._commands
+        if runner is None:
+            from .autobrain import CommandRunner
+            from .memory_tasks import for_chores
+
+            runner = CommandRunner(
+                (lambda: for_chores(self._current_brain_settings())) if chore else self._current_brain_settings,
+                self._meetings_dir(),
+                reply=lambda label, text: self._show("REPLY", by=label, text=text),
+                notice=lambda text: self.events.append("NOTICE", meeting=self.meeting_id, text=text),
+                working=lambda label: self._show("BRAIN", text=f"{label} is on it…"),
+            )
+            if chore:
+                self._chores = runner
+            else:
+                self._commands = runner
+        runner.submit(prompt, quiet=quiet)
 
     # ---------------------------------------------------------------- actions
 
@@ -1075,7 +1243,8 @@ class ListenDaemon:
             return
         if action is None or action.status != "approved":
             return  # only an approved card is ever sent, and only once it is approved
-        self.events.append("ACTION_APPROVED", **approval_event(action))
+        record = self.events.append("ACTION_APPROVED", **approval_event(action))
+        self._hand_to_brain(format_event(record))
 
     # -------------------------------------------------------------- dictation
 
@@ -1148,6 +1317,18 @@ class ListenDaemon:
             stop_at = self.dictation["stop_at"]
             if (stop_at is not None and now >= stop_at) or now - self.dictation["started"] >= listen.command_max_seconds:
                 await self._finish_dictation()
+        every = self.settings.memory.autocommit_seconds
+        if self._memory_dir is not None and every and now - self._memory_committed >= every:
+            self._memory_committed = now
+            await self._commit_memory()
+        if self._slack is not None and now - self._slack_polled >= self.settings.slack.poll_seconds:
+            self._slack_polled = now
+            await self._poll_slack()
+        if self._refresh is not None and now - self._refresh_checked >= 30:
+            self._refresh_checked = now
+            slot = self._refresh.due()
+            if slot:
+                self._refresh_memory(slot)
         if self.storage is None:
             return
         if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:
@@ -1205,6 +1386,8 @@ class ListenDaemon:
         queue = self.bus.subscribe(maxsize=2048)
         reason = "stopped"
         try:
+            await self._start_memory()
+            self._start_slack()
             if self.settings.listen.wake_phrase:
                 await self.start_listening()
                 self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")

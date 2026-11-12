@@ -93,3 +93,16 @@ def test_a_disabled_engine_is_not_a_failure():
     from meeting_agent.doctor import brain_check
 
     assert brain_check(Settings(llm_provider="disabled")).state == "not-needed"
+
+
+def test_the_listeners_brain_is_reported_even_when_llm_provider_is_another(tmp_path, monkeypatch):
+    from meeting_agent import cursor_agent
+
+    monkeypatch.setattr(cursor_agent, "cursor_agent_binary", lambda: "cursor-agent")
+    settings = Settings.model_validate({"llm_provider": "auto", "brain": {"harness": "cursor", "workdir": str(tmp_path)}})
+
+    checks = {check.name: check for check in run_doctor(settings)}
+    assert checks["Listener brain"].state == "ok" and checks["Listener brain"].detail.startswith("Cursor")
+
+    harness_only = Settings.model_validate({"llm_provider": "harness", "brain": {"harness": "cursor", "workdir": str(tmp_path)}})
+    assert "Listener brain" not in {check.name for check in run_doctor(harness_only)}

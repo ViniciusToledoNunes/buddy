@@ -133,6 +133,36 @@ def config_command(path_only: bool = typer.Option(False, "--path", help="Print o
 
 
 @app.command()
+def brain(
+    harness: str = typer.Argument("", help="claude-code or cursor; empty shows the brain in use."),
+    model: str = typer.Option("", "--model", "-m", help="The harness's model; empty uses its default."),
+) -> None:
+    """Show or switch the agent Buddy runs as its brain; a switch applies from the next meeting."""
+    from .config import choose_brain
+    from .harness import HARNESSES, harness_for
+
+    if harness:
+        if harness not in HARNESSES:
+            console.print(f"[red]Unknown harness {harness!r}.[/red] Choose one of: {', '.join(HARNESSES)}")
+            raise typer.Exit(1)
+        try:
+            backup = choose_brain(harness, model)
+        except ValueError as exc:
+            console.print(f"[red]Not switched:[/red] {exc}")
+            raise typer.Exit(1)
+        if backup is not None:
+            console.print(f"Previous configuration saved to {backup}")
+    settings = load_settings()
+    chosen = harness_for(settings)
+    readiness = chosen.readiness(settings)
+    colors = {"ok": "green", "warning": "yellow", "failed": "red"}
+    console.print(f"Brain: [bold]{chosen.label}[/bold] ({chosen.name}), model: {settings.brain.model or 'its default'}")
+    console.print(f"[{colors[readiness.state]}]{readiness.state}[/{colors[readiness.state]}] {readiness.detail}")
+    if settings.llm_provider != "harness":
+        console.print(f"It runs when no Claude Code session follows the listener; llm_provider is {settings.llm_provider}.")
+
+
+@app.command()
 def hotkeys() -> None:
     """Run a small listener so the configured toggle hotkey can start/stop sessions."""
     settings = load_settings()
@@ -273,7 +303,7 @@ def listen(
         console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
         raise typer.Exit(code=1)
     settings = load_settings()
-    daemon = ListenDaemon(settings, runtime)
+    daemon = ListenDaemon(settings, runtime, brain_settings=load_settings, answer_commands=True, keep_memory=True)
     console.print('Listening for "Hey Buddy". Ctrl+C stops.' if settings.listen.wake_phrase
                   else "Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
     try:
@@ -669,6 +699,95 @@ def resume() -> None:
 
 
 # ------------------------------------------------------------------- voices
+
+memory_app = typer.Typer(help="The working memory Buddy and your coding agents share: what was done, is being done, comes next.")
+app.add_typer(memory_app, name="memory")
+# Onboarding reads a whole machine; the refresh checks pull requests, tickets and meetings.
+MEMORY_CHORE_SECONDS = 1800
+
+
+@memory_app.callback(invoke_without_command=True)
+def memory_show(ctx: typer.Context) -> None:
+    """Where the memory is, what it holds and its last changes (with no subcommand)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    settings = load_settings()
+    folder = settings.memory.directory()
+    if not folder.is_dir():
+        console.print(f"No working memory yet at {folder}: `buddy listen` starts it, `buddy memory onboard` fills it.")
+        return
+    for part in ("global", "work"):
+        files = sorted((folder / part).glob("*.md")) if (folder / part).is_dir() else []
+        console.print(f"{part}/: {len(files)} files", markup=False)
+    log = subprocess.run(
+        ["git", "-C", str(folder), "log", "-5", "--format=%cs %h %s"], capture_output=True, text=True, check=False,
+    )
+    if log.stdout.strip():
+        console.print("Last changes:\n" + log.stdout.rstrip(), markup=False)
+    memory = settings.memory
+    found = {path.as_posix() for path in memory.source_paths()}
+    for source in memory.sources:
+        state = "ok" if Path(source).expanduser().as_posix() in found else "missing"
+        console.print(f"source {state}: {source}", markup=False)
+    console.print(f"Refresh at: {', '.join(memory.refresh_at) or 'off (memory.refresh_at)'}", markup=False)
+
+
+def _memory_chore(prompt: str, quiet: bool = False) -> None:
+    from .autobrain import CommandRunner
+    from .memory_tasks import for_chores
+
+    settings = load_settings()
+    meetings = Path(settings.meetings_dir)
+    meetings = meetings if meetings.is_absolute() else project_root() / meetings
+
+    async def run() -> None:
+        runner = CommandRunner(
+            lambda: for_chores(load_settings()),
+            meetings,
+            reply=lambda label, text: console.print(f"{label}: {text}", markup=False),
+            notice=lambda text: console.print(text, markup=False),
+            working=lambda label: console.print(f"{label} is on it (this can take minutes)…", markup=False),
+        )
+        runner.submit(prompt, quiet=quiet)
+        await runner.finish(MEMORY_CHORE_SECONDS)
+
+    asyncio.run(run())
+    from .working_memory import commit_memory
+
+    committed = commit_memory(settings.memory.directory())
+    if committed:
+        console.print(f"Committed: {committed}", markup=False)
+
+
+@memory_app.command("onboard")
+def memory_onboard(
+    probe_only: bool = typer.Option(False, "--probe", help="Only print what Buddy found on this machine."),
+) -> None:
+    """Fill the memory from this machine: tools and logins, agent folders, repositories (reads only)."""
+    from .memory_tasks import onboard_prompt, probe_machine
+    from .working_memory import ensure_memory
+
+    probe = probe_machine()
+    if probe_only:
+        console.print_json(json.dumps(probe))
+        return
+    folder = load_settings().memory.directory()
+    if ensure_memory(folder):
+        console.print(f"Started the working memory in {folder}.", markup=False)
+    _memory_chore(onboard_prompt(probe))
+
+
+@memory_app.command("refresh")
+def memory_refresh() -> None:
+    """Check the memory against the real state of the work now, as the scheduled refresh does."""
+    from .claude_code import buddy_tool_command
+    from .memory_tasks import refresh_prompt
+
+    settings = load_settings()
+    meetings = Path(settings.meetings_dir)
+    meetings = meetings if meetings.is_absolute() else project_root() / meetings
+    _memory_chore(refresh_prompt(time.strftime("%H:%M, asked"), meetings, buddy_tool_command()))
+
 
 voices_app = typer.Typer(no_args_is_help=True, help="Voices Buddy remembers for listen.speaker_names (this machine only).")
 app.add_typer(voices_app, name="voices")
