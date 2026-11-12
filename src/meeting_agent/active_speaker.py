@@ -26,6 +26,7 @@ import numpy as np
 from .speakers import display_name
 
 Rect = tuple[int, int, int, int]  # x0, y0, x1, y1, in pixels
+SMALL_TILE = (60, 40)  # smallest outlined tile looked for, width x height
 
 
 @dataclass(frozen=True)
@@ -147,9 +148,12 @@ def speaker_on_screen(
     frame = pixels(image)
     if frame is None:
         return None
-    tiles = outlined_tiles(border_mask(frame))
+    mask = border_mask(frame)
+    # The gallery's tiles first; while a screen is shared, the call shrinks to a strip of
+    # small tiles (about 100 x 100 pixels in a 1600-wide capture) above the content.
+    tiles = outlined_tiles(mask) or outlined_tiles(mask, SMALL_TILE[0], SMALL_TILE[1])
     if not tiles:
-        return None  # nobody outlined: shared screen, or a pause; skip the OCR
+        return None  # nobody outlined: a pause, or a layout without tiles; skip the OCR
     boxes = text(image)
     for tile in tiles:
         name = name_in_tile(tile, boxes)

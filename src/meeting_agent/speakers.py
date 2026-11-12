@@ -43,6 +43,10 @@ VOICE_MODEL_SHA256 = "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9
 VOICE_MODEL_FILE = "wespeaker_en_voxceleb_resnet34_LM.onnx"
 
 SAMPLE_RATE = 16_000
+# A line with less speech than this joins the closest voice (or none) but never starts a new
+# one: a two-word reply's embedding is too noisy to be a person of its own.
+NEW_VOICE_SECONDS = 3.0
+SHORT_LINE_SLACK = 0.1
 _EPS = float(np.finfo(np.float32).eps)
 
 
@@ -144,27 +148,47 @@ def _digest(path: Path) -> str:
 # ---------------------------------------------------------------------- names
 
 
-_TEAMS_NAME = re.compile(r"([A-Z][\w'’.-]+),\s*([A-Z][\w'’.-]+)?")
+_TEAMS_NAME = re.compile(r"([A-Z][\w'’.-]+(?:…|\.\.\.)?),\s*([A-Z][\w'’.-]*(?:\s+[A-Z][\w'’.-]*)*(?:…|\.\.\.)?)?")
+_TRUNCATED = re.compile(r"(?:…|\.\.\.)$")
+
+
+def _name_word(word: str) -> bool:
+    """A word that can be part of a person's name as an app writes it.
+
+    Apps write names in title case: "Nicholas", "O'Rourke", "McDonald", an initial "D", or
+    two capitals ("DJ"). A longer all-caps word ("PAGTEDI") is OCR read off slides or
+    buttons, not a name.
+    """
+    letters = [c for c in word if c.isalpha()]
+    if not letters or not word[0].isupper():
+        return False
+    return len(letters) <= 2 or any(c.islower() for c in letters)
 
 
 def display_name(label: str) -> str | None:
     """A tile label as a person's name: "Webb, Nicholas D" -> "Nicholas Webb".
 
     Teams shows "Last, First Middle"; other apps show "First Last". Icons and stray
-    characters the OCR reads around the label are dropped. None when nothing in the
-    label looks like a name.
+    characters the OCR reads around the label are dropped. A word cut short by the app
+    ("Thornton, Bra...") is left out, keeping what is certain ("Thornton"). None when
+    nothing in the label looks like a name.
     """
-    text = label.strip().strip(string.punctuation + " ")
+    text = re.sub(r"\s*\([^)]*\)", "", label)  # "(Guest)", "(External)", "(She/her)"
+    text = text.strip().strip(string.punctuation.replace(".", "") + " ")
     text = re.sub(r"^[^A-Za-z]+", "", text)  # a microphone or signal icon read as "Il" or "*"
-    text = re.sub(r"^(?:Il|ll|II|lI)\s+", "", text)
+    text = re.sub(r"^(?:Il|ll|II|lI|aIl|all)\s+", "", text)
     match = _TEAMS_NAME.search(text)
     if match:
-        last, first = match.group(1), match.group(2)
+        last = match.group(1)
+        firsts = (match.group(2) or "").split()
+        if _TRUNCATED.search(last) or not _name_word(last):
+            return None
+        first = firsts[0] if firsts and not _TRUNCATED.search(firsts[0]) and _name_word(firsts[0]) else ""
         return f"{first} {last}" if first else last
-    words = [word for word in re.findall(r"[A-Z][\w'’.-]+", text)]
-    if 1 <= len(words) <= 4:
-        return " ".join(words[:3])
-    return None
+    words = [word for word in re.findall(r"[A-Z][\w'’.-]*(?:…)?", text) if not _TRUNCATED.search(word)]
+    if not 1 <= len(words) <= 4 or not all(_name_word(word) for word in words):
+        return None
+    return " ".join(words[:3])
 
 
 def same_person(a: str, b: str) -> bool:
@@ -173,6 +197,61 @@ def same_person(a: str, b: str) -> bool:
         return True
     short, full = sorted((a, b), key=len)
     return len(short.split()) == 1 and short in full.split()
+
+
+def matches(seen: str, full: str) -> bool:
+    """Whether a name read off the screen can be this participant's full name.
+
+    Every word read must be one of the full name's words or the start of one: "Thornton"
+    and "Bra Thornton" both fit "Brandyn Thornton"; "Brandon Thornton" does not.
+    """
+    if same_person(seen, full):
+        return True
+    words = full.lower().split()
+    return all(any(w == word or (len(w) >= 3 and word.startswith(w)) for word in words) for w in seen.lower().split())
+
+
+# --------------------------------------------------------------- participants
+
+# Teams labels each participant's tile in its accessibility tree: the name, then what is
+# going on ("video is on", "muted", "Has control of production tools"), then
+# "Context menu is available". What is not the name starts in lower case or is one of these.
+_PARTICIPANT_WORDS = ("has control", "context menu", "video is", "muted", "unmuted", "speaking", "hand", "organizer",
+                      "presenter", "attendee", "external", "guest", "pinned", "spotlight", "in the lobby", "on hold")
+
+
+@dataclass(frozen=True)
+class Participant:
+    name: str  # as shown: "Jae Lee"
+    muted: bool
+    speaking: bool = False
+
+
+def parse_participant(label: str) -> Participant | None:
+    """A participant from the meeting app's accessibility label, or None if it is not one."""
+    parts = [part.strip() for part in label.split(",") if part.strip()]
+    name_parts: list[str] = []
+    for part in parts:
+        lowered = part.lower()
+        if not part[0].isupper() or lowered.startswith(_PARTICIPANT_WORDS):
+            break
+        name_parts.append(part)
+        if len(name_parts) == 2:
+            break
+    rest = {part.lower() for part in parts[len(name_parts):]}
+    name = display_name(", ".join(name_parts)) if name_parts else None
+    if not name:
+        return None
+    return Participant(name=name, muted="muted" in rest, speaking=any("speaking" in part for part in rest))
+
+
+def parse_participants(labels: list[str]) -> list[Participant]:
+    seen: dict[str, Participant] = {}
+    for label in labels:
+        participant = parse_participant(label)
+        if participant is not None:
+            seen.setdefault(participant.name, participant)
+    return list(seen.values())
 
 
 # ----------------------------------------------------------------- voice book
@@ -279,8 +358,36 @@ class SpeakerTracker:
         self.exclude = exclude  # the user's own tile, outlined when the user talks
         self.voices: list[Voice] = []
 
-    def observe(self, embedding: np.ndarray | None, seen: list[str], text: str = "") -> Attribution:
+    def observe(
+        self,
+        embedding: np.ndarray | None,
+        seen: list[str],
+        text: str = "",
+        seconds: float | None = None,
+        participants: list[Participant] | None = None,
+    ) -> Attribution:
+        """Name one REMOTE line.
+
+        `seen`: names the screen showed outlined while it was said. `seconds`: how much of
+        it was speech. `participants`: the call's participants as the meeting app lists
+        them, when it does (Teams): a name read off the screen must be one of them, which
+        also turns a cut-short label into the full name; and when exactly one person on
+        the other side is unmuted, the line is theirs.
+        """
         seen = [name for name in seen if name and not self.exclude(name)]
+        remote = [p for p in participants or [] if not self.exclude(p.name)]
+        if remote:
+            seen = [full for full in (self._in_call(name, remote) for name in seen) if full]
+            talking = [p.name for p in remote if p.speaking] or [p.name for p in remote if not p.muted]
+            if len(talking) == 1:
+                seen.append(talking[0])
+        if embedding is not None and seconds is not None and seconds < NEW_VOICE_SECONDS:
+            voice = self._nearest(embedding)
+            if voice is None:
+                embedding = None  # too short to start a voice of its own
+            else:
+                voice.votes.update(seen)
+                return self._attribute(voice)
         if embedding is None:
             # Too short for the voice model, or voice off: the screen alone decides this line.
             if not seen:
@@ -290,6 +397,20 @@ class SpeakerTracker:
         voice = self._voice_for(embedding, text)
         voice.votes.update(seen)
         return self._attribute(voice)
+
+    @staticmethod
+    def _in_call(name: str, participants: list[Participant]) -> str | None:
+        found = [p.name for p in participants if matches(name, p.name)]
+        return found[0] if len(found) == 1 else None
+
+    def _nearest(self, embedding: np.ndarray) -> Voice | None:
+        """The voice a short line most likely belongs to, without changing that voice."""
+        scores = [float(voice.centroid @ embedding) for voice in self.voices]
+        if scores and max(scores) >= self.threshold - SHORT_LINE_SLACK:
+            voice = self.voices[int(np.argmax(scores))]
+            voice.lines += 1
+            return voice
+        return None
 
     def _voice_for(self, embedding: np.ndarray, text: str) -> Voice:
         scores = [float(voice.centroid @ embedding) for voice in self.voices]

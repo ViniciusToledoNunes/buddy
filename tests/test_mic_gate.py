@@ -192,3 +192,45 @@ def test_the_window_button_sets_the_mode(tmp_path):
     assert api.set_mic("off") == {"ok": True, "mode": "off"}
     assert read_mode(tmp_path / "listen" / "mic.json") == "off"
     assert api.set_mic("loud")["ok"] is False
+
+
+def test_the_participants_line_is_kept_apart_from_the_microphone_state(tmp_path):
+    gate = _gate(tmp_path)
+    gate.update('{"state": "open", "app": "Microsoft Teams"}')
+    gate.update('{"participants": ["Lee, Jae, muted, Context menu is available"], "app": "Microsoft Teams"}')
+
+    assert gate.state == "open"
+    assert gate.participant_labels == ["Lee, Jae, muted, Context menu is available"]
+    assert gate.describe()["participants_seen"] == 1
+
+
+async def test_speaker_names_read_the_call_without_dropping_your_lines(tmp_path, monkeypatch):
+    from meeting_agent import active_speaker
+
+    monkeypatch.setattr(active_speaker, "available", lambda: True)
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, speaker_names="screen", echo_window_seconds=0)
+    gates = []
+
+    def factory():
+        gate = _gate(tmp_path, clock=clock)
+        gates.append(gate)
+        return gate
+
+    daemon.mic_gate_factory = factory
+    await daemon.start_meeting("requested")
+    gate = gates[0]
+    gate.update('{"state": "muted", "app": "Microsoft Teams"}')
+    gate.update(json.dumps({"participants": ["Reyes, Dana, Context menu is available",
+                                             "Okafor, Chidi, muted, Context menu is available"]}))
+    await daemon.on_final(_me("kept: the gate only reads the call here"))
+    await daemon.on_final(TranscriptEvent("REMOTE", "The rollout moved to Tuesday.", True, "u",
+                                          spoken_from=clock.now, spoken_to=clock.now + 4))
+    meeting = daemon.storage.directory
+    await daemon.stop_meeting("requested")
+
+    text = (meeting / "transcript.txt").read_text(encoding="utf-8")
+    assert "kept: the gate only reads the call here" in text
+    assert "REMOTE (Dana Reyes): The rollout moved to Tuesday." in text
+    assert daemon.mic_gate is None and daemon.call_reader is None
+    assert "mic" not in json.loads((meeting / "metadata.json").read_text())

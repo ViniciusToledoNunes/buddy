@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 from .events import EventBus, SpeechEvent, TranscriptEvent, utc_now
 from .mic_gate import MicGate
 from .screens import ScreenShots, capture_screen
-from .speakers import VOICE_MODEL_FILE, SpeakerTracker, VoiceBook, VoiceModel
+from .speakers import VOICE_MODEL_FILE, SpeakerTracker, VoiceBook, VoiceModel, parse_participants
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
@@ -446,6 +446,7 @@ class ListenDaemon:
         self._look: asyncio.Task[None] | None = None
         # Whether the meeting app hears you (listen.mic_follows_mute); None when off.
         self.mic_gate: MicGate | None = None
+        self.call_reader: MicGate | None = None  # the same helper, also kept for speaker names
         self._mic_shown: dict[str, Any] | None = None
         self.mic_gate_factory: Callable[[], MicGate] = lambda: MicGate(
             self.mic_mode_file, self.settings.listen.mic_when_unknown, clock=self.clock
@@ -578,11 +579,15 @@ class ListenDaemon:
         self.storage = MeetingStorage(self.settings, info)
         self.storage.metadata["started_by"] = reason
         self._setup_speakers()
-        if self.settings.listen.mic_follows_mute:
+        # The helper that reads the meeting app also lists the call's participants, which
+        # names the other side: started for either feature, it drops lines only for the first.
+        follow = self.settings.listen.mic_follows_mute
+        if follow or self.speakers is not None:
             gate = self.mic_gate_factory()
-            if not gate.start():
+            if not gate.start() and follow:
                 self.events.append("NOTICE", text=f"Your microphone is kept whatever the meeting app says: {gate.error}.")
-            self.mic_gate = gate
+            self.call_reader = gate
+            self.mic_gate = gate if follow else None
         self.remote = self._stream("REMOTE")
         self.remote.start()
         now = self.clock()
@@ -641,8 +646,9 @@ class ListenDaemon:
         storage.metadata["stopped_by"] = reason
         if self.mic_gate is not None:
             storage.metadata["mic"] = self.mic_gate.describe()
-            await asyncio.to_thread(self.mic_gate.stop)
-            self.mic_gate = None
+        if self.call_reader is not None:
+            await asyncio.to_thread(self.call_reader.stop)
+        self.mic_gate, self.call_reader = None, None
         storage.metadata["echo_lines_dropped"] = self.echo.dropped
         if self.screens is not None:
             storage.metadata["screens_captured"] = self.screens.count
@@ -815,7 +821,9 @@ class ListenDaemon:
         end = event.spoken_to if event.spoken_to is not None else start
         seen = [name for at, name in self._sightings if start - 0.5 <= at <= end + 1.0]
         embedding = event.embedding if self.voice_model is not None else None
-        who = self.speakers.observe(embedding, seen, event.text)
+        seconds = end - start if event.spoken_from is not None and event.spoken_to is not None else None
+        labels = self.call_reader.participant_labels if self.call_reader is not None else []
+        who = self.speakers.observe(embedding, seen, event.text, seconds=seconds, participants=parse_participants(labels))
         event.name, event.voice, event.name_sure = who.name, who.voice, who.sure
 
     async def _finish_speakers(self, storage: Any) -> dict[str, Any]:

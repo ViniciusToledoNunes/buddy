@@ -130,3 +130,12 @@ def test_a_capture_is_decoded_through_sips(tmp_path):
 
     assert pixels is not None and pixels.shape == (220, 500, 3)
     assert len(outlined_tiles(border_mask(pixels))) == 1
+
+
+def test_while_a_screen_is_shared_the_small_outlined_tile_is_read(tmp_path):
+    strip = _frame(outlined=((40, 30, 140, 130),), plain=((150, 30, 250, 130),))
+
+    def text(path):
+        return [TextBox("Thornton, Bra...", 44, 112, 90, 12)]
+
+    assert speaker_on_screen(tmp_path / "x.jpg", pixels=lambda p: strip, text=text) == "Thornton"

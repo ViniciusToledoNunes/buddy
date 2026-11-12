@@ -15,7 +15,7 @@ def _voice(seed):
     return vector / np.linalg.norm(vector)
 
 
-def _remote(text, at, embedding=None, length=2.0):
+def _remote(text, at, embedding=None, length=4.0):
     return TranscriptEvent("REMOTE", text, True, "u", embedding=embedding, spoken_from=at, spoken_to=at + length)
 
 

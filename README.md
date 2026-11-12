@@ -168,6 +168,12 @@ Settings → Privacy & Security → Accessibility. `buddy mic on|off|auto` overr
 - `both`: the screen names the voices, and a named voice keeps its name when the screen shows nobody: a shared
   screen, a camera off, two people at once.
 
+In Teams, Buddy also reads the call's participant list through the Accessibility permission (the same helper and
+permission as `listen.mic_follows_mute`). A name read off the screen must then be one of the participants, which
+turns a label the app cut short ("Thornton, Bra...") into the full name and drops text read off a shared slide;
+and when exactly one person on the other side is unmuted, the line is theirs. A line under three seconds joins
+the closest voice but never starts a new one.
+
 A line reads `REMOTE (Dana Reyes)`, `REMOTE (Dana Reyes?)` while the name is not settled (fewer than
 `listen.speaker_votes_needed` sightings), or `REMOTE (voice B)`. Your own tile is never given to a REMOTE line
 (`listen.speaker_self_names`, plus `listen.question_names`). With `listen.remember_voices: true`, a voice the

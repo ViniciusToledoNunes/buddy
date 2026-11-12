@@ -1,8 +1,12 @@
 // buddy-mic-state: whether you are muted in the meeting app, read from its accessibility tree.
 //
-// Usage: buddy-mic-state [--once] [--interval SECONDS] [--rules FILE]
+// Usage: buddy-mic-state [--once] [--interval SECONDS] [--rules FILE] [--participants]
 // Prints one JSON line whenever the state changes, and once at start:
 //   {"state": "muted" | "open" | "none", "app": "Microsoft Teams", "label": "Unmute mic"}
+// With --participants it also prints, whenever the list changes, the call's participants as
+// the meeting app labels them in its accessibility tree (Teams: "Lee, Jae, video is on,
+// muted, Context menu is available"), so Buddy can tell who is unmuted:
+//   {"participants": ["Lee, Jae, muted, Context menu is available", ...], "app": "Microsoft Teams"}
 // "none": no meeting app with a microphone button was found. With --once it prints the
 // current state and exits.
 //
@@ -22,19 +26,22 @@ struct Rule: Codable {
     let muted: [String]  // label prefixes, case-insensitive
     let open: [String]
     let web: Bool?  // Chromium: ask it to expose the page's accessibility tree
+    let roster: String?  // suffix of a participant's label in the tree, when the app has one
 }
 
 let builtIn: [Rule] = [
     Rule(name: "Microsoft Teams", bundles: ["com.microsoft.teams2", "com.microsoft.teams"],
-         muted: ["Unmute mic", "Unmute"], open: ["Mute mic", "Mute"], web: true),
+         muted: ["Unmute mic", "Unmute"], open: ["Mute mic", "Mute"], web: true,
+         roster: "Context menu is available"),
     Rule(name: "Google Meet",
          bundles: ["com.google.Chrome", "com.microsoft.edgemac", "company.thebrowser.Browser", "com.brave.Browser"],
-         muted: ["Turn on microphone"], open: ["Turn off microphone"], web: true),
+         muted: ["Turn on microphone"], open: ["Turn off microphone"], web: true, roster: nil),
     Rule(name: "Zoom", bundles: ["us.zoom.xos"], muted: ["Unmute audio", "Unmute my audio"],
-         open: ["Mute audio", "Mute my audio"], web: false),
+         open: ["Mute audio", "Mute my audio"], web: false, roster: nil),
 ]
 
 var once = false
+var wantParticipants = false
 var interval = 1.0
 var rules = builtIn
 var arguments = Array(CommandLine.arguments.dropFirst())
@@ -42,6 +49,7 @@ while !arguments.isEmpty {
     let argument = arguments.removeFirst()
     switch argument {
     case "--once": once = true
+    case "--participants": wantParticipants = true
     case "--interval": interval = Double(arguments.isEmpty ? "1" : arguments.removeFirst()) ?? 1.0
     case "--rules":
         let path = arguments.isEmpty ? "" : arguments.removeFirst()
@@ -52,7 +60,7 @@ while !arguments.isEmpty {
         }
         rules = loaded
     default:
-        FileHandle.standardError.write("usage: buddy-mic-state [--once] [--interval S] [--rules FILE]\n".data(using: .utf8)!)
+        FileHandle.standardError.write("usage: buddy-mic-state [--once] [--interval S] [--rules FILE] [--participants]\n".data(using: .utf8)!)
         exit(2)
     }
 }
@@ -97,6 +105,39 @@ func find(_ element: AXUIElement, _ rule: Rule, _ depth: Int, _ budget: inout In
         if let found = find(child, rule, depth + 1, &budget) { return found }
     }
     return nil
+}
+
+func collect(_ element: AXUIElement, _ suffix: String, _ depth: Int, _ budget: inout Int, _ out: inout [String]) {
+    budget -= 1
+    if budget < 0 || depth > 60 { return }
+    let value = label(element)
+    if value.hasSuffix(suffix), value.contains(", ") {
+        out.append(value)
+        return  // a participant's tile: its children are its video and buttons
+    }
+    var children: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+          let list = children as? [AXUIElement] else { return }
+    for child in list { collect(child, suffix, depth + 1, &budget, &out) }
+}
+
+// The participants, read again every few seconds while the app is in a call (its
+// microphone button was found): a walk of the whole window, so not every second.
+var lastRoster = Date.distantPast
+var roster: (app: String, labels: [String])? = nil
+
+func readParticipants() {
+    guard wantParticipants, Date().timeIntervalSince(lastRoster) >= 4 else { return }
+    lastRoster = Date()
+    var result: (app: String, labels: [String])? = nil
+    for (pid, hit) in cached {
+        guard let suffix = hit.rule.roster else { continue }
+        var labels: [String] = []
+        var budget = 30000
+        collect(AXUIElementCreateApplication(pid), suffix, 0, &budget, &labels)
+        if !labels.isEmpty { result = (hit.rule.name, labels); break }
+    }
+    roster = result
 }
 
 // The button found last time, per process: reading one label each second costs nothing,
@@ -145,13 +186,31 @@ func emit(_ value: (state: String, app: String?, label: String?)) {
     }
 }
 
+func emitParticipants() {
+    let item: [String: Any] = ["participants": roster?.labels ?? [], "app": roster?.app ?? NSNull()]
+    if let data = try? JSONSerialization.data(withJSONObject: item), let line = String(data: data, encoding: .utf8) {
+        print(line)
+        fflush(stdout)
+    }
+}
+
 var previous = ""
+var previousRoster: [String]? = nil
 repeat {
     let value = current()
     let key = "\(value.state)|\(value.app ?? "")"
     if key != previous || once {
         emit(value)
         previous = key
+    }
+    if wantParticipants {
+        if once { lastRoster = .distantPast }
+        readParticipants()
+        let labels = roster?.labels ?? []
+        if labels != (previousRoster ?? ["-"]) || once {
+            emitParticipants()
+            previousRoster = labels
+        }
     }
     if once { break }
     Thread.sleep(forTimeInterval: interval)

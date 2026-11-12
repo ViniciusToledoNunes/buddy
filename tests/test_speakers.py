@@ -12,6 +12,9 @@ from meeting_agent.speakers import (
     VoiceBook,
     VoiceModel,
     display_name,
+    matches,
+    parse_participant,
+    parse_participants,
     download_model,
     fbank,
     name_voice,
@@ -91,6 +94,13 @@ def test_the_model_download_is_checked_against_its_digest(tmp_path):
         ("Lindqvist, Mae *", "Mae Lindqvist"),
         ("Lindqvist,", "Lindqvist"),
         ("Dana Reyes", "Dana Reyes"),
+        ("Thornton, Bra...", "Thornton"),  # cut short by the app: only what is certain
+        ("Reyes, Da…", "Reyes"),
+        ("Jeyarama...", None),
+        ("Doe, Jane (Guest)", "Jane Doe"),
+        ("DJ O'Rourke", "DJ O'Rourke"),
+        ("PAGTEDI", None),  # slide or button text read in capitals is not a name
+        ("FAGATRI ROA", None),
         ("02:28", None),
         ("", None),
     ],
@@ -275,3 +285,61 @@ def test_a_bare_yaml_off_turns_speaker_names_off():
 
     assert Settings.model_validate(yaml.safe_load("listen:\n  speaker_names: off\n")).listen.speaker_names == "off"
     assert Settings.model_validate({"listen": {"speaker_names": "both"}}).listen.speaker_names == "both"
+
+
+# --------------------------------------------------------------- participants
+
+
+def test_participants_are_read_from_the_apps_labels():
+    lee = parse_participant("Lee, Jae, Has control of production tools, muted, Context menu is available")
+    tim = parse_participant("Denison, Tim, video is on, Has control of production tools, Context menu is available")
+    guest = parse_participant("Jane Doe (Guest), muted, Context menu is available")
+
+    assert (lee.name, lee.muted) == ("Jae Lee", True)
+    assert (tim.name, tim.muted) == ("Tim Denison", False)
+    assert guest.name == "Jane Doe"
+    assert parse_participant("Context menu is available") is None
+    assert [p.name for p in parse_participants(["Lee, Jae, muted", "Lee, Jae, muted", "Mesa, Steve"])] == ["Jae Lee", "Steve Mesa"]
+
+
+def test_a_name_read_off_the_screen_fits_a_full_name_word_by_word():
+    assert matches("Bra Thornton", "Brandyn Thornton")
+    assert matches("Thornton", "Brandyn Thornton")
+    assert not matches("Brandon Thornton", "Brandyn Thornton")
+    assert not matches("Br Thornton", "Dana Thornton")
+
+
+def _call(*people):
+    return parse_participants([f"{last}, {first}{', muted' if muted else ''}, Context menu is available"
+                               for first, last, muted in people])
+
+
+def test_in_a_call_a_screen_name_becomes_the_participants_full_name_or_is_dropped():
+    call = _call(("Brandyn", "Thornton", True), ("Tim", "Denison", True))
+    tracker = SpeakerTracker()
+
+    assert tracker.observe(None, ["Bra Thornton"], participants=call).name == "Brandyn Thornton"
+    assert tracker.observe(None, ["Slide Title"], participants=call).name is None
+
+
+def test_the_only_unmuted_person_on_the_other_side_names_the_line():
+    tracker = SpeakerTracker(exclude=lambda name: "Vinicius" in name)
+    call = _call(("Vinicius", "Nunes", False), ("Brandyn", "Thornton", False), ("Tim", "Denison", True))
+    two = _call(("Brandyn", "Thornton", False), ("Tim", "Denison", False))
+
+    alone = tracker.observe(None, [], participants=call)  # shared screen: no tile outlined
+    assert (alone.name, alone.sure) == ("Brandyn Thornton", True)
+    assert tracker.observe(None, [], participants=two).name is None  # two unmuted: the call alone cannot tell
+
+
+def test_a_short_line_joins_the_closest_voice_but_never_starts_one():
+    dana, chidi = _voice(1), _voice(2)
+    tracker = SpeakerTracker()
+    tracker.observe(_line(dana, 1), ["Dana Reyes"], seconds=6)
+
+    joined = tracker.observe(_line(dana, 2), [], seconds=1.5)
+    stranger = tracker.observe(_line(chidi, 3), [], seconds=1.5)
+
+    assert joined.voice == "A"
+    assert stranger.voice is None and len(tracker.voices) == 1
+    assert tracker.observe(_line(chidi, 4), [], seconds=5).voice == "B"
