@@ -651,6 +651,14 @@ class ListenDaemon:
             transcript=str(storage.transcript_txt),
             summary=str(storage.summary_md),
         )
+        if not self.settings.listen.wake_phrase:
+            await self._close_mic()
+
+    async def _close_mic(self) -> None:
+        """Without the wake phrase the microphone is open only during a meeting."""
+        await self.stop_listening()
+        self.paused = True
+        self._write_listen_state()
 
     def _flush_batch(self, now: float, **trigger: Any) -> None:
         lines = self.batcher.take(now)
@@ -962,8 +970,12 @@ class ListenDaemon:
         queue = self.bus.subscribe(maxsize=2048)
         reason = "stopped"
         try:
-            await self.start_listening()
-            self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")
+            if self.settings.listen.wake_phrase:
+                await self.start_listening()
+                self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")
+            else:
+                await self._close_mic()
+                self.events.append("LISTENER_UP", text="Ready: the microphone opens when a meeting starts.")
             while not stop.is_set():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.5)
