@@ -1,6 +1,7 @@
 import hashlib
 import json
 import stat
+import sys
 
 import numpy as np
 import pytest
@@ -212,7 +213,8 @@ def test_a_named_voice_is_remembered_and_recognised_without_the_screen(tmp_path)
         first.observe(_line(dana, n), ["Dana Reyes"])
 
     assert first.remember() == ["Dana Reyes"]
-    assert stat.S_IMODE((tmp_path / "voices.json").stat().st_mode) == 0o600
+    if sys.platform != "win32":  # Windows has no owner-only mode bits
+        assert stat.S_IMODE((tmp_path / "voices.json").stat().st_mode) == 0o600
     stored = json.loads((tmp_path / "voices.json").read_text())
     assert set(stored["voices"]) == {"Dana Reyes"} and len(stored["voices"]["Dana Reyes"]["centroid"]) == 256
 

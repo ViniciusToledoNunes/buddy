@@ -150,6 +150,7 @@ async def run_local_asr(
     speech_frames = 0
     start_consecutive = 0
     segment_started = 0.0
+    last_speech_at = 0.0  # the last frame with voice in it, on the frames' own clock
     speaker = "REMOTE"
     calibration: list[float] = []
     adaptive_threshold = settings.asr.vad_threshold
@@ -162,7 +163,7 @@ async def run_local_asr(
     bus.publish(StatusEvent("asr-local", "connected", f"{pool.selection.model}/{pool.selection.compute_type}"))
 
     async def flush() -> None:
-        nonlocal segment, silence_frames, speech_frames, start_consecutive, segment_started
+        nonlocal segment, silence_frames, speech_frames, start_consecutive, segment_started, last_speech_at
         if speech_frames < min_frames:
             segment = []
             silence_frames = 0
@@ -205,7 +206,8 @@ async def run_local_asr(
                     latency_seconds=latency,
                     embedding=embedding,
                     spoken_from=spoken_from,
-                    spoken_to=captured_end,
+                    # When the voice stopped, on the same clock as spoken_from: the frames'.
+                    spoken_to=max(spoken_from, last_speech_at + frame_ms / 1000),
                 )
             )
         bus.publish(StatusEvent("asr-lag", "ok" if processing < len(audio16) / 16_000 else "warning", f"{processing:.2f}s"))
@@ -233,6 +235,7 @@ async def run_local_asr(
                     start_consecutive += 1
                     if start_consecutive >= 2:
                         segment_started = frame.captured_monotonic
+                        last_speech_at = frame.captured_monotonic
                         segment.extend(preroll)
                         speech_frames = start_consecutive
                         preroll.clear()
@@ -246,6 +249,7 @@ async def run_local_asr(
                 bus.publish(SpeechEvent(frame.speaker, frame.captured_monotonic))  # still talking
             if speech:
                 speech_frames += 1
+                last_speech_at = frame.captured_monotonic
             silence_frames = 0 if speech else silence_frames + 1
             if silence_frames >= silence_frames_needed or len(segment) >= max_frames:
                 await flush()

@@ -93,6 +93,7 @@ def test_speaker_on_screen_reads_the_outlined_tile(tmp_path):
     assert speaker_on_screen(tmp_path / "x.jpg", pixels=lambda p: _frame(), text=lambda p: []) is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in helper is a POSIX shell script; the real one is macOS only")
 def test_the_text_helper_output_is_parsed(tmp_path):
     helper = tmp_path / "buddy-screen-text"
     helper.write_text(
