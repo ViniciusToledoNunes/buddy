@@ -432,9 +432,13 @@ class ListenDaemon:
         stream_factory: Callable[[str], Stream] | None = None,
         clock: Callable[[], float] = time.monotonic,
         brain_factory: Callable[[], Any] | None = None,
+        brain_settings: Callable[[], Settings] | None = None,
     ) -> None:
         self.settings = settings
         self._brain_factory = brain_factory
+        # Rereads the configuration when a meeting starts its brain, so `buddy brain`
+        # switches harness or model without restarting the listener.
+        self._brain_settings = brain_settings
         self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
         self._brain_off = False  # unavailable this meeting; said once
         self._summary_task: asyncio.Task[None] | None = None
@@ -742,17 +746,32 @@ class ListenDaemon:
         if self.brain is None:
             from .autobrain import AutoBrain, BrainRunner
 
-            brain = self._brain_factory() if self._brain_factory else AutoBrain(self.settings, self.storage.directory.parent)
+            from .harness import harness_for
+
+            settings = self._current_brain_settings()
+            label = harness_for(settings).label
+            brain = self._brain_factory() if self._brain_factory else AutoBrain(settings, self.storage.directory.parent)
             if not brain.available():
                 self._brain_off = True
                 self.events.append("NOTICE", meeting=self.meeting_id,
-                                   text="No Claude Code session is following and the built-in brain is unavailable: no suggestions this meeting.")
+                                   text=f"No Claude Code session is following and the built-in brain is unavailable ({label}): no suggestions this meeting.")
                 return
             self.brain = BrainRunner(brain, self._show_suggestions, self._brain_notice)
             self.events.append("NOTICE", meeting=self.meeting_id,
-                               text="No Claude Code session is following: Buddy's built-in brain is suggesting.")
+                               text=f"No Claude Code session is following: Buddy's built-in brain is suggesting ({label}).")
             self._show("BRAIN", text="Built-in brain on: suggestions come from Buddy itself.")
         self.brain.submit(lines, trigger)
+
+    def _current_brain_settings(self) -> Settings:
+        if self._brain_settings is None:
+            return self.settings
+        try:
+            brain = self._brain_settings().brain
+        except Exception as exc:  # a config caught mid-edit must not cost the meeting its brain
+            self.events.append("NOTICE", meeting=self.meeting_id,
+                               text=f"Could not reread the brain settings, keeping the ones loaded at start: {exc}")
+            return self.settings
+        return self.settings.model_copy(update={"brain": brain})
 
     def _show_suggestions(self, suggestions: list[str]) -> None:
         self._show("SUGGEST", meeting=self.meeting_id, items=suggestions)

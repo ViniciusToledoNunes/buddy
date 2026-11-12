@@ -83,6 +83,28 @@ def buddy_tool_command() -> str:
     return Path(found).as_posix() if found else "buddy"
 
 
+def brain_system_prompt(settings: Settings, meetings_dir: Path | None) -> str:
+    """The brain's instructions, the same whichever harness runs it."""
+    copilot = settings.copilot
+    parts = [BRAIN_SYSTEM_PROMPT.replace("{language}", copilot.output_language)]
+    if meetings_dir is not None:
+        parts.append(
+            f"Earlier meetings live in {meetings_dir.as_posix()}/<meeting id>/, each with "
+            "transcript.txt, summary.md and copilot.json. Grep them when the conversation "
+            "revisits earlier work."
+        )
+    if copilot.claude_connectors:
+        command = buddy_tool_command()
+        parts.append(
+            f"For BigQuery and Datadog, run exactly `{command} tool <name> '<json arguments>'`; "
+            f"`{command} tool --list` shows the tools. They are read-only and refuse any query "
+            "that would scan too much."
+        )
+    if copilot.claude_instructions.strip():
+        parts.append(copilot.claude_instructions.strip())
+    return "\n\n".join(parts)
+
+
 async def _terminate(process: Any) -> None:
     """Stop a Claude Code run and everything it started.
 
@@ -154,24 +176,7 @@ class ClaudeCodeProvider(LLMProvider):
         return tools
 
     def system_prompt(self) -> str:
-        copilot = self.settings.copilot
-        parts = [BRAIN_SYSTEM_PROMPT.replace("{language}", copilot.output_language)]
-        if self.meetings_dir is not None:
-            parts.append(
-                f"Earlier meetings live in {self.meetings_dir.as_posix()}/<meeting id>/, each with "
-                "transcript.txt, summary.md and copilot.json. Grep them when the conversation "
-                "revisits earlier work."
-            )
-        if copilot.claude_connectors:
-            command = buddy_tool_command()
-            parts.append(
-                f"For BigQuery and Datadog, run exactly `{command} tool <name> '<json arguments>'`; "
-                f"`{command} tool --list` shows the tools. They are read-only and refuse any query "
-                "that would scan too much."
-            )
-        if copilot.claude_instructions.strip():
-            parts.append(copilot.claude_instructions.strip())
-        return "\n\n".join(parts)
+        return brain_system_prompt(self.settings, self.meetings_dir)
 
     def command(self, system: str) -> list[str]:
         copilot = self.settings.copilot

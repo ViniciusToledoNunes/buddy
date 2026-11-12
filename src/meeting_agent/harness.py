@@ -55,7 +55,28 @@ class ClaudeCodeHarness:
         return Readiness("ok" if found else "warning", detail)
 
 
-HARNESSES: dict[str, Harness] = {harness.name: harness for harness in (ClaudeCodeHarness(),)}
+class CursorHarness:
+    name = "cursor"
+    label = "Cursor"
+
+    def provider(self, settings: Settings, meetings_dir: Path | None = None) -> LLMProvider:
+        from .cursor_agent import CursorAgentProvider
+
+        return CursorAgentProvider(settings, meetings_dir)
+
+    def readiness(self, settings: Settings) -> Readiness:
+        from . import cursor_agent
+
+        workdir = settings.brain.directory()
+        if cursor_agent.cursor_agent_binary() is None:
+            return Readiness("failed", "the cursor harness is selected but the Cursor CLI (cursor-agent) is not installed")
+        if not workdir.is_dir():
+            return Readiness("failed", f"brain.workdir does not exist: {workdir}")
+        model = settings.brain.model or "Cursor's default model"
+        return Readiness("ok", f"Cursor agent in {workdir} with {model}; it loads your Cursor rules, hooks and MCP servers")
+
+
+HARNESSES: dict[str, Harness] = {harness.name: harness for harness in (ClaudeCodeHarness(), CursorHarness())}
 
 
 def harness_for(settings: Settings) -> Harness:

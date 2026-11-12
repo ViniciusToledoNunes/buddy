@@ -133,6 +133,36 @@ def config_command(path_only: bool = typer.Option(False, "--path", help="Print o
 
 
 @app.command()
+def brain(
+    harness: str = typer.Argument("", help="claude-code or cursor; empty shows the brain in use."),
+    model: str = typer.Option("", "--model", "-m", help="The harness's model; empty uses its default."),
+) -> None:
+    """Show or switch the agent Buddy runs as its brain; a switch applies from the next meeting."""
+    from .config import choose_brain
+    from .harness import HARNESSES, harness_for
+
+    if harness:
+        if harness not in HARNESSES:
+            console.print(f"[red]Unknown harness {harness!r}.[/red] Choose one of: {', '.join(HARNESSES)}")
+            raise typer.Exit(1)
+        try:
+            backup = choose_brain(harness, model)
+        except ValueError as exc:
+            console.print(f"[red]Not switched:[/red] {exc}")
+            raise typer.Exit(1)
+        if backup is not None:
+            console.print(f"Previous configuration saved to {backup}")
+    settings = load_settings()
+    chosen = harness_for(settings)
+    readiness = chosen.readiness(settings)
+    colors = {"ok": "green", "warning": "yellow", "failed": "red"}
+    console.print(f"Brain: [bold]{chosen.label}[/bold] ({chosen.name}), model: {settings.brain.model or 'its default'}")
+    console.print(f"[{colors[readiness.state]}]{readiness.state}[/{colors[readiness.state]}] {readiness.detail}")
+    if settings.llm_provider != "harness":
+        console.print(f"It runs when no Claude Code session follows the listener; llm_provider is {settings.llm_provider}.")
+
+
+@app.command()
 def hotkeys() -> None:
     """Run a small listener so the configured toggle hotkey can start/stop sessions."""
     settings = load_settings()
@@ -273,7 +303,7 @@ def listen(
         console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
         raise typer.Exit(code=1)
     settings = load_settings()
-    daemon = ListenDaemon(settings, runtime)
+    daemon = ListenDaemon(settings, runtime, brain_settings=load_settings)
     console.print('Listening for "Hey Buddy". Ctrl+C stops.' if settings.listen.wake_phrase
                   else "Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
     try:

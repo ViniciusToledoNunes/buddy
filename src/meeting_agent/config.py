@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -215,14 +218,25 @@ class BenchmarkConfig(BaseModel):
     models: list[str] = ["tiny.en", "base.en", "distil-small.en"]
 
 
+class CursorBrainConfig(BaseModel):
+    """Options of the Cursor harness (brain.harness: cursor)."""
+
+    # Without it the CLI refuses every shell command, and the agent spent 56s of one
+    # turn retrying a refused command instead of answering.
+    force: bool = True
+    timeout_seconds: float = Field(240.0, ge=20, le=900)
+
+
 class BrainConfig(BaseModel):
     """The agent Buddy runs headless as its brain (llm_provider: harness, and the auto brain)."""
 
-    harness: Literal["claude-code"] = "claude-code"
+    harness: Literal["claude-code", "cursor"] = "claude-code"
     model: str = ""  # empty: the harness's own default
+    # Claude Code only; Cursor names the effort in the model, as in gpt-5.3-codex-high.
     effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
     # The brain runs here, so it loads the context files that describe the user's work.
     workdir: str = ""
+    cursor: CursorBrainConfig = CursorBrainConfig()
 
     def directory(self) -> Path:
         configured = self.workdir.strip()
@@ -322,6 +336,58 @@ def load_settings(path: Path | None = None) -> Settings:
     settings = Settings.model_validate(data)
     load_env_files(settings)
     return settings
+
+
+_BRAIN_BLOCK = re.compile(r"^brain:[ \t]*(#.*)?$")
+_BLOCK_KEY = re.compile(r"^(\s+)(\w+):\s*([^#]*?)(\s*#.*)?$")
+
+
+def _yaml_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _with_brain_choice(text: str, values: dict[str, str]) -> str:
+    lines = text.splitlines()
+    if any(line.startswith("brain:") and not _BRAIN_BLOCK.match(line) for line in lines):
+        raise ValueError("the brain block is written inline; edit it by hand")
+    start = next((i for i, line in enumerate(lines) if _BRAIN_BLOCK.match(line)), None)
+    if start is None:
+        block = ["brain:", *(f"  {key}: {_yaml_quoted(value)}" for key, value in values.items())]
+        return text.rstrip("\n") + "\n\n" + "\n".join(block) + "\n"
+    end = start + 1
+    while end < len(lines) and (not lines[end].strip() or lines[end][0] in " \t"):
+        end += 1
+    children = [line for line in lines[start + 1:end] if line.strip() and not line.lstrip().startswith("#")]
+    indent = min((len(line) - len(line.lstrip()) for line in children), default=2)
+    pending = dict(values)
+    for index in range(start + 1, end):
+        match = _BLOCK_KEY.match(lines[index])
+        if match and len(match.group(1)) == indent and match.group(2) in pending:
+            key = match.group(2)
+            lines[index] = f"{match.group(1)}{key}: {_yaml_quoted(pending.pop(key))}{match.group(4) or ''}"
+    lines[start + 1:start + 1] = [f"{' ' * indent}{key}: {_yaml_quoted(value)}" for key, value in pending.items()]
+    return "\n".join(lines) + "\n"
+
+
+def choose_brain(harness: str, model: str = "", path: Path | None = None) -> Path | None:
+    """Writes brain.harness and brain.model into the configuration, keeping its comments.
+
+    The model is written even when empty: model names differ between harnesses, so the
+    previous harness's model would be refused by the next one. Returns the backup made of
+    the file it changed, if there was one.
+    """
+    target = path or config_path()
+    source = target if target.exists() else project_root() / "config.example.yaml"
+    updated = _with_brain_choice(source.read_text(encoding="utf-8"), {"harness": harness, "model": model})
+    written = Settings.model_validate(yaml.safe_load(updated) or {}).brain
+    if (written.harness, written.model) != (harness, model):
+        raise ValueError(f"could not write the brain choice into {target}; edit its brain block by hand")
+    backup = None
+    if target.exists():
+        backup = target.with_name(f"{target.name}.bak-{datetime.now():%Y%m%d-%H%M%S}")
+        shutil.copy2(target, backup)
+    target.write_text(updated, encoding="utf-8")
+    return backup
 
 
 def load_env_files(settings: Settings) -> list[str]:
