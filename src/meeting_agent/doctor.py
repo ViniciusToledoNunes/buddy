@@ -101,7 +101,18 @@ def run_doctor(settings: Settings) -> list[Check]:
         )
         checks.append(Check("Anthropic API", "not-needed", reason))
     checks.append(brain_check(settings))
+    if settings.listen.auto_brain and settings.llm_provider != "harness":
+        checks.append(listener_brain_check(settings))
     return checks
+
+
+def listener_brain_check(settings: Settings) -> Check:
+    """The listener's own brain runs the `brain` harness whatever llm_provider says."""
+    from .harness import harness_for
+
+    harness = harness_for(settings)
+    readiness = harness.readiness(settings)
+    return Check("Listener brain", readiness.state, f"{harness.label}, when no session follows: {readiness.detail}")
 
 
 def brain_check(settings: Settings) -> Check:
