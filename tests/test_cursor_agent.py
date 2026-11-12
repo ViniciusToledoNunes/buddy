@@ -165,6 +165,19 @@ def test_force_can_be_turned_off_and_no_model_means_cursors_default(tmp_path, sp
     assert "--force" not in command and "--model" not in command and "--add-dir" not in command
 
 
+def test_context_folders_are_added_and_missing_or_file_sources_are_not(tmp_path, spawned):
+    launches, queue = spawned
+    queue.append(_turn(FIRST_TURN))
+    (tmp_path / "repos").mkdir()
+    (tmp_path / "CLAUDE.md").write_text("rules", encoding="utf-8")
+    settings = _settings(tmp_path)
+    settings.memory.sources = [str(tmp_path / "repos"), str(tmp_path / "CLAUDE.md"), str(tmp_path / "gone")]
+    asyncio.run(CursorAgentProvider(settings).complete("s", "p"))
+
+    command = launches[0]["command"]
+    assert [command[i + 1] for i, part in enumerate(command) if part == "--add-dir"] == [str(tmp_path / "repos")]
+
+
 def test_a_refused_model_fails_with_cursors_reason_and_a_fresh_chat_follows(tmp_path, spawned):
     launches, queue = spawned
     queue += [_turn(FIRST_TURN), FakeProcess(b"", UNKNOWN_MODEL, returncode=1), _turn(FIRST_TURN)]

@@ -202,7 +202,8 @@ class CommandRunner:
         from .working_memory import memory_prompt
 
         writer = f"buddy-{settings.brain.harness}"
-        return command_system_prompt(buddy_tool_command(), memory=memory_prompt(settings.memory.directory(), writer))
+        memory = memory_prompt(settings.memory.directory(), writer, settings.memory.source_paths())
+        return command_system_prompt(buddy_tool_command(), memory=memory)
 
     def submit(self, prompt: str, quiet: bool = False) -> None:
         """Queue a prompt. A quiet one is work Buddy started itself: no "on it" line, and a

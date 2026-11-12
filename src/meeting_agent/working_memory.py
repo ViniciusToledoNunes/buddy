@@ -60,7 +60,18 @@ def commit_memory(directory: Path, message: str = "") -> str:
     return message if done.returncode == 0 else ""
 
 
-def memory_prompt(directory: Path, writer: str = "") -> str:
+def sources_prompt(sources: list[Path]) -> str:
+    if not sources:
+        return ""
+    listed = ", ".join(path.as_posix() for path in sources)
+    return (
+        f" More context you may read and never change: {listed}. Search them when the request or "
+        "the memory needs more: past agent conversations, agent rules and instructions, repositories, "
+        "earlier meetings with their transcripts and screenshots."
+    )
+
+
+def memory_prompt(directory: Path, writer: str = "", sources: list[Path] | None = None) -> str:
     """What the brain is told about the memory: read always; keep it only when it may write."""
     if not directory.is_dir():
         return ""
@@ -79,4 +90,4 @@ def memory_prompt(directory: Path, writer: str = "") -> str:
         )
     else:
         text += " Do not change it now."
-    return text
+    return text + sources_prompt(sources or [])

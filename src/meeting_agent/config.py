@@ -252,6 +252,23 @@ class MemoryConfig(BaseModel):
     # While the listener runs, changes from any agent go into the folder's own git, so a bad
     # write is one `git revert` away. 0 turns it off.
     autocommit_seconds: float = Field(60.0, ge=0, le=3600)
+    # Folders the brain may read for context and never changes: past agent conversations,
+    # agent rules, repositories. Leave out anything that holds credentials.
+    sources: list[str] = []
+    # Local times (HH:MM) when the brain checks the memory against the real state of the work.
+    refresh_at: list[str] = []
+
+    @field_validator("refresh_at")
+    @classmethod
+    def _times(cls, value: list[str]) -> list[str]:
+        for moment in value:
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", moment):
+                raise ValueError(f"refresh_at takes HH:MM times, not {moment!r}")
+        return sorted(set(value))
+
+    def source_paths(self) -> list[Path]:
+        """The sources that exist here, files or folders."""
+        return [path for path in (Path(s).expanduser() for s in self.sources) if path.exists()]
 
     def directory(self) -> Path:
         path = Path(self.dir).expanduser()

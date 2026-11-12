@@ -26,6 +26,9 @@ brain:
 memory:
   dir: memory                # relative to the Buddy folder
   autocommit_seconds: 60     # commits any agent's changes while listening; 0 turns it off
+  refresh_at: []             # e.g. ["08:30", "17:30"]: the brain checks the plan against the real state
+  # Folders the brain may read for context and never changes. Leave out anything holding credentials.
+  sources: []                # e.g. ["~/.claude/projects", "~/.cursor/projects", "~/code"]
 
 # New Slack messages, read from the log a separate Slack watcher writes (Buddy holds no
 # Slack credential). Each new round goes to the brain, which proposes a reply card when a

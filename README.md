@@ -308,6 +308,18 @@ it; the brain that answers your commands also keeps it, and updates it from each
 coding agents at the same folder (for Claude Code, a symlink from its project memory to `memory/work` and an
 `@` import of `memory/global/MEMORY.md` in `~/.claude/CLAUDE.md`) and they all share one memory.
 
+A new memory is filled from the machine: Buddy looks at which tools are installed, which logins are active
+(`gh`, `gcloud`), the names of credential files (never their content), your agent folders and your
+repositories, and the brain writes how to reach each tool (`work/reference_access.md`), who you are and your
+current plan, checking with read-only commands. `buddy memory onboard` runs it again (`--probe` only prints
+what was found), and `buddy memory` shows the memory and its last changes. `memory.refresh_at` (for example
+`["08:30", "17:30"]`) has the brain check the plan against the real state of the work at those times: pull
+requests, tickets, commits, meetings, open Slack threads and cards. A missed time still runs within three
+hours; `buddy memory refresh` runs one now. Both run even while a session follows Buddy, in a queue of their
+own, so your commands are not held up. `memory.sources` lists folders the brain may read for context and
+never changes: past agent conversations (`~/.claude/projects`, `~/.cursor/projects`), agent rules, your
+repositories. Leave out anything that holds credentials, such as `~/.claude.json` or an MCP config.
+
 **Slack.** Buddy holds no Slack credential. A separate watcher (launchd or cron) appends each round of new
 messages to a dated log, and with `slack.enabled` the listener follows it: each round, minus
 `ignore_channels` and `ignore_authors`, shows in the window and goes to the brain, which reads the

@@ -119,6 +119,9 @@ class CursorAgentProvider(LLMProvider):
         memory = self.settings.memory.directory()
         if memory.is_dir():
             command += ["--add-dir", str(memory)]
+        for path in self.settings.memory.source_paths():
+            if path.is_dir():
+                command += ["--add-dir", str(path)]
         return command
 
     def message(self, system: str, prompt: str) -> str:

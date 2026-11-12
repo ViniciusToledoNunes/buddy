@@ -458,9 +458,12 @@ class ListenDaemon:
         # The built-in brain also answers the user's commands when no session follows.
         self._answer_commands = answer_commands
         self._commands: Any = None
-        # The user's working memory (memory.py): created if missing, committed while running.
+        self._chores: Any = None
+        # The user's working memory (working_memory.py): created if missing, committed while running.
         self._memory_dir = settings.memory.directory() if keep_memory else None
         self._memory_committed = 0.0
+        self._refresh: Any = None
+        self._refresh_checked = 0.0
         self._slack: Any = None
         self._slack_polled = 0.0
         self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
@@ -827,11 +830,39 @@ class ListenDaemon:
         from .working_memory import ensure_memory
 
         try:
-            if await asyncio.to_thread(ensure_memory, self._memory_dir):
-                self.events.append("NOTICE", text=f"Started the working memory in {self._memory_dir}.")
+            created = await asyncio.to_thread(ensure_memory, self._memory_dir)
         except Exception as exc:  # the memory is a help; listening must go on without it
             self.events.append("NOTICE", text=f"Could not start the working memory: {type(exc).__name__}: {exc}")
             self._memory_dir = None
+            return
+        if self._answer_commands and self.settings.memory.refresh_at:
+            from .memory_tasks import RefreshSchedule
+
+            self._refresh = RefreshSchedule(self.settings.memory.refresh_at, self.runtime_dir / "memory-refresh.json")
+        if created:
+            self.events.append("NOTICE", text=f"Started the working memory in {self._memory_dir}.")
+            await self._onboard()
+
+    async def _onboard(self) -> None:
+        """A new memory is empty: the brain fills it from what this machine has."""
+        from .memory_tasks import onboard_prompt, probe_machine
+
+        if not (self._answer_commands and self.settings.listen.auto_brain):
+            return
+        try:
+            probe = await asyncio.to_thread(probe_machine)
+        except Exception as exc:
+            self.events.append("NOTICE", text=f"Could not look around the machine: {type(exc).__name__}: {exc}")
+            return
+        self.events.append("NOTICE", text="Setting up the working memory from this machine; `buddy memory` shows it.")
+        self._hand_to_brain(onboard_prompt(probe), chore=True)
+
+    def _refresh_memory(self, slot: str) -> None:
+        from .claude_code import buddy_tool_command
+        from .memory_tasks import refresh_prompt
+
+        self.events.append("NOTICE", text=f"Checking the working memory against the real state of the work ({slot}).")
+        self._hand_to_brain(refresh_prompt(slot, self._meetings_dir(), buddy_tool_command()), quiet=True, chore=True)
 
     # ------------------------------------------------------------------ slack
 
@@ -1168,22 +1199,37 @@ class ListenDaemon:
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
         self._hand_to_brain(f'The user typed in Buddy\'s window: "{text}"')
 
-    def _hand_to_brain(self, prompt: str, quiet: bool = False) -> None:
-        """A command no session will read goes to Buddy's own brain, which replies in the window."""
-        if not self._answer_commands or not self.settings.listen.auto_brain or self.session_watching():
-            return
-        if self._commands is None:
-            from .autobrain import CommandRunner
+    def _meetings_dir(self) -> Path:
+        meetings = Path(self.settings.meetings_dir)
+        return meetings if meetings.is_absolute() else project_root() / meetings
 
-            meetings = Path(self.settings.meetings_dir)
-            self._commands = CommandRunner(
-                self._current_brain_settings,
-                meetings if meetings.is_absolute() else project_root() / meetings,
+    def _hand_to_brain(self, prompt: str, quiet: bool = False, chore: bool = False) -> None:
+        """A command no session will read goes to Buddy's own brain, which replies in the window.
+
+        Chores (onboarding, the scheduled refresh) are Buddy's own work: they run even while a
+        session follows, in a queue of their own so a long one never holds up the user's commands.
+        """
+        if not self._answer_commands or not self.settings.listen.auto_brain:
+            return
+        if not chore and self.session_watching():
+            return
+        runner = self._chores if chore else self._commands
+        if runner is None:
+            from .autobrain import CommandRunner
+            from .memory_tasks import for_chores
+
+            runner = CommandRunner(
+                (lambda: for_chores(self._current_brain_settings())) if chore else self._current_brain_settings,
+                self._meetings_dir(),
                 reply=lambda label, text: self._show("REPLY", by=label, text=text),
                 notice=lambda text: self.events.append("NOTICE", meeting=self.meeting_id, text=text),
                 working=lambda label: self._show("BRAIN", text=f"{label} is on it…"),
             )
-        self._commands.submit(prompt, quiet=quiet)
+            if chore:
+                self._chores = runner
+            else:
+                self._commands = runner
+        runner.submit(prompt, quiet=quiet)
 
     # ---------------------------------------------------------------- actions
 
@@ -1278,6 +1324,11 @@ class ListenDaemon:
         if self._slack is not None and now - self._slack_polled >= self.settings.slack.poll_seconds:
             self._slack_polled = now
             await self._poll_slack()
+        if self._refresh is not None and now - self._refresh_checked >= 30:
+            self._refresh_checked = now
+            slot = self._refresh.due()
+            if slot:
+                self._refresh_memory(slot)
         if self.storage is None:
             return
         if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:

@@ -102,7 +102,7 @@ def brain_system_prompt(settings: Settings, meetings_dir: Path | None) -> str:
         )
     from .working_memory import memory_prompt
 
-    memory = memory_prompt(settings.memory.directory())
+    memory = memory_prompt(settings.memory.directory(), sources=settings.memory.source_paths())
     if memory:
         parts.append(memory)
     if copilot.claude_instructions.strip():
@@ -215,6 +215,7 @@ class ClaudeCodeProvider(LLMProvider):
         memory = self.settings.memory.directory()
         if memory.is_dir():
             directories.insert(0, str(memory))
+        directories += [str(path) for path in self.settings.memory.source_paths() if path.is_dir()]
         if self.meetings_dir is not None:
             directories.insert(0, str(self.meetings_dir))
         if directories:
