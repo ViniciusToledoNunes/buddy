@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,30 @@ def cursor_agent_binary() -> str | None:
             return found
     installed = Path.home() / ".local" / "bin" / "cursor-agent"
     return str(installed) if installed.exists() else None
+
+
+_MODEL_LINE = re.compile(r"^(\S+) - (.+)$")
+
+
+def parse_models(output: str) -> list[tuple[str, str]]:
+    """`cursor-agent models` prints one `id - Name` line per model between a title and a tip."""
+    models = []
+    for line in output.splitlines():
+        match = _MODEL_LINE.match(line.strip())
+        if match:
+            models.append((match.group(1), match.group(2).strip()))
+    return models
+
+
+def list_models(timeout: float = 30.0) -> list[tuple[str, str]]:
+    binary = cursor_agent_binary()
+    if binary is None:
+        return []
+    try:
+        done = subprocess.run([binary, "models"], capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_models(done.stdout)
 
 
 def _result(output: str) -> dict[str, Any]:

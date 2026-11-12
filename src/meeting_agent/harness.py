@@ -31,11 +31,19 @@ class Harness(Protocol):
 
     def readiness(self, settings: Settings) -> Readiness: ...
 
+    def models(self) -> list[tuple[str, str]]:
+        """(id, name) of the models brain.model may name; may run the CLI for a few seconds."""
+        ...
+
 
 class ClaudeCodeHarness:
     name = "claude-code"
     label = "Claude Code"
     context_files = ("CLAUDE.md", "CLAUDE.local.md")
+
+    def models(self) -> list[tuple[str, str]]:
+        # The CLI cannot list them; these aliases follow the newest model of each family.
+        return [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
 
     def provider(self, settings: Settings, meetings_dir: Path | None = None) -> LLMProvider:
         from .claude_code import ClaudeCodeProvider
@@ -63,6 +71,11 @@ class CursorHarness:
         from .cursor_agent import CursorAgentProvider
 
         return CursorAgentProvider(settings, meetings_dir)
+
+    def models(self) -> list[tuple[str, str]]:
+        from .cursor_agent import list_models
+
+        return list_models()
 
     def readiness(self, settings: Settings) -> Readiness:
         from . import cursor_agent

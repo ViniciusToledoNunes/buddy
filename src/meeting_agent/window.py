@@ -74,6 +74,7 @@ class WindowApi:
         announce: Callable[[Path, int], None] = approve_action,
         copy: Callable[[str], bool] = copy_text,
         open_url: Callable[[str], bool] = open_link,
+        config_file: Path | None = None,
     ) -> None:
         self._runtime_dir = runtime_dir
         self._view = view
@@ -82,6 +83,8 @@ class WindowApi:
         self._announce = announce
         self._copy = copy
         self._open = open_url
+        self._config_file = config_file
+        self._models: dict[str, list[tuple[str, str]]] = {}
         self._window: Any = None
 
     def _off(self) -> dict[str, Any] | None:
@@ -160,6 +163,51 @@ class WindowApi:
         if self._window is not None:
             self._window.on_top = bool(on_top)
         return {"ok": True, "on_top": bool(on_top)}
+
+    def get_brain(self) -> dict[str, Any]:
+        """The 🧠 panel: which harness and model the brain runs, and whether it can."""
+        from .config import load_settings
+        from .harness import HARNESSES, harness_for
+
+        try:
+            settings = load_settings(self._config_file)
+        except Exception as exc:  # a config caught mid-edit
+            return {"ok": False, "error": f"Could not read the configuration: {exc}"}
+        harness = harness_for(settings)
+        readiness = harness.readiness(settings)
+        return {
+            "ok": True,
+            "harness": harness.name,
+            "model": settings.brain.model,
+            "harnesses": [{"name": h.name, "label": h.label} for h in HARNESSES.values()],
+            "readiness": {"state": readiness.state, "detail": readiness.detail},
+        }
+
+    def brain_models(self, harness: str) -> dict[str, Any]:
+        from .harness import HARNESSES
+
+        chosen = HARNESSES.get(str(harness or ""))
+        if chosen is None:
+            return {"ok": False, "error": f"Unknown harness: {harness}"}
+        if chosen.name not in self._models:
+            self._models[chosen.name] = chosen.models()
+        return {"ok": True, "models": [{"id": i, "label": label} for i, label in self._models[chosen.name]]}
+
+    def set_brain(self, harness: str, model: str = "") -> dict[str, Any]:
+        """Switch from the window; the listener picks it up when the next meeting starts its brain."""
+        from .config import choose_brain
+        from .harness import HARNESSES
+
+        harness, model = str(harness or ""), str(model or "").strip()
+        if harness not in HARNESSES:
+            return {"ok": False, "error": f"Unknown harness: {harness}"}
+        if len(model) > 200 or any(ch.isspace() for ch in model):
+            return {"ok": False, "error": "A model name is one word, as the harness lists it."}
+        try:
+            choose_brain(harness, model, self._config_file)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        return self.get_brain()
 
 
 class Pump:
@@ -304,6 +352,13 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #board .compact .blk { color: var(--rec); margin-left: 6px; }
 #board.small .compact { display: block; }
 #board.small .full { display: none; }
+#brain-panel { display: none; margin: 10px 12px 0; }
+#brain-panel .brain-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+#brain-panel label { width: 56px; color: var(--muted); font-size: 12px; flex: none; }
+#brain-panel select, #brain-panel input { flex: 1; min-width: 0; font: inherit; color: inherit; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+#brain-panel .state.ok { color: var(--ok); }
+#brain-panel .state.warning, #brain-panel .state.failed { color: var(--warn); }
 #actions { display: none; margin: 10px 12px 0; }
 #actions h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 6px; }
@@ -389,11 +444,20 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     <button id="meeting" title="Start or end recording a meeting">⏺ Meeting</button>
     <button id="pause" title="Close or reopen the microphone">⏸</button>
     <button id="show" title="Show only what Buddy started, or the whole Claude session">Only Buddy</button>
+    <button id="brain-button" title="Brain: harness and model">🧠</button>
     <button id="pin" class="on" title="Keep this window above the others">📌</button>
     <button id="power" class="danger" title="Turn Buddy off">⏻</button>
   </span>
 </header>
 <div id="panels">
+  <section id="brain-panel" class="card">
+    <div class="panel-title">Brain</div>
+    <div class="brain-row"><label for="brain-harness">Harness</label><select id="brain-harness"></select></div>
+    <div class="brain-row"><label for="brain-model">Model</label>
+      <input id="brain-model" list="brain-models" placeholder="its default" spellcheck="false"><datalist id="brain-models"></datalist></div>
+    <div class="buttons"><button id="brain-save" class="approve">Save</button><button id="brain-close">Close</button></div>
+    <div id="brain-state" class="state"></div>
+  </section>
   <section id="actions"><h2 id="actions-title">Actions</h2><div id="action-list"></div></section>
   <section id="board" title="Your work: now, next, blocked"><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
 </div>
@@ -771,7 +835,50 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     $("power").title = "Click again to turn Buddy off";
     setTimeout(() => { $("power").classList.remove("armed"); $("power").title = "Turn Buddy off"; }, 4000);
   });
-  window.addEventListener("pywebviewready", () => input.focus());
+  // 🧠: pick the harness and model of Buddy's own brain. Saved to config.yaml; the
+  // listener reads it when the next meeting starts its brain.
+  const brainPanel = $("brain-panel");
+  const option = (value, text) => { const o = document.createElement("option"); o.value = value; o.textContent = text; return o; };
+  async function loadModels(harness) {
+    const list = $("brain-models");
+    list.replaceChildren();
+    $("brain-model").placeholder = "loading models…";
+    const r = await call("brain_models", harness);
+    $("brain-model").placeholder = "its default";
+    if (r.ok && $("brain-harness").value === harness) list.replaceChildren(...r.models.map((m) => option(m.id, m.label)));
+  }
+  function showBrain(r, saved) {
+    $("brain-harness").replaceChildren(...r.harnesses.map((h) => option(h.name, h.label)));
+    $("brain-harness").value = r.harness;
+    $("brain-model").value = r.model;
+    const label = (r.harnesses.find((h) => h.name === r.harness) || {}).label || r.harness;
+    $("brain-button").title = `Brain: ${label}${r.model ? " · " + r.model : ""}`;
+    const state = $("brain-state");
+    state.className = "state " + r.readiness.state;
+    state.textContent = (saved ? "Saved: applies from the next meeting. " : "") + (r.readiness.state === "ok" ? "✓ " : "⚠ ") + r.readiness.detail;
+  }
+  $("brain-button").addEventListener("click", async () => {
+    if (brainPanel.style.display === "block") { brainPanel.style.display = "none"; return; }
+    const r = await call("get_brain");
+    if (!r.ok) { showError(r.error); return; }
+    showBrain(r, false);
+    brainPanel.style.display = "block";
+    loadModels(r.harness);
+  });
+  $("brain-harness").addEventListener("change", () => { $("brain-model").value = ""; loadModels($("brain-harness").value); });
+  $("brain-close").addEventListener("click", () => { brainPanel.style.display = "none"; });
+  $("brain-save").addEventListener("click", async () => {
+    $("brain-save").disabled = true;
+    const r = await call("set_brain", $("brain-harness").value, $("brain-model").value.trim());
+    $("brain-save").disabled = false;
+    if (!r.ok) { showError(r.error); return; }
+    showBrain(r, true);
+  });
+  window.addEventListener("pywebviewready", async () => {
+    input.focus();
+    const r = await call("get_brain");
+    if (r.ok) showBrain(r, false);
+  });
 })();
 </script>
 </body>
