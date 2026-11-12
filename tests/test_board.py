@@ -90,3 +90,36 @@ def test_the_board_cli(tmp_path, monkeypatch):
     assert runner.invoke(cli.app, ["board", "done", "1"]).exit_code == 0
     assert runner.invoke(cli.app, ["board", "set", "7", "-s", "now"]).exit_code == 2
     assert runner.invoke(cli.app, ["board", "rm", "1"]).exit_code == 0
+
+
+def test_finishing_or_starting_ticketed_work_proposes_moving_the_ticket(tmp_path, monkeypatch):
+    from meeting_agent.actions import ActionStore
+
+    monkeypatch.setattr(cli, "_runtime_dir", lambda: tmp_path)
+    runner = CliRunner()
+    runner.invoke(cli.app, ["board", "add", "PMT validation", "-s", "next", "-t", "QCMVEN-1"])
+    Board(tmp_path).set("QCMVEN-1", ticket_status="To Do")
+
+    started = runner.invoke(cli.app, ["board", "set", "1", "-s", "now"]).output
+    finished = runner.invoke(cli.app, ["board", "done", "1"]).output
+    again = runner.invoke(cli.app, ["board", "move-ticket", "1", "Done"]).output
+
+    assert "Move QCMVEN-1 to In Progress in Jira" in started
+    assert "Move QCMVEN-1 to Done in Jira" in finished
+    assert "already waiting" in again  # one card per move
+    cards = ActionStore(tmp_path).all()
+    assert [c.kind for c in cards] == ["ticket", "ticket"] and all(c.outward for c in cards)
+    assert "Jira says To Do" in cards[0].detail
+
+
+def test_a_ticket_move_is_proposed_on_request_and_never_for_work_without_a_ticket(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "_runtime_dir", lambda: tmp_path)
+    runner = CliRunner()
+    runner.invoke(cli.app, ["board", "add", "Speaker names", "-s", "now", "-t", "BUD-7"])
+    runner.invoke(cli.app, ["board", "add", "No ticket", "-s", "next"])
+
+    review = runner.invoke(cli.app, ["board", "move-ticket", "BUD-7", "Code Review", "-r", "PR #18 open"]).output
+    assert "Move BUD-7 to Code Review in Jira" in review
+    assert "Proposed" not in runner.invoke(cli.app, ["board", "done", "2"]).output
+    Board(tmp_path).set("BUD-7", ticket_status="Done")
+    assert "Proposed" not in runner.invoke(cli.app, ["board", "done", "BUD-7"]).output  # Jira is already there

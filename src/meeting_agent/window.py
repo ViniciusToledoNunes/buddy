@@ -560,7 +560,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   }
 
   // Action cards. Rebuilt only when an action changes, and never while you edit it.
-  const KIND = {reply: "Reply", review: "Review", investigate: "Look into", merge: "Merge", post: "Post", run: "Run", other: "Action"};
+  const KIND = {reply: "Reply", review: "Review", investigate: "Look into", merge: "Merge", post: "Post", ticket: "Jira", run: "Run", other: "Action"};
   const cards = new Map(), editing = new Set();
   function card(a) {
     const el = document.createElement("div");

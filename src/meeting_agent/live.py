@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .events import utc_now
-from .listener import EventReader, _process_started, _read_json, _write_json, listener_state, process_alive
+from .listener import EventReader, _process_started, _read_json, _write_json, brain_alive, listener_state, process_alive
 
 # The description the buddy-listener skill gives its Monitor.
 BUDDY_MONITOR = 'Monitor event: "Buddy listener'
@@ -124,8 +124,24 @@ def register_brain(runtime_dir: Path, session_id: str, consumer: str) -> None:
     _write_json(
         runtime_dir / "brain.json",
         {"session_id": session_id, "consumer": consumer, "pid": os.getpid(),
-         "started": _process_started(os.getpid()), "registered": utc_now()},
+         "started": _process_started(os.getpid()), "registered": utc_now(), "seen_at": time.time()},
     )
+
+
+def brain_seen(runtime_dir: Path, session_id: str, consumer: str) -> None:
+    """A one-shot `buddy watch` from a session: it is connected, checking every few seconds.
+
+    A following watch (`--follow`) of the same session already says so by being alive and
+    is left alone; any other record is replaced, since this session is the one reading now.
+    """
+    path = runtime_dir / "brain.json"
+    state = _read_json(path)
+    if state.get("session_id") == session_id and process_alive(state) and state.get("pid") != os.getpid():
+        return
+    same = state.get("session_id") == session_id
+    registered = (state.get("registered") if same else None) or utc_now()
+    _write_json(path, {"session_id": session_id, "consumer": consumer, "pid": os.getpid(),
+                       "started": _process_started(os.getpid()), "registered": registered, "seen_at": time.time()})
 
 
 def unregister_brain(runtime_dir: Path) -> None:
@@ -139,7 +155,7 @@ def brain_state(runtime_dir: Path) -> dict[str, Any] | None:
     state = _read_json(runtime_dir / "brain.json")
     if not state.get("session_id"):
         return None
-    return {**state, "watching": process_alive(state)}
+    return {**state, "watching": brain_alive(state)}
 
 
 def numbered_items(text: str) -> list[str]:

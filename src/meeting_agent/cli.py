@@ -300,7 +300,7 @@ def watch(
     room, and a monitor must not outlive the listener it follows.
     """
     from .listener import EventReader, format_event, listener_state
-    from .live import register_brain, unregister_brain
+    from .live import brain_seen, register_brain, unregister_brain
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -315,6 +315,8 @@ def watch(
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if follow and not peek and session_id:
         register_brain(runtime, session_id, safe)
+    elif not peek and session_id:
+        brain_seen(runtime, session_id, safe)  # checking in a loop is being connected too
 
     def drain() -> None:
         nonlocal cursor, last_type
@@ -445,13 +447,25 @@ def board_show(ctx: typer.Context) -> None:
             console.print(f"{item['id']:>3}  {status:<8} {item['title']}{ticket}{extra}", markup=False)
 
 
-def _board_call(action):
+def _board_call(action, key=None):
+    from .board import suggested_move, ticket_move
+
+    board = _board()
+    try:
+        previous = board._find(board.items(), key).status if key is not None else ""
+    except LookupError:
+        previous = ""
     try:
         item = action()
     except (LookupError, ValueError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=2)
     console.print(f"Board item {item.id} ({item.status}): {item.title}", markup=False)
+    target = suggested_move(item, previous)
+    if target:
+        card = ticket_move(_runtime_dir(), item, target, ticket_url=load_settings().listen.board_ticket_url)
+        if card is not None:
+            console.print(f"Proposed action {card.id}: {card.title}", markup=False)
 
 
 @board_app.command("add")
@@ -464,7 +478,7 @@ def board_add(
     note: str = typer.Option("", "--note", "-n", help="One short line: the next step, a PR."),
 ) -> None:
     """Add an item to the board."""
-    _board_call(lambda: _board().add(title, status, ticket, link, blocker, note))
+    _board_call(lambda: _board().add(title, status, ticket, link, blocker, note))  # new: no move suggested
 
 
 @board_app.command("set")
@@ -480,13 +494,35 @@ def board_set(
     ticket_assignee: str = typer.Option(None, "--ticket-assignee"),
 ) -> None:
     """Change an item: its status, blocker, note or ticket."""
-    _board_call(lambda: _board().set(item, title, status, ticket, link, blocker, note, ticket_status, ticket_assignee))
+    _board_call(lambda: _board().set(item, title, status, ticket, link, blocker, note, ticket_status, ticket_assignee), item)
 
 
 @board_app.command("done")
 def board_done(item: str = typer.Argument(..., help="The item's number or its ticket key.")) -> None:
     """Mark an item done (shown under Done today, then gone)."""
-    _board_call(lambda: _board().set(item, status="done"))
+    _board_call(lambda: _board().set(item, status="done"), item)
+
+
+@board_app.command("move-ticket")
+def board_move_ticket(
+    item: str = typer.Argument(..., help="The item's number or its ticket key."),
+    target: str = typer.Argument(..., help="The Jira status to move it to, e.g. \"Code Review\"."),
+    reason: str = typer.Option("", "--reason", "-r", help="Why, in a few words: \"PR #18 open\"."),
+) -> None:
+    """Propose moving an item's ticket in Jira: a card to approve, never a move by itself."""
+    from .board import ticket_move
+
+    board = _board()
+    try:
+        found = board._find(board.items(), item)
+    except LookupError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    card = ticket_move(_runtime_dir(), found, target, reason, load_settings().listen.board_ticket_url)
+    if card is None:
+        console.print("Nothing to propose: no ticket, already there, or already waiting on a card.")
+        return
+    console.print(f"Proposed action {card.id}: {card.title}", markup=False)
 
 
 @board_app.command("rm")

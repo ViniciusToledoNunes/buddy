@@ -191,6 +191,10 @@ job keeps it in sync). During a meeting it shrinks to one line, "Now: …". The 
 as things happen: `buddy board add "<title>" --status now|next|blocked|done [--ticket KEY-1] [--note ...]`,
 `buddy board set <n|KEY-1> --status blocked --blocker "<why>"`, `buddy board done <n>`, `buddy board rm <n>`;
 `buddy board` prints it and `buddy board tickets` lists its open tickets. It lives in `.meeting-agent/board.json`.
+When ticketed work moves on, Buddy proposes moving the ticket too, as a card to approve: `board done` suggests Done,
+moving an item to now suggests In Progress (when Jira still says To Do), and the session proposes others as they
+happen (`buddy board move-ticket <n|KEY-1> "Code Review" --reason "PR #18 open"`). A ticket is never moved without
+that click.
 
 **Action cards.** What the watching Claude Code session proposes to do for you (reply to a thread, review a
 PR, look into an error, merge, comment) shows as a card in Buddy's window, with the exact text when it leaves your
@@ -201,6 +205,9 @@ creates cards with `buddy propose "<title>" --kind reply|review|investigate|merg
 --link <url>` and reports with `buddy action <n> running|done|failed --result "..."`; `buddy actions` lists them.
 Cards live in `.meeting-agent/actions/`, one file each; a proposal runs at most once, and one from yesterday is
 marked as such.
+
+The window says "Claude connected" while a session follows Buddy (`buddy watch --follow`) or checks for events in
+a loop (`buddy watch`, seen in the last 90 seconds); otherwise the built-in brain answers meetings.
 
 Other controls: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. The MCP server (`meeting_status`,
 `get_live_transcript`, `stop_meeting`) sees meetings opened by the listener.

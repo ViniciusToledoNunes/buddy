@@ -158,6 +158,24 @@ def process_alive(state: dict[str, Any]) -> bool:
         return False
 
 
+# A session that checks for events every few seconds (`buddy watch` in a loop) is as
+# connected as one following them (`buddy watch --follow`): it counts while it was seen
+# this recently.
+BRAIN_SEEN_SECONDS = 90.0
+
+
+def brain_alive(state: dict[str, Any]) -> bool:
+    """Whether the session in brain.json is watching Buddy now."""
+    if not state.get("session_id"):
+        return False
+    try:
+        if time.time() - float(state.get("seen_at", 0)) <= BRAIN_SEEN_SECONDS:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return process_alive(state)
+
+
 def listener_state(runtime_dir: Path = DEFAULT_RUNTIME_DIR) -> dict[str, Any] | None:
     state = _read_json(runtime_dir / "listen.json")
     return state if state and process_alive(state) else None
@@ -715,8 +733,7 @@ class ListenDaemon:
 
     def session_watching(self) -> bool:
         """A Claude Code session is following the listener right now."""
-        state = _read_json(self.runtime_dir / "brain.json")
-        return bool(state.get("session_id")) and process_alive(state)
+        return brain_alive(_read_json(self.runtime_dir / "brain.json"))
 
     def _think(self, lines: list[str], trigger: dict[str, Any]) -> None:
         """Hand a batch to Buddy's own brain when no session is there to read it."""
