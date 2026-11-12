@@ -73,6 +73,8 @@ def item_from_feed(record: dict[str, Any]) -> LiveItem | None:
         return LiveItem("cancelled", "Command dropped.", at=at)
     if kind == "SUGGEST":  # Buddy's own brain, when no session follows
         return LiveItem("claude", "\n".join(str(item) for item in record.get("items", [])), at=at)
+    if kind == "REPLY":  # Buddy's own brain answering a command, named after its harness
+        return LiveItem("claude", str(record.get("text", "")), who=str(record.get("by", "")), at=at)
     if kind == "BRAIN":
         return LiveItem("state", str(record.get("text", "")), at=at)
     return None
@@ -436,6 +438,8 @@ def terminal_line(item: LiveItem) -> str:
         label = item.who
     elif item.kind == "command":
         label = f"{item.who} ➜"
+    elif item.kind == "claude" and item.who:
+        label = item.who
     else:
         label = LABELS.get(item.kind, item.kind)
     head = f"{label} " if label else ""

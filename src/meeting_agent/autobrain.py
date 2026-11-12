@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any, Callable
 
-from .config import Settings
+from .config import Settings, project_root
 from .copilot import REPORT_SECTIONS, LLMProvider, _extract_json
 
 UPDATE_PROMPT = """New speech since your last update ({count} lines):
@@ -120,6 +121,116 @@ class BrainRunner:
 
     async def finish(self, timeout: float) -> None:
         """Let the call in flight end, so the last suggestions are not lost."""
+        if self._task is not None and not self._task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self._task), timeout)
+            except (TimeoutError, asyncio.TimeoutError):
+                pass
+
+
+COMMAND_INTRO = """You are Buddy's brain. The user talks to Buddy from its small floating window, typing
+or dictating, and no editor session is following Buddy right now, so you answer them. You
+already know the user and their work from your loaded context; use it.
+
+Reply in plain text or short Markdown, in the language the user wrote in: it is read in a small
+window. Say what you did or what you found, without preamble.
+
+A message with `ACTION_APPROVED id=N` means the user clicked Approve on card N, which was
+proposed to them. That click approves exactly the content shown: do it now, as written in `detail`,
+without asking again. First `BUDDY_COMMAND action N running`, then
+`BUDDY_COMMAND action N done --result "<one line>" [--link <where>]`, or
+`failed --result "<why>"` when it could not be done."""
+
+# The skill teaches a watching session how to act on commands; the built-in brain follows
+# the same rules, so the two never disagree on what needs the user's approval.
+COMMAND_SKILL_SECTIONS = ("Action cards", "Work board", "Commands", "Boundaries")
+
+
+def _skill_section(text: str, title: str) -> str:
+    match = re.search(rf"^## {re.escape(title)}\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    return f"## {title}\n{match.group(1).strip()}" if match else ""
+
+
+def command_system_prompt(buddy_command: str, skill: Path | None = None) -> str:
+    path = skill or project_root() / "skills" / "buddy-listener" / "SKILL.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    sections = [_skill_section(text, title) for title in COMMAND_SKILL_SECTIONS]
+    return "\n\n".join([COMMAND_INTRO, *filter(None, sections)]).replace("BUDDY_COMMAND", buddy_command)
+
+
+class CommandRunner:
+    """Answers what the user types or dictates in the window when no session follows Buddy.
+
+    One call at a time, in one conversation that lasts while the listener runs, so a
+    follow-up can say "that one". A switch of harness or model in the window starts a
+    new conversation with the new one.
+    """
+
+    def __init__(
+        self,
+        settings: Callable[[], Settings],
+        meetings_dir: Path | None,
+        reply: Callable[[str, str], None],
+        notice: Callable[[str], None],
+        working: Callable[[str], None] = lambda label: None,
+        provider_factory: Callable[[Settings], LLMProvider] | None = None,
+    ) -> None:
+        self.settings = settings
+        self.meetings_dir = meetings_dir
+        self.reply = reply
+        self.notice = notice
+        self.working = working
+        self.provider_factory = provider_factory or self._harness_provider
+        self.provider: LLMProvider | None = None
+        self._choice: tuple[str, str] | None = None
+        self._pending: list[str] = []
+        self._task: asyncio.Task[None] | None = None
+
+    def _harness_provider(self, settings: Settings) -> LLMProvider:
+        from .harness import harness_for
+
+        return harness_for(settings).provider(settings, self.meetings_dir)
+
+    def system_prompt(self) -> str:
+        from .claude_code import buddy_tool_command
+
+        return command_system_prompt(buddy_tool_command())
+
+    def submit(self, prompt: str) -> None:
+        self._pending.append(prompt)
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._drain())
+
+    def _provider_for(self, settings: Settings) -> LLMProvider:
+        choice = (settings.brain.harness, settings.brain.model)
+        if self.provider is None or choice != self._choice:
+            self.provider = self.provider_factory(settings)
+            self._choice = choice
+        return self.provider
+
+    async def _drain(self) -> None:
+        from .harness import harness_for
+
+        while self._pending:
+            prompt = self._pending.pop(0)
+            settings = self.settings()
+            label = harness_for(settings).label
+            provider = self._provider_for(settings)
+            if not provider.available():
+                self.notice(f"Nobody can answer: no session follows Buddy and {label} is not available here.")
+                continue
+            self.working(label)
+            try:
+                answer = await provider.complete(self.system_prompt(), prompt)
+            except Exception as exc:  # a failed call must never stop the listening
+                self.notice(f"{label} could not answer: {type(exc).__name__}: {exc}")
+                continue
+            self.reply(label, answer.strip() or "(no reply)")
+
+    async def finish(self, timeout: float) -> None:
         if self._task is not None and not self._task.done():
             try:
                 await asyncio.wait_for(asyncio.shield(self._task), timeout)

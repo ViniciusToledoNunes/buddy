@@ -433,12 +433,16 @@ class ListenDaemon:
         clock: Callable[[], float] = time.monotonic,
         brain_factory: Callable[[], Any] | None = None,
         brain_settings: Callable[[], Settings] | None = None,
+        answer_commands: bool = False,
     ) -> None:
         self.settings = settings
         self._brain_factory = brain_factory
         # Rereads the configuration when a meeting starts its brain, so `buddy brain`
         # switches harness or model without restarting the listener.
         self._brain_settings = brain_settings
+        # The built-in brain also answers the user's commands when no session follows.
+        self._answer_commands = answer_commands
+        self._commands: Any = None
         self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
         self._brain_off = False  # unavailable this meeting; said once
         self._summary_task: asyncio.Task[None] | None = None
@@ -1049,6 +1053,8 @@ class ListenDaemon:
         # anything said without "Hey Buddy" never becomes a command.
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended=ended)
         self.chime("sent")
+        unsure = "" if ended == "phrase" else " (sent after a silence; it may be incomplete)"
+        self._hand_to_brain(f'The user said to Buddy{unsure}: "{text}"')
 
     async def run_local(self, kind: str, reason: str = "voice") -> None:
         if reason == "voice":
@@ -1081,6 +1087,24 @@ class ListenDaemon:
             await self.run_local(kind, "typed")
             return
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
+        self._hand_to_brain(f'The user typed in Buddy\'s window: "{text}"')
+
+    def _hand_to_brain(self, prompt: str) -> None:
+        """A command no session will read goes to Buddy's own brain, which replies in the window."""
+        if not self._answer_commands or not self.settings.listen.auto_brain or self.session_watching():
+            return
+        if self._commands is None:
+            from .autobrain import CommandRunner
+
+            meetings = Path(self.settings.meetings_dir)
+            self._commands = CommandRunner(
+                self._current_brain_settings,
+                meetings if meetings.is_absolute() else project_root() / meetings,
+                reply=lambda label, text: self._show("REPLY", by=label, text=text),
+                notice=lambda text: self.events.append("NOTICE", meeting=self.meeting_id, text=text),
+                working=lambda label: self._show("BRAIN", text=f"{label} is on it…"),
+            )
+        self._commands.submit(prompt)
 
     # ---------------------------------------------------------------- actions
 
@@ -1094,7 +1118,8 @@ class ListenDaemon:
             return
         if action is None or action.status != "approved":
             return  # only an approved card is ever sent, and only once it is approved
-        self.events.append("ACTION_APPROVED", **approval_event(action))
+        record = self.events.append("ACTION_APPROVED", **approval_event(action))
+        self._hand_to_brain(format_event(record))
 
     # -------------------------------------------------------------- dictation
 

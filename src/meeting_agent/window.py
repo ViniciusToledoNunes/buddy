@@ -181,6 +181,8 @@ class WindowApi:
             "model": settings.brain.model,
             "harnesses": [{"name": h.name, "label": h.label} for h in HARNESSES.values()],
             "readiness": {"state": readiness.state, "detail": readiness.detail},
+            # Off, nobody answers a command when no session follows Buddy.
+            "auto_brain": settings.listen.auto_brain,
         }
 
     def brain_models(self, harness: str) -> dict[str, Any]:
@@ -479,6 +481,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   const feed = $("feed"), input = $("input"), errorBox = $("error");
   const MAX_ROWS = 600;
   let status = {listener: "off", brain: "none", suggestions: [], show: "buddy"};
+  let answering = "";  // the harness that answers commands when no session follows
   let pinned = true;
 
   const api = () => (window.pywebview && window.pywebview.api) || null;
@@ -508,6 +511,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     body.className = "body";
     let label = LABELS[item.kind] || "";
     if (item.kind === "said") label = item.who;
+    if (item.kind === "claude" && item.who) label = item.who;
     if (item.kind === "command") label = item.who === "typed" ? "Sent ➜" : "Sent by voice ➜";
     if (label) {
       const who = document.createElement("span");
@@ -552,11 +556,13 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       if (minutes !== null) label += " · " + minutes + " min";
     }
     $("state").textContent = label;
-    $("brain").textContent = {
-      watching: "· Claude connected",
-      idle: "· Claude's monitor is off",
-      none: "· no Claude session yet",
-    }[next.brain] || "";
+    $("brain").textContent = next.brain !== "watching" && answering && state !== "off"
+      ? "· " + answering + " answers"
+      : {
+        watching: "· Claude connected",
+        idle: "· Claude's monitor is off",
+        none: "· no Claude session yet",
+      }[next.brain] || "";
     const on = state !== "off";
     $("meeting").textContent = state === "meeting" ? "⏹ End meeting" : "⏺ Meeting";
     $("meeting").disabled = !on;
@@ -853,9 +859,11 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     $("brain-model").value = r.model;
     const label = (r.harnesses.find((h) => h.name === r.harness) || {}).label || r.harness;
     $("brain-button").title = `Brain: ${label}${r.model ? " · " + r.model : ""}`;
+    answering = r.auto_brain ? label : "";
+    if (status) setStatus(status);
     const state = $("brain-state");
     state.className = "state " + r.readiness.state;
-    state.textContent = (saved ? "Saved: applies from the next meeting. " : "") + (r.readiness.state === "ok" ? "✓ " : "⚠ ") + r.readiness.detail;
+    state.textContent = (saved ? "Saved: applies from the next command or meeting. " : "") + (r.readiness.state === "ok" ? "✓ " : "⚠ ") + r.readiness.detail;
   }
   $("brain-button").addEventListener("click", async () => {
     if (brainPanel.style.display === "block") { brainPanel.style.display = "none"; return; }
