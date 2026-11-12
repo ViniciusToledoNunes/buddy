@@ -264,9 +264,15 @@ buddy say "review PR 123"  # a typed command
 ## How the brain works
 
 With `llm_provider: harness`, every analysis is a headless run of the agent named in `brain.harness`; the
-listener's auto brain runs the same one. Claude Code is the only harness today (`brain.harness: claude-code`).
+listener's auto brain runs the same one. The harness is Claude Code (`claude-code`) or Cursor (`cursor`):
+`buddy brain cursor --model composer-2.5` switches it in `config.yaml`, keeping its comments and a backup, and
+`buddy brain` shows which one runs and whether it can. The listener rereads the choice when a meeting starts.
 Older configs that say `llm_provider: claude-code` and set `copilot.claude_workdir`, `claude_model` or
-`claude_effort` keep working: they become the `brain` settings. A Claude Code run:
+`claude_effort` keep working: they become the `brain` settings.
+
+Cursor runs as `cursor-agent -p` in `brain.workdir`, with your Cursor rules, hooks and MCP servers, one chat
+per meeting. Its CLI has no system-prompt option, so the instructions go in the chat's first message.
+`brain.cursor.force` (on by default) lets it run shell commands, which the CLI otherwise refuses. A Claude Code run:
 
 | Decision | Why |
 |---|---|

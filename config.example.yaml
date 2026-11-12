@@ -10,11 +10,15 @@ env_files: []
 # The agent Buddy runs headless as its brain: with llm_provider: harness, and as the
 # listener's auto brain. (Older configs name it llm_provider: claude-code and
 # copilot.claude_workdir/claude_model/claude_effort; those still work.)
+# `buddy brain cursor --model composer-2.5` switches it; `buddy brain` shows it.
 brain:
-  harness: claude-code       # claude-code
-  model: ''                  # empty uses the harness's default; e.g. opus, sonnet
-  effort: ''                 # low | medium | high | xhigh | max
+  harness: claude-code       # claude-code | cursor
+  model: ''                  # empty uses the harness's default; e.g. opus, sonnet; cursor-agent models lists Cursor's
+  effort: ''                 # claude-code only: low | medium | high | xhigh | max
   workdir: ''                # runs here, so it loads the CLAUDE.md that describes your work; empty: home
+  cursor:
+    force: true              # lets it run shell commands; without it the CLI refuses every one
+    timeout_seconds: 240
 
 audio:
   sample_rate: 24000
