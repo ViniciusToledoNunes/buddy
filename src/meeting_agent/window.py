@@ -387,9 +387,6 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 /* A finished card is one line (number, title, ✓/✗); a click on it shows the result and its links. */
 .card.finished:not(.open) .link, .card.finished:not(.open) .state { display: none; }
 .card.finished .top { cursor: pointer; }
-.fold-head { cursor: pointer; user-select: none; }
-.fold-head::before { content: "▾ "; }
-section.folded .fold-head::before { content: "▸ "; }
 #actions.folded > :not(h2), #suggestions.folded > :not(h2), #board.folded > :not(h2) { display: none !important; }
 .board-collapse { cursor: pointer; color: var(--muted); font-size: 11px; text-align: right; margin-bottom: 4px; }
 #board-full .col-title { cursor: pointer; }
@@ -408,8 +405,6 @@ section.folded .fold-head::before { content: "▸ "; }
 #activity-head { display: flex; align-items: center; gap: 6px; margin: 8px 12px 0; padding: 0; border: 0;
   color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; background: none; }
 #activity-head:hover { background: none; color: var(--text); }
-#activity-head .chev { transition: transform .15s; }
-body.activity-closed #activity-head .chev { transform: rotate(-90deg); }
 body.activity-closed #feed, body.activity-closed #jump { display: none !important; }
 #panels { overflow-y: auto; max-height: 58vh; flex: none; }
 body.activity-closed #panels { flex: 1; max-height: none; }
@@ -445,6 +440,20 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 #dictate.finishing { opacity: .6; }
 #input.listening { outline: 2px solid var(--rec); outline-offset: -1px; }
 #error { color: var(--rec); font-size: 12px; min-height: 0; }
+/* One look for every section: Actions, Work, Suggestions and Activity. The same head line outside any box
+   (small caps, muted, ▾ open / ▸ folded, counts in brackets); each section's content keeps its own box. */
+#actions, #board, #suggestions { margin: 10px 12px 0; padding: 0; background: none; border: 0; border-radius: 0; }
+#actions h2, #board h2, #suggestions h2, #activity-head {
+  display: block; width: auto; margin: 0 0 6px; padding: 0; border: 0; background: none; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  cursor: pointer; user-select: none; }
+#actions h2:hover, #board h2:hover, #suggestions h2:hover, #activity-head:hover { color: var(--text); background: none; }
+#actions h2::before, #board h2::before, #suggestions h2::before, #activity-head::before { content: "▾"; display: inline-block; width: 12px; }
+section.folded h2 { margin-bottom: 0; }
+section.folded h2::before, body.activity-closed #activity-head::before { content: "▸"; }
+#activity-head { margin: 10px 12px 6px; }
+#board .compact, #board .full { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; }
+#suggestions ol { background: var(--accent-soft); border-radius: var(--radius); padding: 8px 10px; }
 </style>
 </head>
 <body>
@@ -476,7 +485,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   <section id="board" title="Your work: now, next, blocked"><h2 id="board-title">Work</h2><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
 </div>
 <section id="suggestions"><h2 id="suggestions-title">Suggestions</h2><ol id="suggestion-list"></ol></section>
-<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> <span id="activity-label">Activity</span></button>
+<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span id="activity-label">Activity</span></button>
 <main id="feed"><div id="empty">Type below, or press 🎤 to talk to Buddy.<br>The meeting shows here as it is said.</div></main>
 <button id="jump">↓ New</button>
 <footer>
