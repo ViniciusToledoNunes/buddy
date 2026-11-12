@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -51,13 +52,38 @@ def list_models(timeout: float = 30.0) -> list[tuple[str, str]]:
     return parse_models(done.stdout)
 
 
+def _events(output: str) -> list[dict[str, Any]]:
+    # Anything printed between the events (a warning, a hook's notice) is skipped.
+    events = []
+    for line in output.splitlines():
+        with suppress(ValueError):
+            event = json.loads(line)
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
 def _result(output: str) -> dict[str, Any]:
-    text = output.strip()
-    try:
-        return json.loads(text)
-    except ValueError:
-        # Anything printed before the result (a warning, a hook's notice) precedes it.
-        return json.loads(text.splitlines()[-1]) if text else {}
+    results = [event for event in _events(output) if event.get("type", "result") == "result"]
+    if not results:
+        raise ValueError("no result event")
+    return results[-1]
+
+
+def _final_text(output: str) -> str:
+    """What the agent wrote after its last tool call.
+
+    The result event joins every message of the turn with no separator, so the steps it
+    narrated between tool calls ("I'll check Jira next.") ran into the answer.
+    """
+    texts: list[str] = []
+    for event in _events(output):
+        if event.get("type") == "tool_call":
+            texts = []
+        elif event.get("type") == "assistant":
+            content = (event.get("message") or {}).get("content") or []
+            texts += [part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"]
+    return "".join(texts).strip()
 
 
 class CursorAgentProvider(LLMProvider):
@@ -103,7 +129,7 @@ class CursorAgentProvider(LLMProvider):
             cursor_agent_binary() or "cursor-agent",
             "-p",
             "--output-format",
-            "json",
+            "stream-json",
             "--trust",
             "--workspace",
             str(self.workdir),
@@ -174,4 +200,4 @@ class CursorAgentProvider(LLMProvider):
             raise RuntimeError(f"the Cursor agent reported an error: {str(data.get('result') or data.get('subtype'))[:300]}")
         self.session_id = str(data.get("session_id") or "") or self.session_id
         self._instructions_sent = system
-        return str(data.get("result", ""))
+        return _final_text(output) or str(data.get("result", ""))

@@ -209,6 +209,36 @@ def test_a_notice_printed_before_the_result_is_skipped(tmp_path, spawned):
     assert asyncio.run(CursorAgentProvider(_settings(tmp_path)).complete("s", "p")) == "first OK"
 
 
+def _stream(*events):
+    return FakeProcess("\n".join(json.dumps(event) for event in events).encode("utf-8"))
+
+
+def _said(text):
+    return {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+TOOL_CALL = {"type": "tool_call", "subtype": "completed", "call_id": "t1"}
+
+
+def test_the_steps_narrated_between_tool_calls_stay_out_of_the_answer(tmp_path, spawned):
+    """Recorded with cursor-agent 2026.11.11 and --output-format stream-json."""
+    _, queue = spawned
+    queue.append(_stream(
+        {"type": "system", "subtype": "init", "session_id": FIRST_TURN["session_id"]},
+        _said("I'll check Jira next."), {**TOOL_CALL, "subtype": "started"}, TOOL_CALL,
+        _said("- ITEM-9 is done."), {**FIRST_TURN, "result": "I'll check Jira next.- ITEM-9 is done."},
+    ))
+
+    assert asyncio.run(CursorAgentProvider(_settings(tmp_path)).complete("s", "p")) == "- ITEM-9 is done."
+
+
+def test_a_turn_that_ends_on_a_tool_call_answers_with_the_whole_result(tmp_path, spawned):
+    _, queue = spawned
+    queue.append(_stream(_said("Proposed card 4."), TOOL_CALL, {**FIRST_TURN, "result": "Proposed card 4."}))
+
+    assert asyncio.run(CursorAgentProvider(_settings(tmp_path)).complete("s", "p")) == "Proposed card 4."
+
+
 def test_a_run_past_the_timeout_is_stopped(tmp_path, spawned, monkeypatch):
     _, queue = spawned
     stopped = []
