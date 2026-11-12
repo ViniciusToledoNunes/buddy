@@ -384,6 +384,12 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 .card.failed .state { color: var(--rec); }
 .card.finished .detail, .card.finished .buttons { display: none; }
 .card.finished { opacity: .8; padding: 6px 10px; }
+/* A finished card is one line (number, title, ✓/✗); a click on it shows the result and its links. */
+.card.finished:not(.open) .link, .card.finished:not(.open) .state { display: none; }
+.card.finished .top { cursor: pointer; }
+.card .mark { margin-left: auto; padding-left: 6px; flex: none; }
+.card.done .mark { color: var(--ok); }
+.card.failed .mark { color: var(--rec); }
 #suggestions { display: none; margin: 10px 12px 0; padding: 10px 12px; background: var(--accent-soft);
   border: 1px solid var(--accent); border-radius: var(--radius); }
 #suggestions h2 { margin: 0 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
@@ -631,11 +637,11 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 
   // Action cards. Rebuilt only when an action changes, and never while you edit it.
   const KIND = {reply: "Reply", review: "Review", investigate: "Look into", merge: "Merge", post: "Post", ticket: "Jira", run: "Run", other: "Action"};
-  const cards = new Map(), editing = new Set();
+  const cards = new Map(), editing = new Set(), opened = new Set();
   function card(a) {
     const el = document.createElement("div");
     const finished = ["done", "failed"].includes(a.status);
-    el.className = "card " + a.status + (finished ? " finished" : "");
+    el.className = "card " + a.status + (finished ? " finished" : "") + (opened.has(a.id) ? " open" : "");
     const top = document.createElement("div");
     top.className = "top";
     const num = document.createElement("span"); num.className = "num"; num.textContent = "#" + a.id;
@@ -643,6 +649,14 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const title = document.createElement("span"); title.className = "title"; title.textContent = a.title;
     top.append(num, kind, title);
     if (a.stale) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "from yesterday"; top.append(b); }
+    if (finished) {
+      const mark = document.createElement("span"); mark.className = "mark"; mark.textContent = a.status === "done" ? "✓" : "✗";
+      top.append(mark);
+      top.addEventListener("click", () => {
+        if (opened.has(a.id)) opened.delete(a.id); else opened.add(a.id);
+        el.classList.toggle("open", opened.has(a.id));
+      });
+    }
     el.append(top);
     let detailEl = null;
     if (a.detail) {
