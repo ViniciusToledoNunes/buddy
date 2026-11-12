@@ -362,7 +362,7 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #brain-panel .state.ok { color: var(--ok); }
 #brain-panel .state.warning, #brain-panel .state.failed { color: var(--warn); }
 #actions { display: none; margin: 10px 12px 0; }
-#actions h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+#actions h2, #board h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 6px; }
 .card .top { display: flex; gap: 6px; align-items: baseline; }
 .card .num { color: var(--muted); font: 11px var(--mono); }
@@ -387,6 +387,10 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 /* A finished card is one line (number, title, ✓/✗); a click on it shows the result and its links. */
 .card.finished:not(.open) .link, .card.finished:not(.open) .state { display: none; }
 .card.finished .top { cursor: pointer; }
+.fold-head { cursor: pointer; user-select: none; }
+.fold-head::before { content: "▾ "; }
+section.folded .fold-head::before { content: "▸ "; }
+#actions.folded > :not(h2), #suggestions.folded > :not(h2), #board.folded > :not(h2) { display: none !important; }
 .board-collapse { cursor: pointer; color: var(--muted); font-size: 11px; text-align: right; margin-bottom: 4px; }
 #board-full .col-title { cursor: pointer; }
 .card .mark { margin-left: auto; padding-left: 6px; flex: none; }
@@ -469,10 +473,10 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     <div id="brain-state" class="state"></div>
   </section>
   <section id="actions"><h2 id="actions-title">Actions</h2><div id="action-list"></div></section>
-  <section id="board" title="Your work: now, next, blocked"><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
+  <section id="board" title="Your work: now, next, blocked"><h2 id="board-title">Work</h2><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
 </div>
-<section id="suggestions"><h2>Suggestions</h2><ol id="suggestion-list"></ol></section>
-<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> Activity</button>
+<section id="suggestions"><h2 id="suggestions-title">Suggestions</h2><ol id="suggestion-list"></ol></section>
+<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> <span id="activity-label">Activity</span></button>
 <main id="feed"><div id="empty">Type below, or press 🎤 to talk to Buddy.<br>The meeting shows here as it is said.</div></main>
 <button id="jump">↓ New</button>
 <footer>
@@ -607,6 +611,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       return li;
     }));
     list.scrollTop = list.scrollHeight;
+    $("suggestions-title").textContent = all.length ? `Suggestions (${all.length})` : "Suggestions";
     $("suggestions").style.display = all.length ? "block" : "none";
   }
 
@@ -728,8 +733,12 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       cards.set(a.id, {el, key});
       list.appendChild(el);
     }
-    $("actions-title").textContent = open.length ? `Actions · ${open.filter((a) => a.status === "proposed").length} to approve` : "Actions";
-    $("actions").style.display = wanted.length ? "block" : "none";
+    const every = actions || [];
+    const count = (st) => every.filter((a) => st.includes(a.status)).length;
+    const parts = [[count(["proposed", "approved", "running"]), "open"], [count(["done"]), "completed"],
+      [count(["failed"]), "failed"], [count(["dismissed"]), "dismissed"]].filter(([n]) => n).map(([n, w]) => `${n} ${w}`);
+    $("actions-title").textContent = parts.length ? `Actions (${parts.join(", ")})` : "Actions";
+    $("actions").style.display = every.length ? "block" : "none";
   }
 
   // The work board. Small during a meeting (one line: what is being done now); a click opens it.
@@ -786,6 +795,9 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const lead = document.createElement("b"); lead.textContent = "Now: ";
     compact.append(lead, document.createTextNode(now.map((i) => i.title).join(" · ") || "—"));
     if (blocked.length) { const k = document.createElement("span"); k.className = "blk"; k.textContent = `● ${blocked.length} blocked`; compact.append(k); }
+    const tally = [[b.now, "now"], [b.blocked, "blocked"], [b.next, "next"], [b.done, "done"]]
+      .filter(([xs]) => xs && xs.length).map(([xs, w]) => `${xs.length} ${w}`);
+    $("board-title").textContent = tally.length ? `Work (${tally.join(", ")})` : "Work";
     if (!inMeeting) boardOpenInMeeting = false;
     if (inMeeting && boardOpenInMeeting && full.children.length) {
       const fold = document.createElement("div"); fold.className = "board-collapse"; fold.textContent = "▴ collapse";
@@ -835,6 +847,23 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const r = await call("control", live ? "dictate-stop" : "dictate-start");
     if (!r.ok) showError(r.error);
   });
+  // Actions, Suggestions and Work fold to their title line (with counts); each remembers its state.
+  const FOLD_KEY = "buddy.fold.";
+  for (const id of ["actions", "suggestions", "board"]) {
+    const sec = $(id), head = sec.querySelector("h2");
+    head.classList.add("fold-head");
+    try { if (localStorage.getItem(FOLD_KEY + id) === "1") sec.classList.add("folded"); } catch (e) {}
+    head.addEventListener("click", () => {
+      const folded = sec.classList.toggle("folded");
+      try { localStorage.setItem(FOLD_KEY + id, folded ? "1" : "0"); } catch (e) {}
+    });
+  }
+  const countActivity = () => {
+    const n = [...$("feed").children].filter((c) => c.id !== "empty").length;
+    $("activity-label").textContent = n ? `Activity (${n})` : "Activity";
+  };
+  new MutationObserver(countActivity).observe($("feed"), {childList: true});
+  countActivity();
   const ACTIVITY_KEY = "buddy.activity";
   const setActivity = (open) => {
     document.body.classList.toggle("activity-closed", !open);
