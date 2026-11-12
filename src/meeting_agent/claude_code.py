@@ -100,6 +100,11 @@ def brain_system_prompt(settings: Settings, meetings_dir: Path | None) -> str:
             f"`{command} tool --list` shows the tools. They are read-only and refuse any query "
             "that would scan too much."
         )
+    from .working_memory import memory_prompt
+
+    memory = memory_prompt(settings.memory.directory())
+    if memory:
+        parts.append(memory)
     if copilot.claude_instructions.strip():
         parts.append(copilot.claude_instructions.strip())
     return "\n\n".join(parts)
@@ -207,6 +212,9 @@ class ClaudeCodeProvider(LLMProvider):
         if not copilot.claude_mcp:
             command.append("--strict-mcp-config")
         directories = [str(Path(d).expanduser()) for d in copilot.claude_extra_dirs]
+        memory = self.settings.memory.directory()
+        if memory.is_dir():
+            directories.insert(0, str(memory))
         if self.meetings_dir is not None:
             directories.insert(0, str(self.meetings_dir))
         if directories:

@@ -116,6 +116,9 @@ class CursorAgentProvider(LLMProvider):
             command.append("--force")
         if self.meetings_dir is not None:
             command += ["--add-dir", str(self.meetings_dir)]
+        memory = self.settings.memory.directory()
+        if memory.is_dir():
+            command += ["--add-dir", str(memory)]
         return command
 
     def message(self, system: str, prompt: str) -> str:

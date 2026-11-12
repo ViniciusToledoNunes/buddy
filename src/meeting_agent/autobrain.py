@@ -141,6 +141,8 @@ without asking again. First `BUDDY_COMMAND action N running`, then
 `BUDDY_COMMAND action N done --result "<one line>" [--link <where>]`, or
 `failed --result "<why>"` when it could not be done."""
 
+QUIET_REPLY = "NOTHING"
+
 # The skill teaches a watching session how to act on commands; the built-in brain follows
 # the same rules, so the two never disagree on what needs the user's approval.
 COMMAND_SKILL_SECTIONS = ("Action cards", "Work board", "Commands", "Boundaries")
@@ -151,14 +153,15 @@ def _skill_section(text: str, title: str) -> str:
     return f"## {title}\n{match.group(1).strip()}" if match else ""
 
 
-def command_system_prompt(buddy_command: str, skill: Path | None = None) -> str:
+def command_system_prompt(buddy_command: str, skill: Path | None = None, memory: str = "") -> str:
     path = skill or project_root() / "skills" / "buddy-listener" / "SKILL.md"
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         text = ""
     sections = [_skill_section(text, title) for title in COMMAND_SKILL_SECTIONS]
-    return "\n\n".join([COMMAND_INTRO, *filter(None, sections)]).replace("BUDDY_COMMAND", buddy_command)
+    prompt = "\n\n".join([COMMAND_INTRO, *filter(None, sections)]).replace("BUDDY_COMMAND", buddy_command)
+    return f"{prompt}\n\n{memory}" if memory else prompt
 
 
 class CommandRunner:
@@ -186,7 +189,7 @@ class CommandRunner:
         self.provider_factory = provider_factory or self._harness_provider
         self.provider: LLMProvider | None = None
         self._choice: tuple[str, str] | None = None
-        self._pending: list[str] = []
+        self._pending: list[tuple[str, bool]] = []
         self._task: asyncio.Task[None] | None = None
 
     def _harness_provider(self, settings: Settings) -> LLMProvider:
@@ -194,13 +197,17 @@ class CommandRunner:
 
         return harness_for(settings).provider(settings, self.meetings_dir)
 
-    def system_prompt(self) -> str:
+    def system_prompt(self, settings: Settings) -> str:
         from .claude_code import buddy_tool_command
+        from .working_memory import memory_prompt
 
-        return command_system_prompt(buddy_tool_command())
+        writer = f"buddy-{settings.brain.harness}"
+        return command_system_prompt(buddy_tool_command(), memory=memory_prompt(settings.memory.directory(), writer))
 
-    def submit(self, prompt: str) -> None:
-        self._pending.append(prompt)
+    def submit(self, prompt: str, quiet: bool = False) -> None:
+        """Queue a prompt. A quiet one is work Buddy started itself: no "on it" line, and a
+        reply of exactly QUIET_REPLY means there was nothing to tell the user."""
+        self._pending.append((prompt, quiet))
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._drain())
 
@@ -215,20 +222,23 @@ class CommandRunner:
         from .harness import harness_for
 
         while self._pending:
-            prompt = self._pending.pop(0)
+            prompt, quiet = self._pending.pop(0)
             settings = self.settings()
             label = harness_for(settings).label
             provider = self._provider_for(settings)
             if not provider.available():
                 self.notice(f"Nobody can answer: no session follows Buddy and {label} is not available here.")
                 continue
-            self.working(label)
+            if not quiet:
+                self.working(label)
             try:
-                answer = await provider.complete(self.system_prompt(), prompt)
+                answer = (await provider.complete(self.system_prompt(settings), prompt)).strip()
             except Exception as exc:  # a failed call must never stop the listening
                 self.notice(f"{label} could not answer: {type(exc).__name__}: {exc}")
                 continue
-            self.reply(label, answer.strip() or "(no reply)")
+            if quiet and answer.strip("`*. ").upper() == QUIET_REPLY:
+                continue
+            self.reply(label, answer or "(no reply)")
 
     async def finish(self, timeout: float) -> None:
         if self._task is not None and not self._task.done():

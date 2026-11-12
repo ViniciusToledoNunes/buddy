@@ -243,6 +243,21 @@ class BrainConfig(BaseModel):
         return Path(configured).expanduser() if configured else Path.home()
 
 
+class MemoryConfig(BaseModel):
+    """The user's working memory, read and kept by Buddy's brain and the user's coding agents."""
+
+    # memory/ is gitignored: it holds the user's work. memory.example/ is the empty skeleton
+    # it starts from. A relative path is taken from the Buddy folder.
+    dir: str = "memory"
+    # While the listener runs, changes from any agent go into the folder's own git, so a bad
+    # write is one `git revert` away. 0 turns it off.
+    autocommit_seconds: float = Field(60.0, ge=0, le=3600)
+
+    def directory(self) -> Path:
+        path = Path(self.dir).expanduser()
+        return path if path.is_absolute() else project_root() / path
+
+
 # Configuration written before the harness could be chosen named Claude Code's settings.
 LEGACY_BRAIN_KEYS = {"claude_workdir": "workdir", "claude_model": "model", "claude_effort": "effort"}
 
@@ -257,6 +272,7 @@ class Settings(BaseModel):
     # live in a file and are never exported are invisible to a plain environment read.
     env_files: list[str] = []
     brain: BrainConfig = BrainConfig()
+    memory: MemoryConfig = MemoryConfig()
     audio: AudioConfig = AudioConfig()
     asr: ASRConfig = ASRConfig()
     copilot: CopilotConfig = CopilotConfig()

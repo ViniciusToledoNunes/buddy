@@ -299,6 +299,15 @@ instant answers. `brain.model: sonnet` or `brain.effort: medium` bring it down. 
 but each run counts against your subscription limits; `copilot.json` carries a dollar estimate so you can follow
 it. The model runs only when there is new speech, so silence costs nothing.
 
+**Working memory.** Buddy keeps a memory of your work in `memory/`: `global/` (who you are and how you want
+things done) and `work/` (the plan, projects, people, decisions), each with a `MEMORY.md` index, plus the rules
+every agent follows in `CONVENTIONS.md`. The first `buddy listen` creates it from the empty `memory.example/`
+skeleton. `memory/` is gitignored, so your work never reaches Buddy's repository; it has its own local git, and
+the listener commits any change every minute, so a bad write is one `git revert` away. The meeting brain reads
+it; the brain that answers your commands also keeps it, and updates it from each meeting's summary. Point your
+coding agents at the same folder (for Claude Code, a symlink from its project memory to `memory/work` and an
+`@` import of `memory/global/MEMORY.md` in `~/.claude/CLAUDE.md`) and they all share one memory.
+
 **Other providers.** `openai`, `anthropic` and `ollama` still work, with the older engine: preloaded context, a
 project index and a background investigator. None of them knows you the way your own agent session does, and
 `auto` never picks `harness` — spending the subscription is an explicit choice.

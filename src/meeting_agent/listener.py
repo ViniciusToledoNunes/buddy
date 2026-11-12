@@ -23,6 +23,12 @@ from .speakers import VOICE_MODEL_FILE, SpeakerTracker, VoiceBook, VoiceModel, p
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
+MEMORY_AFTER_MEETING = """The meeting {meeting} has ended: its summary is {summary} and its transcript \
+{transcript}. Update the user's working memory from it, following CONVENTIONS.md: decisions, what the \
+user committed to or was asked to do, changes in their plan (work/project_open_items.md), and new facts \
+about people or projects. Keep only what will matter later. Then reply with one line saying what you \
+changed, or exactly NOTHING when nothing was worth keeping."""
+
 # "Hey Buddy" opens the utterance. Whisper spells the name a few ways, and "buddy" alone
 # is too common in English conversation to be trusted without the "hey".
 WAKE = re.compile(
@@ -434,6 +440,7 @@ class ListenDaemon:
         brain_factory: Callable[[], Any] | None = None,
         brain_settings: Callable[[], Settings] | None = None,
         answer_commands: bool = False,
+        keep_memory: bool = False,
     ) -> None:
         self.settings = settings
         self._brain_factory = brain_factory
@@ -443,6 +450,9 @@ class ListenDaemon:
         # The built-in brain also answers the user's commands when no session follows.
         self._answer_commands = answer_commands
         self._commands: Any = None
+        # The user's working memory (memory.py): created if missing, committed while running.
+        self._memory_dir = settings.memory.directory() if keep_memory else None
+        self._memory_committed = 0.0
         self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
         self._brain_off = False  # unavailable this meeting; said once
         self._summary_task: asyncio.Task[None] | None = None
@@ -793,6 +803,33 @@ class ListenDaemon:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain wrote the summary: {storage.summary_md}")
         except Exception as exc:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain could not write the summary: {type(exc).__name__}: {exc}")
+            return
+        if self._memory_dir is not None:
+            self._hand_to_brain(MEMORY_AFTER_MEETING.format(
+                meeting=storage.directory.name, summary=storage.summary_md, transcript=storage.transcript_txt,
+            ), quiet=True)
+
+    # ----------------------------------------------------------------- memory
+
+    async def _start_memory(self) -> None:
+        if self._memory_dir is None:
+            return
+        from .working_memory import ensure_memory
+
+        try:
+            if await asyncio.to_thread(ensure_memory, self._memory_dir):
+                self.events.append("NOTICE", text=f"Started the working memory in {self._memory_dir}.")
+        except Exception as exc:  # the memory is a help; listening must go on without it
+            self.events.append("NOTICE", text=f"Could not start the working memory: {type(exc).__name__}: {exc}")
+            self._memory_dir = None
+
+    async def _commit_memory(self) -> None:
+        from .working_memory import commit_memory
+
+        try:
+            await asyncio.to_thread(commit_memory, self._memory_dir)
+        except Exception as exc:
+            self.events.append("NOTICE", text=f"Could not commit the working memory: {type(exc).__name__}: {exc}")
 
     # --------------------------------------------------------------- speakers
 
@@ -1089,7 +1126,7 @@ class ListenDaemon:
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
         self._hand_to_brain(f'The user typed in Buddy\'s window: "{text}"')
 
-    def _hand_to_brain(self, prompt: str) -> None:
+    def _hand_to_brain(self, prompt: str, quiet: bool = False) -> None:
         """A command no session will read goes to Buddy's own brain, which replies in the window."""
         if not self._answer_commands or not self.settings.listen.auto_brain or self.session_watching():
             return
@@ -1104,7 +1141,7 @@ class ListenDaemon:
                 notice=lambda text: self.events.append("NOTICE", meeting=self.meeting_id, text=text),
                 working=lambda label: self._show("BRAIN", text=f"{label} is on it…"),
             )
-        self._commands.submit(prompt)
+        self._commands.submit(prompt, quiet=quiet)
 
     # ---------------------------------------------------------------- actions
 
@@ -1192,6 +1229,10 @@ class ListenDaemon:
             stop_at = self.dictation["stop_at"]
             if (stop_at is not None and now >= stop_at) or now - self.dictation["started"] >= listen.command_max_seconds:
                 await self._finish_dictation()
+        every = self.settings.memory.autocommit_seconds
+        if self._memory_dir is not None and every and now - self._memory_committed >= every:
+            self._memory_committed = now
+            await self._commit_memory()
         if self.storage is None:
             return
         if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:
@@ -1249,6 +1290,7 @@ class ListenDaemon:
         queue = self.bus.subscribe(maxsize=2048)
         reason = "stopped"
         try:
+            await self._start_memory()
             if self.settings.listen.wake_phrase:
                 await self.start_listening()
                 self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")

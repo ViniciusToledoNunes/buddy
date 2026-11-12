@@ -303,7 +303,7 @@ def listen(
         console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
         raise typer.Exit(code=1)
     settings = load_settings()
-    daemon = ListenDaemon(settings, runtime, brain_settings=load_settings, answer_commands=True)
+    daemon = ListenDaemon(settings, runtime, brain_settings=load_settings, answer_commands=True, keep_memory=True)
     console.print('Listening for "Hey Buddy". Ctrl+C stops.' if settings.listen.wake_phrase
                   else "Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
     try:

@@ -20,6 +20,13 @@ brain:
     force: true              # lets it run shell commands; without it the CLI refuses every one
     timeout_seconds: 240
 
+# Your working memory: what was done, what is in progress, what comes next. Buddy's brain
+# reads it and keeps it; point your coding agents at it too. Created from memory.example/
+# on the first `buddy listen`; memory/ is gitignored and has its own local git.
+memory:
+  dir: memory                # relative to the Buddy folder
+  autocommit_seconds: 60     # commits any agent's changes while listening; 0 turns it off
+
 audio:
   sample_rate: 24000
   chunk_ms: 100
