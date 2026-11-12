@@ -184,6 +184,16 @@ screen named is remembered for later meetings, as one mean embedding per name in
 (never audio); `buddy voices list`, `buddy voices forget <name>|--all`. A voice nobody named is listed in
 `MEETING_END` as `unnamed_voices=`; `buddy voices name <meeting> <voice> "<name>"` names it afterwards.
 
+**Action cards.** What the watching Claude Code session proposes to do for you (reply to a thread, review a
+PR, look into an error, merge, comment) shows as a card in Buddy's window, with the exact text when it leaves your
+machine, and **Approve**, **Edit** and **Dismiss**. Approving sends `ACTION_APPROVED` to the session, which does
+exactly what the card shows and reports back; the card turns green with the result, or red with why it failed.
+A reply nothing here can send (`--mode copy`) is copied to the clipboard and its thread opened instead. The session
+creates cards with `buddy propose "<title>" --kind reply|review|investigate|merge|post|run|other --detail "..."
+--link <url>` and reports with `buddy action <n> running|done|failed --result "..."`; `buddy actions` lists them.
+Cards live in `.meeting-agent/actions/`, one file each; a proposal runs at most once, and one from yesterday is
+marked as such.
+
 Other controls: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. The MCP server (`meeting_status`,
 `get_live_transcript`, `stop_meeting`) sees meetings opened by the listener.
 

@@ -282,6 +282,14 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         # A dictation that closed on silence or length: the user may not have finished.
         note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
         return f'{head} said="{record.get("text", "")}"{note}'
+    if kind == "ACTION_APPROVED":
+        # The user clicked Approve on this card: do exactly this, then report back.
+        outward = " outward=yes" if record.get("outward") else ""
+        link = f" link={record['link']}" if record.get("link") else ""
+        detail = str(record.get("detail") or "")
+        text = (f'{head} id={record.get("id")} kind={record.get("action")} mode={record.get("mode")}{outward}{link} '
+                f'title="{record.get("title", "")}"' + (f" | detail: {detail}" if detail else ""))
+        return text if len(text) <= max_chars else text[: max_chars - 40].rstrip() + f" ... (buddy actions show {record.get('id')})"
     if kind in {"MEETING_START", "MEETING_END"}:
         extra = [f"lines={record['lines']}"] if "lines" in record else []
         if record.get("prep"):
@@ -1038,6 +1046,20 @@ class ListenDaemon:
             return
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
 
+    # ---------------------------------------------------------------- actions
+
+    def _announce_action(self, action_id: Any) -> None:
+        """The user approved a card: tell the session what to do, exactly as approved."""
+        from .actions import ActionStore, approval_event
+
+        try:
+            action = ActionStore(self.runtime_dir).get(int(action_id))
+        except (TypeError, ValueError):
+            return
+        if action is None or action.status != "approved":
+            return  # only an approved card is ever sent, and only once it is approved
+        self.events.append("ACTION_APPROVED", **approval_event(action))
+
     # -------------------------------------------------------------- dictation
 
     def _dictation_state(self) -> dict[str, Any]:
@@ -1150,6 +1172,11 @@ class ListenDaemon:
                 text = str(_read_json(submitted).get("text", ""))
                 submitted.unlink(missing_ok=True)
                 await self.typed(text)
+        if self.control_dir.exists():
+            for approved in sorted(self.control_dir.glob("action-*.json")):
+                action_id = _read_json(approved).get("id")
+                approved.unlink(missing_ok=True)
+                self._announce_action(action_id)
         shutdown = self.control_dir / "shutdown.flag"
         if shutdown.exists():
             shutdown.unlink(missing_ok=True)
@@ -1197,6 +1224,11 @@ def request(runtime_dir: Path, name: str) -> None:
     control = runtime_dir / "listen"
     control.mkdir(parents=True, exist_ok=True)
     (control / f"{name}.flag").touch()
+
+
+def approve_action(runtime_dir: Path, action_id: int) -> None:
+    """Ask the listener to hand an approved action to the session."""
+    _write_json(runtime_dir / "listen" / f"action-{time.time_ns()}.json", {"id": int(action_id)})
 
 
 def submit(runtime_dir: Path, text: str) -> None:

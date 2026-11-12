@@ -368,7 +368,17 @@ class LiveView:
             # How many of them, at the end, are the newest set: the window highlights those.
             "suggestions_latest": len(self.suggestion_sets[-1]) if self.suggestion_sets else 0,
             "show": self.show,
+            # Cards the session proposed (buddy propose), newest last; see actions.py.
+            "actions": self.actions(),
         }
+
+    def actions(self) -> list[dict[str, Any]]:
+        from .actions import ActionStore
+
+        try:
+            return [action.to_dict() for action in ActionStore(self.runtime_dir).visible()][-20:]
+        except OSError:
+            return []
 
 
 # ------------------------------------------------------------------ terminal

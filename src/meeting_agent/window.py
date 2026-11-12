@@ -14,8 +14,44 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from .listener import _process_started, _read_json, _write_json, listener_state, process_alive, request, submit
+from .listener import (
+    _process_started,
+    _read_json,
+    _write_json,
+    approve_action,
+    listener_state,
+    process_alive,
+    request,
+    submit,
+)
 from .live import LiveView
+
+def copy_text(text: str) -> bool:
+    """Put text on the clipboard with the system's own tool; False when there is none."""
+    import shutil
+    import subprocess
+    import sys
+
+    tool = ["pbcopy"] if sys.platform == "darwin" else ["clip"] if sys.platform == "win32" else ["xclip", "-selection", "clipboard"]
+    if shutil.which(tool[0]) is None:
+        return False
+    try:
+        subprocess.run(tool, input=text.encode("utf-8"), check=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def open_link(url: str) -> bool:
+    import webbrowser
+
+    if not url.startswith(("https://", "http://")):
+        return False
+    try:
+        return webbrowser.open(url)
+    except Exception:
+        return False
+
 
 CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown", "dictate-start", "dictate-stop"}
 MAX_TYPED = 4000
@@ -35,11 +71,17 @@ class WindowApi:
         view: LiveView,
         send_text: Callable[[Path, str], None] = submit,
         send_control: Callable[[Path, str], None] = request,
+        announce: Callable[[Path, int], None] = approve_action,
+        copy: Callable[[str], bool] = copy_text,
+        open_url: Callable[[str], bool] = open_link,
     ) -> None:
         self._runtime_dir = runtime_dir
         self._view = view
         self._send_text = send_text
         self._send_control = send_control
+        self._announce = announce
+        self._copy = copy
+        self._open = open_url
         self._window: Any = None
 
     def _off(self) -> dict[str, Any] | None:
@@ -76,6 +118,38 @@ class WindowApi:
             return {"ok": False, "error": f"Unknown microphone mode: {mode}"}
         write_mode(self._runtime_dir / "listen" / "mic.json", mode)
         return {"ok": True, "mode": mode}
+
+    def decide_action(self, action_id: int, approve: bool, detail: str | None = None) -> dict[str, Any]:
+        """A click on a card. Approve hands it to the session; a copy-only reply is done here."""
+        from .actions import ActionStore
+
+        store = ActionStore(self._runtime_dir)
+        current = store.get(int(action_id))
+        if current is None:
+            return {"ok": False, "error": f"No action {action_id}."}
+        if approve and current.mode != "copy":
+            refusal = self._off()
+            if refusal:
+                return refusal
+        try:
+            action = store.decide(int(action_id), bool(approve), None if detail is None else str(detail))
+        except (LookupError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        if not approve:
+            return {"ok": True, "status": action.status}
+        if action.mode == "copy":
+            # Nothing here can send it: the reply goes to the clipboard and the thread opens.
+            copied = self._copy(action.detail)
+            opened = self._open(action.link) if action.link else False
+            where = "paste it in the thread" + ("" if opened or not action.link else f": {action.link}")
+            result = f"Copied, {where}." if copied else "Could not copy: select the text on the card."
+            store.report(action.id, "done" if copied else "failed", result, action.link)
+            return {"ok": True, "status": "done" if copied else "failed"}
+        self._announce(self._runtime_dir, action.id)
+        return {"ok": True, "status": action.status}
+
+    def open_url(self, url: str) -> dict[str, Any]:
+        return {"ok": self._open(str(url or ""))}
 
     def set_show(self, show: str) -> dict[str, Any]:
         if show in {"buddy", "all"}:
@@ -206,6 +280,29 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 .spacer { flex: 1; }
 .tools { display: flex; gap: 4px; }
 
+#actions { display: none; margin: 10px 12px 0; }
+#actions h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 6px; }
+.card .top { display: flex; gap: 6px; align-items: baseline; }
+.card .num { color: var(--muted); font: 11px var(--mono); }
+.card .kind { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px; }
+.card .title { font-weight: 600; flex: 1; min-width: 0; }
+.card .badge { font-size: 11px; color: var(--warn); }
+.card .detail { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 9.5em; overflow-y: auto;
+  background: var(--bg); border-radius: 8px; padding: 6px 8px; font-size: 12.5px; }
+.card textarea.detail { width: 100%; font: inherit; font-size: 12.5px; color: inherit; border: 1px solid var(--accent); resize: vertical; min-height: 6em; }
+.card .link { display: block; color: var(--muted); font-size: 11.5px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card .buttons { display: flex; gap: 6px; margin-top: 8px; }
+.card .approve { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.card .approve.outward { background: var(--claude); border-color: var(--claude); color: #fff; }
+.card .state { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.card.done { border-color: var(--ok); }
+.card.done .state { color: var(--ok); }
+.card.failed { border-color: var(--rec); }
+.card.failed .state { color: var(--rec); }
+.card.finished .detail, .card.finished .buttons { display: none; }
+.card.finished { opacity: .8; padding: 6px 10px; }
 #suggestions { display: none; margin: 10px 12px 0; padding: 10px 12px; background: var(--accent-soft);
   border: 1px solid var(--accent); border-radius: var(--radius); }
 #suggestions h2 { margin: 0 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
@@ -272,7 +369,9 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     <button id="power" class="danger" title="Turn Buddy off">⏻</button>
   </span>
 </header>
-<div id="panels"></div>
+<div id="panels">
+  <section id="actions"><h2 id="actions-title">Actions</h2><div id="action-list"></div></section>
+</div>
 <section id="suggestions"><h2>Suggestions</h2><ol id="suggestion-list"></ol></section>
 <button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> Activity</button>
 <main id="feed"><div id="empty">Type below, or press 🎤 to talk to Buddy.<br>The meeting shows here as it is said.</div></main>
@@ -390,6 +489,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
         ` · ${mic.mode === "auto" ? "following " + app : "set by hand"} · click: auto → on → off`;
     }
     showDictation(next.dictation, on);
+    showActions(next.actions);
     // Earlier sets stay above the newest one, dimmed, so a new set never wipes the one
     // being read. The newest set is at the bottom and kept in view.
     const list = $("suggestion-list");
@@ -431,6 +531,93 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     button.title = d.active ? "Listening… click to finish" : "Talk to Buddy: click, speak, click again. The text lands here to read and send.";
     input.classList.toggle("listening", !!d.active);
     input.placeholder = d.active ? "Listening…" : "Type to Buddy — e.g. review PR 123";
+  }
+
+  // Action cards. Rebuilt only when an action changes, and never while you edit it.
+  const KIND = {reply: "Reply", review: "Review", investigate: "Look into", merge: "Merge", post: "Post", run: "Run", other: "Action"};
+  const cards = new Map(), editing = new Set();
+  function card(a) {
+    const el = document.createElement("div");
+    const finished = ["done", "failed"].includes(a.status);
+    el.className = "card " + a.status + (finished ? " finished" : "");
+    const top = document.createElement("div");
+    top.className = "top";
+    const num = document.createElement("span"); num.className = "num"; num.textContent = "#" + a.id;
+    const kind = document.createElement("span"); kind.className = "kind"; kind.textContent = KIND[a.kind] || a.kind;
+    const title = document.createElement("span"); title.className = "title"; title.textContent = a.title;
+    top.append(num, kind, title);
+    if (a.stale) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "from yesterday"; top.append(b); }
+    el.append(top);
+    let detailEl = null;
+    if (a.detail) {
+      detailEl = document.createElement("div"); detailEl.className = "detail"; detailEl.textContent = a.detail;
+      el.append(detailEl);
+    }
+    if (a.link) {
+      const link = document.createElement("a"); link.className = "link"; link.href = a.link; link.textContent = a.link;
+      link.addEventListener("click", (e) => { e.preventDefault(); call("open_url", a.link); });
+      el.append(link);
+    }
+    if (a.status === "proposed") {
+      const buttons = document.createElement("div"); buttons.className = "buttons";
+      const approve = document.createElement("button");
+      approve.className = "approve" + (a.outward && a.mode !== "copy" ? " outward" : "");
+      approve.textContent = a.mode === "copy" ? "Copy & open" : (a.outward ? "Approve & send" : "Approve");
+      approve.title = a.outward ? "Leaves this machine exactly as shown" : "Claude does this now";
+      const edit = document.createElement("button"); edit.textContent = "Edit";
+      const dismiss = document.createElement("button"); dismiss.textContent = "Dismiss";
+      if (!a.detail) edit.style.display = "none";
+      const decide = async (yes) => {
+        approve.disabled = edit.disabled = dismiss.disabled = true;  // one click, one run
+        const area = el.querySelector("textarea.detail");
+        const r = await call("decide_action", a.id, yes, area ? area.value : null);
+        editing.delete(a.id);
+        if (!r.ok) { showError(r.error); approve.disabled = edit.disabled = dismiss.disabled = false; }
+      };
+      approve.addEventListener("click", () => decide(true));
+      dismiss.addEventListener("click", () => decide(false));
+      edit.addEventListener("click", () => {
+        if (el.querySelector("textarea.detail")) return;
+        editing.add(a.id);
+        const area = document.createElement("textarea"); area.className = "detail"; area.value = a.detail;
+        detailEl.replaceWith(area); area.focus();
+        edit.textContent = "Editing…"; edit.disabled = true;
+      });
+      buttons.append(approve, edit, dismiss);
+      el.append(buttons);
+    } else {
+      const state = document.createElement("div"); state.className = "state";
+      const waiting = status.brain === "watching" ? "Claude is on it…" : "Approved, waiting for Claude to pick it up…";
+      state.textContent = {approved: waiting, running: "Claude is on it…", done: "✓ " + (a.result || "Done"),
+        failed: "✗ " + (a.result || "Failed")}[a.status] || a.status;
+      if (a.result_link && finished) {
+        const link = document.createElement("a"); link.className = "link"; link.href = a.result_link; link.textContent = a.result_link;
+        link.addEventListener("click", (e) => { e.preventDefault(); call("open_url", a.result_link); });
+        state.append(link);
+      }
+      el.append(state);
+    }
+    return el;
+  }
+  function showActions(actions) {
+    const shown = (actions || []).filter((a) => a.status !== "dismissed");
+    const open = shown.filter((a) => !["done", "failed"].includes(a.status));
+    const finished = shown.filter((a) => ["done", "failed"].includes(a.status)).slice(-3);
+    const list = $("action-list");
+    const wanted = [...finished, ...open];
+    const keep = new Set(wanted.map((a) => a.id));
+    for (const [id, entry] of cards) if (!keep.has(id)) { entry.el.remove(); cards.delete(id); editing.delete(id); }
+    for (const a of wanted) {
+      const key = JSON.stringify(a) + (a.status === "approved" ? status.brain : "");
+      const entry = cards.get(a.id);
+      if (entry && (entry.key === key || editing.has(a.id))) { list.appendChild(entry.el); continue; }
+      const el = card(a);
+      if (entry) entry.el.replaceWith(el);
+      cards.set(a.id, {el, key});
+      list.appendChild(el);
+    }
+    $("actions-title").textContent = open.length ? `Actions · ${open.filter((a) => a.status === "proposed").length} to approve` : "Actions";
+    $("actions").style.display = wanted.length ? "block" : "none";
   }
 
   window.buddy = {

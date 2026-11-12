@@ -358,6 +358,69 @@ def say(text: list[str] = typer.Argument(..., help="The command, as you would sa
 
 
 @app.command()
+def propose(
+    title: str = typer.Argument(..., help="What would be done, in a few words: \"Reply to Nick (DM)\"."),
+    kind: str = typer.Option("other", "--kind", "-k", help="reply, review, investigate, merge, post, run or other."),
+    detail: str = typer.Option("", "--detail", "-d", help="Exactly what will be sent or done."),
+    detail_file: Path = typer.Option(None, "--detail-file", help="Read the detail from this file (- for stdin)."),
+    link: str = typer.Option("", "--link", "-l", help="The thread, PR or ticket it is about."),
+    mode: str = typer.Option("run", "--mode", "-m", help="run: the session does it; copy: copy and open the link; send: the session sends it."),
+    outward: bool = typer.Option(None, "--outward/--local", help="Whether it leaves this machine (default: by kind)."),
+    source: str = typer.Option("session", "--source", help="Where it came from: slack, meeting, session."),
+) -> None:
+    """Put an action on Buddy's window for the user to approve with one click."""
+    from .actions import ActionStore
+
+    if detail_file is not None:
+        detail = sys.stdin.read() if str(detail_file) == "-" else detail_file.read_text(encoding="utf-8")
+    try:
+        action = ActionStore(_runtime_dir()).propose(kind, title, detail, link, mode, outward, source)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    console.print(f"Proposed action {action.id}: {action.title}")
+
+
+@app.command("action")
+def action_command(
+    action_id: int = typer.Argument(..., help="The action's number."),
+    status: str = typer.Argument(..., help="running, done or failed; or show."),
+    result: str = typer.Option("", "--result", "-r", help="One line on how it went."),
+    link: str = typer.Option("", "--link", "-l", help="Where the result is: the posted comment, the PR."),
+) -> None:
+    """Report how an approved action went; its card shows it."""
+    from .actions import ActionStore
+
+    store = ActionStore(_runtime_dir())
+    if status == "show":
+        found = store.get(action_id)
+        if found is None:
+            console.print(f"[red]No action {action_id}.[/red]")
+            raise typer.Exit(code=1)
+        console.print_json(json.dumps(found.to_dict(), ensure_ascii=False))
+        return
+    try:
+        updated = store.report(action_id, status, result, link)
+    except (LookupError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    console.print(f"Action {updated.id} is {updated.status}.")
+
+
+@app.command("actions")
+def actions_command(show_all: bool = typer.Option(False, "--all", help="Also the ones finished in the last day and a half.")) -> None:
+    """List the actions on Buddy's window."""
+    from .actions import OPEN, ActionStore
+
+    shown = [a for a in ActionStore(_runtime_dir()).visible() if show_all or a.status in OPEN]
+    if not shown:
+        console.print("No open actions.")
+    for a in shown:
+        stale = " (old)" if a.stale else ""
+        console.print(f"{a.id:>4}  {a.status:<9} {a.kind:<11} {a.title}{stale}")
+
+
+@app.command()
 def live(
     show_all: bool = typer.Option(False, "--all", help="Show every turn of the Claude session, not only Buddy's."),
 ) -> None:
