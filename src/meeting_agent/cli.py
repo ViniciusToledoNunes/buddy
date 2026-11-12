@@ -420,6 +420,88 @@ def actions_command(show_all: bool = typer.Option(False, "--all", help="Also the
         console.print(f"{a.id:>4}  {a.status:<9} {a.kind:<11} {a.title}{stale}")
 
 
+board_app = typer.Typer(help="The work board on Buddy's window: what is being done now, next, and what is blocked.")
+app.add_typer(board_app, name="board")
+
+
+def _board():
+    from .board import Board
+
+    return Board(_runtime_dir())
+
+
+@board_app.callback(invoke_without_command=True)
+def board_show(ctx: typer.Context) -> None:
+    """Show the board (with no subcommand)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    view = _board().view(load_settings().listen.board_ticket_url)
+    if not any(view.values()):
+        console.print("The board is empty. Add: buddy board add \"<title>\" --status now [--ticket KEY-1]")
+    for status, items in view.items():
+        for item in items:
+            ticket = f" [{item['ticket']}{' · ' + item['ticket_status'] if item['ticket_status'] else ''}]" if item["ticket"] else ""
+            extra = f" — blocked: {item['blocker']}" if item["blocker"] else (f" — {item['note']}" if item["note"] else "")
+            console.print(f"{item['id']:>3}  {status:<8} {item['title']}{ticket}{extra}", markup=False)
+
+
+def _board_call(action):
+    try:
+        item = action()
+    except (LookupError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2)
+    console.print(f"Board item {item.id} ({item.status}): {item.title}", markup=False)
+
+
+@board_app.command("add")
+def board_add(
+    title: str = typer.Argument(..., help="A few words: what is being done."),
+    status: str = typer.Option("next", "--status", "-s", help="now, next, blocked or done."),
+    ticket: str = typer.Option("", "--ticket", "-t", help="Jira key, e.g. QCMVEN-4625."),
+    link: str = typer.Option("", "--link", "-l"),
+    blocker: str = typer.Option("", "--blocker", "-b", help="Why it is blocked, in a few words."),
+    note: str = typer.Option("", "--note", "-n", help="One short line: the next step, a PR."),
+) -> None:
+    """Add an item to the board."""
+    _board_call(lambda: _board().add(title, status, ticket, link, blocker, note))
+
+
+@board_app.command("set")
+def board_set(
+    item: str = typer.Argument(..., help="The item's number or its ticket key."),
+    status: str = typer.Option(None, "--status", "-s", help="now, next, blocked or done."),
+    title: str = typer.Option(None, "--title"),
+    ticket: str = typer.Option(None, "--ticket", "-t"),
+    link: str = typer.Option(None, "--link", "-l"),
+    blocker: str = typer.Option(None, "--blocker", "-b"),
+    note: str = typer.Option(None, "--note", "-n"),
+    ticket_status: str = typer.Option(None, "--ticket-status", help="The ticket's status in Jira."),
+    ticket_assignee: str = typer.Option(None, "--ticket-assignee"),
+) -> None:
+    """Change an item: its status, blocker, note or ticket."""
+    _board_call(lambda: _board().set(item, title, status, ticket, link, blocker, note, ticket_status, ticket_assignee))
+
+
+@board_app.command("done")
+def board_done(item: str = typer.Argument(..., help="The item's number or its ticket key.")) -> None:
+    """Mark an item done (shown under Done today, then gone)."""
+    _board_call(lambda: _board().set(item, status="done"))
+
+
+@board_app.command("rm")
+def board_rm(item: str = typer.Argument(..., help="The item's number or its ticket key.")) -> None:
+    """Remove an item."""
+    _board_call(lambda: _board().remove(item))
+
+
+@board_app.command("tickets")
+def board_tickets() -> None:
+    """The open tickets on the board, one per line (for a job that syncs their status)."""
+    for key in _board().tickets():
+        console.print(key)
+
+
 @app.command()
 def live(
     show_all: bool = typer.Option(False, "--all", help="Show every turn of the Claude session, not only Buddy's."),

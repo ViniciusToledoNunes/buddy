@@ -280,6 +280,30 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 .spacer { flex: 1; }
 .tools { display: flex; gap: 4px; }
 
+#board { display: none; margin: 10px 12px 0; padding: 8px 10px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: var(--radius); }
+#board .col { margin-top: 4px; }
+#board .col:first-child { margin-top: 0; }
+#board .col-title { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin: 2px 0 1px; }
+#board .col-now .col-title { color: var(--accent); }
+#board .item { display: flex; gap: 6px; align-items: baseline; padding: 2px 0 2px 10px; position: relative; }
+#board .item::before { content: "▸"; position: absolute; left: 0; color: var(--muted); font-size: 10px; top: 4px; }
+#board .item .t { flex: 1; min-width: 0; }
+#board .item .n { color: var(--muted); font-size: 11.5px; }
+#board .tk { font: 11px var(--mono); color: var(--accent); border: 1px solid var(--line); border-radius: 6px; padding: 0 5px;
+  white-space: nowrap; cursor: pointer; text-decoration: none; }
+#board .col-blocked { background: color-mix(in srgb, var(--rec) 10%, transparent); border-radius: 8px; padding: 2px 6px 4px;
+  margin-left: -6px; margin-right: -6px; }
+#board .col-blocked .col-title, #board .col-blocked .item::before { color: var(--rec); }
+#board .col-blocked .why { color: var(--rec); font-size: 12px; display: block; }
+#board .col-done .item { color: var(--muted); }
+#board .col-done .item::before { content: "✓"; color: var(--ok); }
+#board details summary { cursor: pointer; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin-top: 4px; }
+#board .compact { display: none; cursor: pointer; font-size: 12px; }
+#board .compact b { color: var(--accent); font-weight: 600; }
+#board .compact .blk { color: var(--rec); margin-left: 6px; }
+#board.small .compact { display: block; }
+#board.small .full { display: none; }
 #actions { display: none; margin: 10px 12px 0; }
 #actions h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 6px; }
@@ -318,8 +342,8 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #activity-head .chev { transition: transform .15s; }
 body.activity-closed #activity-head .chev { transform: rotate(-90deg); }
 body.activity-closed #feed, body.activity-closed #jump { display: none !important; }
-#panels { overflow-y: auto; }
-body.activity-closed #panels { flex: 1; }
+#panels { overflow-y: auto; max-height: 58vh; flex: none; }
+body.activity-closed #panels { flex: 1; max-height: none; }
 #feed { flex: 1; overflow-y: auto; padding: 8px 12px 12px; }
 .row { display: flex; gap: 8px; padding: 3px 0; }
 .time { color: var(--muted); font: 11px var(--mono); padding-top: 2px; flex: none; width: 56px; }
@@ -371,6 +395,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 </header>
 <div id="panels">
   <section id="actions"><h2 id="actions-title">Actions</h2><div id="action-list"></div></section>
+  <section id="board" title="Your work: now, next, blocked"><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
 </div>
 <section id="suggestions"><h2>Suggestions</h2><ol id="suggestion-list"></ol></section>
 <button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> Activity</button>
@@ -490,6 +515,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     }
     showDictation(next.dictation, on);
     showActions(next.actions);
+    showBoard(next.board, state === "meeting");
     // Earlier sets stay above the newest one, dimmed, so a new set never wipes the one
     // being read. The newest set is at the bottom and kept in view.
     const list = $("suggestion-list");
@@ -618,6 +644,60 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     }
     $("actions-title").textContent = open.length ? `Actions · ${open.filter((a) => a.status === "proposed").length} to approve` : "Actions";
     $("actions").style.display = wanted.length ? "block" : "none";
+  }
+
+  // The work board. Small during a meeting (one line: what is being done now); a click opens it.
+  let boardOpenInMeeting = false;
+  $("board-compact").addEventListener("click", () => { boardOpenInMeeting = true; setStatus(status); });
+  function ticketChip(item) {
+    const chip = document.createElement(item.link ? "a" : "span");
+    chip.className = "tk";
+    chip.textContent = item.ticket + (item.ticket_status ? " · " + item.ticket_status : "");
+    if (item.ticket_assignee) chip.title = "Assigned to " + item.ticket_assignee;
+    if (item.link) { chip.href = item.link; chip.addEventListener("click", (e) => { e.preventDefault(); call("open_url", item.link); }); }
+    return chip;
+  }
+  function boardItem(item, withWhy) {
+    const row = document.createElement("div"); row.className = "item";
+    const t = document.createElement("span"); t.className = "t"; t.textContent = item.title;
+    if (withWhy && item.blocker) { const why = document.createElement("span"); why.className = "why"; why.textContent = item.blocker; t.append(why); }
+    else if (item.note) { const n = document.createElement("span"); n.className = "n"; n.textContent = " — " + item.note; t.append(n); }
+    if (!item.ticket && item.link) {
+      const chip = document.createElement("a"); chip.className = "tk"; chip.textContent = "link"; chip.href = item.link;
+      chip.addEventListener("click", (e) => { e.preventDefault(); call("open_url", item.link); });
+      row.append(t, chip);
+    } else row.append(t, ...(item.ticket ? [ticketChip(item)] : []));
+    return row;
+  }
+  function showBoard(board, inMeeting) {
+    const b = board || {};
+    const cols = [["now", "Now"], ["blocked", "Blocked"], ["next", "Next"]];
+    const full = $("board-full");
+    full.replaceChildren();
+    for (const [key, name] of cols) {
+      const items = b[key] || [];
+      if (!items.length) continue;
+      const col = document.createElement("div"); col.className = "col col-" + key;
+      const title = document.createElement("div"); title.className = "col-title"; title.textContent = name;
+      col.append(title, ...items.map((i) => boardItem(i, key === "blocked")));
+      full.append(col);
+    }
+    const done = b.done || [];
+    if (done.length) {
+      const det = document.createElement("details"); det.className = "col col-done";
+      const sum = document.createElement("summary"); sum.textContent = `Done today (${done.length})`;
+      det.append(sum, ...done.map((i) => boardItem(i, false)));
+      full.append(det);
+    }
+    const now = b.now || [], blocked = b.blocked || [];
+    const compact = $("board-compact");
+    compact.replaceChildren();
+    const lead = document.createElement("b"); lead.textContent = "Now: ";
+    compact.append(lead, document.createTextNode(now.map((i) => i.title).join(" · ") || "—"));
+    if (blocked.length) { const k = document.createElement("span"); k.className = "blk"; k.textContent = `● ${blocked.length} blocked`; compact.append(k); }
+    if (!inMeeting) boardOpenInMeeting = false;
+    $("board").classList.toggle("small", inMeeting && !boardOpenInMeeting);
+    $("board").style.display = full.children.length ? "block" : "none";
   }
 
   window.buddy = {

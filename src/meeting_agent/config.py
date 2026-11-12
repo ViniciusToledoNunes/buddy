@@ -148,6 +148,9 @@ class ListenConfig(BaseModel):
     # The window's 🎤 button: speech while it is on becomes text in the window's box, to
     # read and send. How long after the second click the last words are still awaited.
     dictation_grace_seconds: float = Field(2.5, ge=0, le=10)
+    # The work board's ticket keys link here; {key} is replaced, e.g.
+    # "https://example.atlassian.net/browse/{key}". Empty: keys are shown without a link.
+    board_ticket_url: str = ""
     # Screenshots of the main display during a meeting (macOS), saved in the meeting's
     # `screens/` folder and named in the next batch, so the watching session can see
     # what is being shared. Off by default: it captures the whole screen. A capture

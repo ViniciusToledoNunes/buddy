@@ -288,7 +288,10 @@ class SessionMirror:
 class LiveView:
     """Everything on screen, merged in time order, from the moment the view opens."""
 
-    def __init__(self, runtime_dir: Path, show: str = "buddy", home: Path | None = None, keep: int = 3) -> None:
+    def __init__(
+        self, runtime_dir: Path, show: str = "buddy", home: Path | None = None, keep: int = 3, ticket_url: str | None = None
+    ) -> None:
+        self._ticket_url = ticket_url  # None: read listen.board_ticket_url on first use
         self.runtime_dir = runtime_dir
         self.show = show
         self.home = home
@@ -370,7 +373,24 @@ class LiveView:
             "show": self.show,
             # Cards the session proposed (buddy propose), newest last; see actions.py.
             "actions": self.actions(),
+            # The work board (buddy board): now, next, blocked, done today.
+            "board": self.board(),
         }
+
+    def board(self) -> dict[str, Any]:
+        from .board import Board
+
+        if self._ticket_url is None:
+            try:
+                from .config import load_settings
+
+                self._ticket_url = load_settings().listen.board_ticket_url
+            except Exception:
+                self._ticket_url = ""
+        try:
+            return Board(self.runtime_dir).view(self._ticket_url)
+        except OSError:
+            return {}
 
     def actions(self) -> list[dict[str, Any]]:
         from .actions import ActionStore

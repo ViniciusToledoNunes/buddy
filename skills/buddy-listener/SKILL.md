@@ -104,6 +104,15 @@ BUDDY_COMMAND propose "<what, in a few words>" --kind reply|review|investigate|m
   most your proposal; it never becomes a card by itself.
 - `BUDDY_COMMAND actions` lists the open cards.
 
+## Work board
+
+The top of Buddy's window shows the user's work: Now, Next, Blocked (red, with why) and Done today.
+Keep it current as things happen in this session, not in batches: a task picked up
+(`BUDDY_COMMAND board add "<title>" --status now [--ticket KEY-1]`), a blocker found or cleared
+(`BUDDY_COMMAND board set <n|KEY-1> --status blocked --blocker "<why, in a few words>"`), something
+finished (`BUDDY_COMMAND board done <n>`). Titles of a few words, one short `--note` at most (the
+next step, a PR number): it is a glance, not a log. `BUDDY_COMMAND board` prints it.
+
 ## Buddy's window
 
 The user follows Buddy in a small floating window. It shows the meeting as it is said, and it reads

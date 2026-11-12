@@ -111,6 +111,7 @@ listen:
   batch_max_wait_seconds: 150
   echo_window_seconds: 8       # drop microphone lines that only echo the speakers; 0 turns it off
   wake_phrase: false           # true: listen for "Hey Buddy" between meetings too (false: only meetings and the 🎤)
+  board_ticket_url: ""         # work board ticket links, e.g. "https://example.atlassian.net/browse/{key}"
   dictation_grace_seconds: 2.5 # the window's 🎤: how long the last words are awaited after the second click
   screen_capture: false        # macOS: save a screenshot every interval during a meeting (whole screen)
   screen_interval_seconds: 60

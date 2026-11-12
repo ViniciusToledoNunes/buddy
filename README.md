@@ -184,6 +184,14 @@ screen named is remembered for later meetings, as one mean embedding per name in
 (never audio); `buddy voices list`, `buddy voices forget <name>|--all`. A voice nobody named is listed in
 `MEETING_END` as `unnamed_voices=`; `buddy voices name <meeting> <voice> "<name>"` names it afterwards.
 
+**Work board.** A few lines at the top of Buddy's window show where your work stands: **Now**, **Next**,
+**Blocked** (in red, with the reason) and **Done today**, each with its ticket key when there is one (linked
+through `listen.board_ticket_url`, e.g. `https://example.atlassian.net/browse/{key}`, and with its status when a
+job keeps it in sync). During a meeting it shrinks to one line, "Now: …". The watching session keeps it current
+as things happen: `buddy board add "<title>" --status now|next|blocked|done [--ticket KEY-1] [--note ...]`,
+`buddy board set <n|KEY-1> --status blocked --blocker "<why>"`, `buddy board done <n>`, `buddy board rm <n>`;
+`buddy board` prints it and `buddy board tickets` lists its open tickets. It lives in `.meeting-agent/board.json`.
+
 **Action cards.** What the watching Claude Code session proposes to do for you (reply to a thread, review a
 PR, look into an error, merge, comment) shows as a card in Buddy's window, with the exact text when it leaves your
 machine, and **Approve**, **Edit** and **Dismiss**. Approving sends `ACTION_APPROVED` to the session, which does
