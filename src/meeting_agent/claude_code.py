@@ -131,8 +131,7 @@ class ClaudeCodeProvider(LLMProvider):
 
     @property
     def workdir(self) -> Path:
-        configured = self.settings.copilot.claude_workdir.strip()
-        return Path(configured).expanduser() if configured else Path.home()
+        return self.settings.brain.directory()
 
     def available(self) -> bool:
         return claude_binary() is not None and self.workdir.is_dir()
@@ -195,10 +194,11 @@ class ClaudeCodeProvider(LLMProvider):
         else:
             self.session_id = self.session_id or str(uuid.uuid4())
             command += ["--session-id", self.session_id]
-        if copilot.claude_model:
-            command += ["--model", copilot.claude_model]
-        if copilot.claude_effort:
-            command += ["--effort", copilot.claude_effort]
+        brain = self.settings.brain
+        if brain.model:
+            command += ["--model", brain.model]
+        if brain.effort:
+            command += ["--effort", brain.effort]
         if not copilot.claude_mcp:
             command.append("--strict-mcp-config")
         directories = [str(Path(d).expanduser()) for d in copilot.claude_extra_dirs]

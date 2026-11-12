@@ -263,11 +263,14 @@ buddy say "review PR 123"  # a typed command
 
 ## How the brain works
 
-With `llm_provider: claude-code`, every analysis is a headless Claude Code run:
+With `llm_provider: harness`, every analysis is a headless run of the agent named in `brain.harness`; the
+listener's auto brain runs the same one. Claude Code is the only harness today (`brain.harness: claude-code`).
+Older configs that say `llm_provider: claude-code` and set `copilot.claude_workdir`, `claude_model` or
+`claude_effort` keep working: they become the `brain` settings. A Claude Code run:
 
 | Decision | Why |
 |---|---|
-| runs in `claude_workdir` | that directory's `CLAUDE.md` describes your work; Buddy has no such knowledge |
+| runs in `brain.workdir` | that directory's `CLAUDE.md` describes your work; Buddy has no such knowledge |
 | `--setting-sources project` | does not inherit user allow-rules, which often permit `git push` |
 | `--permission-mode dontAsk` | nobody is watching to approve; whatever is not allowed is denied |
 | `claude_allowed_tools` / `claude_disallowed_tools` | read-only; write verbs of your helpers blocked explicitly |
@@ -286,13 +289,13 @@ never exported are loaded through `env_files` in `config.yaml`.
 
 **Latency and cost.** Measured on a working conversation: 86s on the first turn (cold start, with a Datadog
 query) and 43s on the next (Jira and git). It is meant for positioning and for questions left hanging, not for
-instant answers. `claude_model: sonnet` or `claude_effort: medium` bring it down. Nothing is billed per token,
+instant answers. `brain.model: sonnet` or `brain.effort: medium` bring it down. Nothing is billed per token,
 but each run counts against your subscription limits; `copilot.json` carries a dollar estimate so you can follow
 it. The model runs only when there is new speech, so silence costs nothing.
 
 **Other providers.** `openai`, `anthropic` and `ollama` still work, with the older engine: preloaded context, a
 project index and a background investigator. None of them knows you the way your own agent session does, and
-`auto` never picks `claude-code` — spending the subscription is an explicit choice.
+`auto` never picks `harness` — spending the subscription is an explicit choice.
 
 ## MCP server and skills
 
@@ -321,7 +324,7 @@ voices.json         each voice's embedding this meeting, for `buddy voices name`
 copilot.json        memory, current suggestions, usage, last error, denied calls, brain session id
 ```
 
-`copilot.json` keeps `brain_session_id`: after the meeting, `claude --resume <id>` in `claude_workdir` reopens
+`copilot.json` keeps `brain_session_id`: after the meeting, `claude --resume <id>` in `brain.workdir` reopens
 the same conversation, with everything the agent read during the call. With `save_audio: false`, the default,
 audio is discarded after processing.
 

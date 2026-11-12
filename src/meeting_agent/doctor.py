@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 import ctranslate2
 import psutil
@@ -108,24 +107,17 @@ def run_doctor(settings: Settings) -> list[Check]:
 def brain_check(settings: Settings) -> Check:
     """Whether the configured suggestion engine can actually run.
 
-    A real Claude Code run loads the whole work context, which is too heavy for a health
+    A real harness run loads the whole work context, which is too heavy for a health
     check, so this confirms the pieces a run needs instead of spending one.
     """
     provider = settings.llm_provider
     if provider == "disabled":
         return Check("LLM", "not-needed", "suggestions disabled; transcription still works")
-    if provider == "claude-code":
-        from .claude_code import claude_binary
+    if provider == "harness":
+        from .harness import harness_for
 
-        binary = claude_binary()
-        workdir = Path(settings.copilot.claude_workdir).expanduser() if settings.copilot.claude_workdir else Path.home()
-        if binary is None:
-            return Check("LLM", "failed", "claude-code selected but the claude CLI is not installed")
-        if not workdir.is_dir():
-            return Check("LLM", "failed", f"claude_workdir does not exist: {workdir}")
-        context = [name for name in ("CLAUDE.md", "CLAUDE.local.md") if (workdir / name).is_file()]
-        detail = f"Claude Code in {workdir}; context files: {', '.join(context) or 'none found'}"
-        return Check("LLM", "ok" if context else "warning", detail)
+        readiness = harness_for(settings).readiness(settings)
+        return Check("LLM", readiness.state, readiness.detail)
     if provider == "ollama" or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY"):
         return Check("LLM", "ok", f"configured provider: {provider}")
     return Check("LLM", "warning", "no provider available; transcription works, suggestions/report do not")

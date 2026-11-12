@@ -53,7 +53,7 @@ work wherever the user already codes.
 
 ### 2. Reduce brain latency
 
-- It takes 40 to 90s per update today. Measure `claude_model: sonnet` and `claude_effort: medium` in a real
+- It takes 40 to 90s per update today. Measure `brain.model: sonnet` and `brain.effort: medium` in a real
   meeting.
 - End a forgotten session by itself, so it does not keep calling the model while the computer plays audio.
 - Test the overlay (`ui.overlay: true`) as the main surface during calls: it already shows the current set, but

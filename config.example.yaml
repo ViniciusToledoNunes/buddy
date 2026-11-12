@@ -1,11 +1,20 @@
 language: en                 # en, pt, or auto
 asr_mode: auto               # auto, local-gpu, local-cpu (always local)
-llm_provider: auto           # claude-code, auto, openai, anthropic, ollama, disabled
+llm_provider: auto           # harness (the brain below), auto, openai, anthropic, ollama, disabled
 save_audio: false
 meetings_dir: meetings
 # Extra env files to source, for credentials a wrapper script loads per command and
 # never exports. Paths may use ~.
 env_files: []
+
+# The agent Buddy runs headless as its brain: with llm_provider: harness, and as the
+# listener's auto brain. (Older configs name it llm_provider: claude-code and
+# copilot.claude_workdir/claude_model/claude_effort; those still work.)
+brain:
+  harness: claude-code       # claude-code
+  model: ''                  # empty uses the harness's default; e.g. opus, sonnet
+  effort: ''                 # low | medium | high | xhigh | max
+  workdir: ''                # runs here, so it loads the CLAUDE.md that describes your work; empty: home
 
 audio:
   sample_rate: 24000
@@ -29,11 +38,7 @@ asr:
   max_segment_seconds: 12
 
 copilot:
-  # --- brain: your own Claude Code, run headless (llm_provider: claude-code) ---------
-  # Runs here so it loads the CLAUDE.md that describes your work. Empty uses your home.
-  claude_workdir: ''
-  claude_model: ''                  # empty uses Claude Code's default; e.g. opus, sonnet
-  claude_effort: ''                 # low | medium | high | xhigh | max
+  # --- the Claude Code harness (brain.harness: claude-code) --------------------------
   claude_timeout_seconds: 240
   claude_setting_sources: project   # never inherit user-level allow rules such as git push
   claude_connectors: true           # BigQuery and Datadog through the guarded `buddy tool`
@@ -126,7 +131,7 @@ listen:
   remember_voices: false       # keep named voices (embeddings only) for later meetings
   voice_model: ""              # empty: the model `buddy voices setup` downloads
   speaker_self_names: []       # your own tile's name, e.g. ["Sam Ortiz"]
-  auto_brain: true             # no Claude Code session following? Buddy's own brain (copilot.claude_*) suggests and writes the summary
+  auto_brain: true             # no agent session following? Buddy's own brain (the brain harness) suggests and writes the summary
   question_alerts: true        # a question from the other side sends the current batch at once
   question_names: []           # your names, e.g. [Vinicius, Vinny]: these always count, even "Vinny, you?"
   question_min_gap_seconds: 10

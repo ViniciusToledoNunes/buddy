@@ -32,17 +32,17 @@ class AutoBrain:
     The listener sends its batches to a watching session. When none watches (its
     process ended, or none ever connected), a meeting got no suggestions and no
     summary: on 2026-10-19 a 12-minute stand-up produced 24 batches, 17 of them sent
-    early for questions, and nobody read them. This runs Claude Code headless on the
-    same batches instead, one call at a time, keeping one conversation per meeting.
+    early for questions, and nobody read them. This runs the `brain` harness headless
+    on the same batches instead, one call at a time, keeping one conversation per meeting.
     """
 
     def __init__(self, settings: Settings, meetings_dir: Path | None = None,
                  provider_factory: Callable[[], LLMProvider] | None = None) -> None:
         if provider_factory is None:
-            from .claude_code import ClaudeCodeProvider
+            from .harness import harness_for
 
             def provider_factory() -> LLMProvider:
-                return ClaudeCodeProvider(settings, meetings_dir)
+                return harness_for(settings).provider(settings, meetings_dir)
 
         self.provider = provider_factory()
         self.numbered = 0  # suggestions are numbered across the meeting, like the session's

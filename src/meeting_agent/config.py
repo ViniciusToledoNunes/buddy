@@ -64,11 +64,7 @@ class CopilotConfig(BaseModel):
     investigations_in_flight: int = Field(1, ge=1, le=4)
     # Connectors reach real company data, so they are read-only and a query that would
     # scan more than the limit is refused on the free dry run instead of being billed.
-    # The brain: the user's own Claude Code, run headless (llm_provider: claude-code).
-    # It runs in claude_workdir so it loads the CLAUDE.md that describes the user's work.
-    claude_workdir: str = ""
-    claude_model: str = ""
-    claude_effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
+    # Options of the Claude Code harness (brain.harness: claude-code).
     claude_timeout_seconds: float = Field(240.0, ge=20, le=900)
     # User-level settings are left out on purpose: they commonly allow git push and
     # similar, which an unattended run must never inherit.
@@ -183,9 +179,9 @@ class ListenConfig(BaseModel):
     # A question from the other side sends the current batch at once instead of waiting
     # for the interval. A line counts when it has a "?" and more than three words ("Right?"
     # is a tag, not a question), or names the user.
-    # When no Claude Code session follows the listener, Buddy runs its own brain (Claude
-    # Code headless, the `copilot.claude_*` settings) on each batch, shows its suggestions
-    # in the window and writes the meeting summary. A watching session always takes over.
+    # When no agent session follows the listener, Buddy runs its own brain (the `brain`
+    # harness, headless) on each batch, shows its suggestions in the window and writes the
+    # meeting summary. A watching session always takes over.
     auto_brain: bool = True
     question_alerts: bool = True
     question_names: list[str] = []          # e.g. ["Vinicius", "Vinny"]: always count, even when short
@@ -219,15 +215,34 @@ class BenchmarkConfig(BaseModel):
     models: list[str] = ["tiny.en", "base.en", "distil-small.en"]
 
 
+class BrainConfig(BaseModel):
+    """The agent Buddy runs headless as its brain (llm_provider: harness, and the auto brain)."""
+
+    harness: Literal["claude-code"] = "claude-code"
+    model: str = ""  # empty: the harness's own default
+    effort: Literal["", "low", "medium", "high", "xhigh", "max"] = ""
+    # The brain runs here, so it loads the context files that describe the user's work.
+    workdir: str = ""
+
+    def directory(self) -> Path:
+        configured = self.workdir.strip()
+        return Path(configured).expanduser() if configured else Path.home()
+
+
+# Configuration written before the harness could be chosen named Claude Code's settings.
+LEGACY_BRAIN_KEYS = {"claude_workdir": "workdir", "claude_model": "model", "claude_effort": "effort"}
+
+
 class Settings(BaseModel):
     language: Literal["en", "pt", "auto"] = "en"
     asr_mode: Literal["auto", "local-gpu", "local-cpu"] = "auto"
-    llm_provider: Literal["auto", "claude-code", "openai", "anthropic", "ollama", "disabled"] = "auto"
+    llm_provider: Literal["auto", "harness", "openai", "anthropic", "ollama", "disabled"] = "auto"
     save_audio: bool = False
     meetings_dir: str = "meetings"
     # Extra env files to load, the way a wrapper script sources them. Credentials that
     # live in a file and are never exported are invisible to a plain environment read.
     env_files: list[str] = []
+    brain: BrainConfig = BrainConfig()
     audio: AudioConfig = AudioConfig()
     asr: ASRConfig = ASRConfig()
     copilot: CopilotConfig = CopilotConfig()
@@ -235,6 +250,33 @@ class Settings(BaseModel):
     hotkeys: HotkeyConfig = HotkeyConfig()
     ui: UIConfig = UIConfig()
     benchmark: BenchmarkConfig = BenchmarkConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_brain(cls, data: object) -> object:
+        """`llm_provider: claude-code` and `copilot.claude_workdir/model/effort` still work.
+
+        They become the Claude Code harness and its `brain` settings; a key the `brain`
+        block sets itself wins over its legacy twin.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        raw_brain = data.get("brain")
+        brain = dict(raw_brain) if isinstance(raw_brain, dict) else {}
+        copilot = data.get("copilot")
+        if isinstance(copilot, dict):
+            copilot = dict(copilot)
+            for legacy, key in LEGACY_BRAIN_KEYS.items():
+                if legacy in copilot:
+                    brain.setdefault(key, copilot.pop(legacy))
+            data["copilot"] = copilot
+        if data.get("llm_provider") == "claude-code":
+            data["llm_provider"] = "harness"
+            brain.setdefault("harness", "claude-code")
+        if brain and (raw_brain is None or isinstance(raw_brain, dict)):
+            data["brain"] = brain
+        return data
 
 
 def anthropic_workspace_id() -> str:
