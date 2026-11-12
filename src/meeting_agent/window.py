@@ -387,6 +387,8 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 /* A finished card is one line (number, title, ✓/✗); a click on it shows the result and its links. */
 .card.finished:not(.open) .link, .card.finished:not(.open) .state { display: none; }
 .card.finished .top { cursor: pointer; }
+.board-collapse { cursor: pointer; color: var(--muted); font-size: 11px; text-align: right; margin-bottom: 4px; }
+#board-full .col-title { cursor: pointer; }
 .card .mark { margin-left: auto; padding-left: 6px; flex: none; }
 .card.done .mark { color: var(--ok); }
 .card.failed .mark { color: var(--rec); }
@@ -733,6 +735,11 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   // The work board. Small during a meeting (one line: what is being done now); a click opens it.
   let boardOpenInMeeting = false;
   $("board-compact").addEventListener("click", () => { boardOpenInMeeting = true; setStatus(status); });
+  // Opened during a meeting, it closes again from its "collapse" control or any column title.
+  $("board-full").addEventListener("click", (e) => {
+    if (!boardOpenInMeeting || !e.target.closest(".col-title, .board-collapse")) return;
+    boardOpenInMeeting = false; setStatus(status);
+  });
   function ticketChip(item) {
     const chip = document.createElement(item.link ? "a" : "span");
     chip.className = "tk";
@@ -780,6 +787,10 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     compact.append(lead, document.createTextNode(now.map((i) => i.title).join(" · ") || "—"));
     if (blocked.length) { const k = document.createElement("span"); k.className = "blk"; k.textContent = `● ${blocked.length} blocked`; compact.append(k); }
     if (!inMeeting) boardOpenInMeeting = false;
+    if (inMeeting && boardOpenInMeeting && full.children.length) {
+      const fold = document.createElement("div"); fold.className = "board-collapse"; fold.textContent = "▴ collapse";
+      full.prepend(fold);
+    }
     $("board").classList.toggle("small", inMeeting && !boardOpenInMeeting);
     $("board").style.display = full.children.length ? "block" : "none";
   }
