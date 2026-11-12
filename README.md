@@ -128,10 +128,13 @@ opening, being sent and being cancelled (`listen.sounds: false` turns them off).
 Control commands — meetings, pause, shutdown — take effect immediately, need no closing phrase, and never reach
 the agent. Commands are in English: the ASR uses an English-only model, which is faster and more accurate.
 
-**Microphone only in meetings.** With `listen.wake_phrase: false` the listener waits paused between meetings and
-opens the microphone only while a meeting is recorded (the window's Meeting button, the hotkey or
-`buddy meeting start`), closing it again when the meeting ends. There is no "Hey Buddy" between meetings; type
-commands in the window or send them with `buddy say`.
+**Microphone only when you ask.** By default (`listen.wake_phrase: false`) the listener waits paused between
+meetings and opens the microphone only while a meeting is recorded (the window's Meeting button, the hotkey or
+`buddy meeting start`) or while the window's 🎤 is on, closing it again after. To give Buddy an instruction by
+voice, click 🎤, speak, and click it again: the words land in the window's box to read, fix and send (Buddy waits
+`listen.dictation_grace_seconds` for the last ones). Dictation never enters the meeting's transcript. Commands are
+otherwise typed in the window or sent with `buddy say`. `listen.wake_phrase: true` brings back the always-on
+"Hey Buddy" between meetings and as a spoken command during them.
 
 **What is kept.** Speech that does not open with the wake phrase and is not part of a meeting is transcribed in
 memory and discarded. Meetings are recorded in full, about 44 KB of text per hour. System audio is captured only

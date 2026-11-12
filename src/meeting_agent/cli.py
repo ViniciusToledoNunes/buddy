@@ -263,8 +263,10 @@ def listen(
         for _ in range(60):
             state = listener_state(runtime)
             if state:
-                console.print(f"Buddy is listening for \"Hey Buddy\" (pid {state['pid']}).")
-                if load_settings().listen.window:
+                settings = load_settings()
+                ready = "listening for \"Hey Buddy\"" if settings.listen.wake_phrase else "ready; the microphone opens for meetings and the 🎤"
+                console.print(f"Buddy is {ready} (pid {state['pid']}).")
+                if settings.listen.window:
                     _open_window(runtime)
                 return
             time.sleep(0.5)
@@ -272,7 +274,8 @@ def listen(
         raise typer.Exit(code=1)
     settings = load_settings()
     daemon = ListenDaemon(settings, runtime)
-    console.print('Listening for "Hey Buddy". Ctrl+C stops.')
+    console.print('Listening for "Hey Buddy". Ctrl+C stops.' if settings.listen.wake_phrase
+                  else "Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
     try:
         asyncio.run(daemon.run(asyncio.Event()))
     except KeyboardInterrupt:

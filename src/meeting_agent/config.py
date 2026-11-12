@@ -140,10 +140,14 @@ class ListenConfig(BaseModel):
     # the microphone is held this long and dropped if the same words arrive as system
     # audio around it. 0 keeps every line and writes it at once.
     echo_window_seconds: float = Field(8.0, ge=0, le=30)
-    # Between meetings the microphone waits for "Hey Buddy". Off: it opens only while a
-    # meeting is recorded (the Meeting button, the hotkey or `buddy meeting start`) and
-    # closes again when the meeting ends; typed commands still work.
-    wake_phrase: bool = True
+    # On: between meetings the microphone waits for "Hey Buddy", and "Hey Buddy ..." is a
+    # command in a meeting too. Off (the default): the microphone opens only while a
+    # meeting is recorded (the Meeting button, the hotkey or `buddy meeting start`) or
+    # while the window's 🎤 is on, and closes again after; commands are typed or dictated.
+    wake_phrase: bool = False
+    # The window's 🎤 button: speech while it is on becomes text in the window's box, to
+    # read and send. How long after the second click the last words are still awaited.
+    dictation_grace_seconds: float = Field(2.5, ge=0, le=10)
     # Screenshots of the main display during a meeting (macOS), saved in the meeting's
     # `screens/` folder and named in the next batch, so the watching session can see
     # what is being shared. Off by default: it captures the whole screen. A capture

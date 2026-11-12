@@ -454,6 +454,10 @@ class ListenDaemon:
         # An open command: what the user has said since "Hey Buddy", waiting for the
         # closing phrase. None when no command is being dictated.
         self.capture: list[str] | None = None
+        # The window's 🎤: what has been said since it was pressed, and whether the
+        # microphone was opened for it (closed again when it is done).
+        self.dictation: dict[str, Any] | None = None
+        self._dictation_last: dict[str, Any] = {"active": False, "text": "", "id": 0}
         self._capture_started = 0.0
         self._capture_last = 0.0
         self._end_phrase = end_phrase_pattern(listen.end_phrases)
@@ -500,6 +504,8 @@ class ListenDaemon:
                 "meeting_id": self.meeting_id,
                 "meeting_dir": str(self.storage.directory) if self.storage is not None else "",
                 "mic": self.mic_gate.indicator() if self.mic_gate is not None else None,
+                "dictation": self._dictation_state(),
+                "wake_phrase": self.settings.listen.wake_phrase,
                 "updated": utc_now(),
             },
         )
@@ -860,7 +866,12 @@ class ListenDaemon:
         if not text:
             return
         now = self.clock()
-        if event.speaker == "ME":
+        if event.speaker == "ME" and self.dictation is not None:
+            # Talking to Buddy through the 🎤: not part of the meeting, and no wake phrase.
+            self.dictation["words"].append(text)
+            self._write_listen_state()
+            return
+        if event.speaker == "ME" and self.settings.listen.wake_phrase:
             matched, remainder = parse_wake(text)
             if self.capture is not None or matched:
                 # Shown as heard, closing phrase included, so the user can see it landed.
@@ -1027,6 +1038,44 @@ class ListenDaemon:
             return
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
 
+    # -------------------------------------------------------------- dictation
+
+    def _dictation_state(self) -> dict[str, Any]:
+        if self.dictation is None:
+            return self._dictation_last
+        return {"active": True, "text": " ".join(self.dictation["words"]), "id": self._dictation_last["id"]}
+
+    async def start_dictation(self) -> None:
+        """The window's 🎤 was pressed: what the user says next becomes text in the window."""
+        if self.dictation is not None:
+            return
+        opened = self.mic is None
+        if opened:
+            self.mic = self._stream("ME")
+            self.mic.start()
+        self.dictation = {"words": [], "started": self.clock(), "opened": opened, "stop_at": None}
+        self.chime("open")
+        self._write_listen_state()
+
+    def stop_dictation(self) -> None:
+        """Pressed again: the last words are still on their way, so finish a moment later."""
+        if self.dictation is not None and self.dictation["stop_at"] is None:
+            self.dictation["stop_at"] = self.clock() + self.settings.listen.dictation_grace_seconds
+
+    async def _stop_dictation_async(self) -> None:
+        self.stop_dictation()
+
+    async def _finish_dictation(self) -> None:
+        dictation, self.dictation = self.dictation, None
+        if dictation is None:
+            return
+        text = " ".join(dictation["words"]).strip()
+        self._dictation_last = {"active": False, "text": text, "id": self._dictation_last["id"] + 1}
+        if dictation["opened"] and self.storage is None and self.paused and self.mic is not None:
+            await self.stop_listening()  # opened only for this: closed again
+        self.chime("sent" if text else "cancel")
+        self._write_listen_state()
+
     def _play_chime(self, kind: str) -> None:
         """A short tone, so the user knows Buddy heard them without looking at a screen."""
         if not self.settings.listen.sounds:
@@ -1056,6 +1105,10 @@ class ListenDaemon:
                 await self.send_command("silence")
             elif now - self._capture_started >= listen.command_max_seconds:
                 await self.send_command("limit")
+        if self.dictation is not None:
+            stop_at = self.dictation["stop_at"]
+            if (stop_at is not None and now >= stop_at) or now - self.dictation["started"] >= listen.command_max_seconds:
+                await self._finish_dictation()
         if self.storage is None:
             return
         if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:
@@ -1078,6 +1131,8 @@ class ListenDaemon:
             "stop-meeting": lambda: self.stop_meeting("requested"),
             "pause": lambda: self.pause("requested"),
             "resume": lambda: self.resume("requested"),
+            "dictate-start": self.start_dictation,
+            "dictate-stop": self._stop_dictation_async,
         }
         for name, action in flags.items():
             flag = self.control_dir / f"{name}.flag"

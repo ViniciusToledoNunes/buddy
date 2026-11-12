@@ -17,7 +17,7 @@ from typing import Any, Callable
 from .listener import _process_started, _read_json, _write_json, listener_state, process_alive, request, submit
 from .live import LiveView
 
-CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown"}
+CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown", "dictate-start", "dictate-stop"}
 MAX_TYPED = 4000
 
 
@@ -215,6 +215,14 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #suggestions li.older { opacity: .55; }
 #suggestions li.set-start { border-top: 1px dashed var(--accent); margin-top: 4px; padding-top: 6px; }
 
+#activity-head { display: flex; align-items: center; gap: 6px; margin: 8px 12px 0; padding: 0; border: 0;
+  color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; background: none; }
+#activity-head:hover { background: none; color: var(--text); }
+#activity-head .chev { transition: transform .15s; }
+body.activity-closed #activity-head .chev { transform: rotate(-90deg); }
+body.activity-closed #feed, body.activity-closed #jump { display: none !important; }
+#panels { overflow-y: auto; }
+body.activity-closed #panels { flex: 1; }
 #feed { flex: 1; overflow-y: auto; padding: 8px 12px 12px; }
 .row { display: flex; gap: 8px; padding: 3px 0; }
 .time { color: var(--muted); font: 11px var(--mono); padding-top: 2px; flex: none; width: 56px; }
@@ -240,6 +248,12 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   border-radius: var(--radius); padding: 7px 10px; max-height: 120px; }
 #input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 #send { background: var(--accent); color: var(--on-accent); border-color: var(--accent); padding: 7px 14px; }
+/* The 🎤 dictation button glows while Buddy is listening to you. */
+#dictate { padding: 7px 10px; }
+#dictate.live { color: #fff; background: var(--rec); border-color: var(--rec); box-shadow: 0 0 10px var(--rec);
+  animation: glow 1.6s ease-in-out infinite; }
+#dictate.finishing { opacity: .6; }
+#input.listening { outline: 2px solid var(--rec); outline-offset: -1px; }
 #error { color: var(--rec); font-size: 12px; min-height: 0; }
 </style>
 </head>
@@ -258,12 +272,15 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     <button id="power" class="danger" title="Turn Buddy off">⏻</button>
   </span>
 </header>
+<div id="panels"></div>
 <section id="suggestions"><h2>Suggestions</h2><ol id="suggestion-list"></ol></section>
-<main id="feed"><div id="empty">Say “Hey Buddy”, or type below.<br>The meeting shows here as it is said.</div></main>
+<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> Activity</button>
+<main id="feed"><div id="empty">Type below, or press 🎤 to talk to Buddy.<br>The meeting shows here as it is said.</div></main>
 <button id="jump">↓ New</button>
 <footer>
   <form id="form">
     <textarea id="input" rows="1" placeholder="Type to Buddy — e.g. review PR 123"></textarea>
+    <button id="dictate" type="button" title="Talk to Buddy: click, speak, click again. The text lands here to read and send.">🎤</button>
     <button id="send" type="submit">Send</button>
   </form>
   <div id="error"></div>
@@ -340,7 +357,8 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     status = next;
     const state = next.listener;
     $("dot").className = "dot " + state;
-    let label = {listening: "Listening", meeting: "Recording", paused: "Paused", off: "Buddy is off"}[state] || state;
+    const ready = state === "paused" && next.wake_phrase === false;  // waiting for a meeting or the 🎤
+    let label = ready ? "Ready" : ({listening: "Listening", meeting: "Recording", paused: "Paused", off: "Buddy is off"}[state] || state);
     if (state === "meeting") {
       const minutes = minutesSince(next.meeting);
       if (minutes !== null) label += " · " + minutes + " min";
@@ -356,6 +374,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     $("meeting").disabled = !on;
     $("pause").textContent = state === "paused" ? "▶" : "⏸";
     $("pause").disabled = !on;
+    $("pause").style.display = ready ? "none" : "";
     $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
     const mic = next.mic;
@@ -370,6 +389,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       micButton.title = (mic.heard ? "Your lines are kept" : "Your lines are not kept") +
         ` · ${mic.mode === "auto" ? "following " + app : "set by hand"} · click: auto → on → off`;
     }
+    showDictation(next.dictation, on);
     // Earlier sets stay above the newest one, dimmed, so a new set never wipes the one
     // being read. The newest set is at the bottom and kept in view.
     const list = $("suggestion-list");
@@ -384,6 +404,33 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     }));
     list.scrollTop = list.scrollHeight;
     $("suggestions").style.display = all.length ? "block" : "none";
+  }
+
+  // 🎤: while on, the box shows what is heard; when done, the text stays there to read,
+  // fix and send. `id` grows once per finished dictation, so each lands only once.
+  let dictationSeen = null, dictationBase = "", dictating = false, finishing = false;
+  function showDictation(d, on) {
+    const button = $("dictate");
+    button.disabled = !on;
+    if (!d) return;
+    if (dictationSeen === null) dictationSeen = d.id;  // the window opened after it: nothing to land
+    if (d.active) {
+      if (!dictating) { dictating = true; dictationBase = input.value.trim(); }
+      input.value = (dictationBase + " " + d.text).trim();
+      resize();
+    } else if (d.id !== dictationSeen) {
+      dictationSeen = d.id;
+      input.value = ((dictating ? dictationBase : input.value.trim()) + " " + d.text).trim();
+      resize();
+      dictating = finishing = false;
+      input.focus();
+    } else if (dictating) {
+      dictating = finishing = false;
+    }
+    button.className = d.active ? (finishing ? "finishing" : "live") : "";
+    button.title = d.active ? "Listening… click to finish" : "Talk to Buddy: click, speak, click again. The text lands here to read and send.";
+    input.classList.toggle("listening", !!d.active);
+    input.placeholder = d.active ? "Listening…" : "Type to Buddy — e.g. review PR 123";
   }
 
   window.buddy = {
@@ -420,6 +467,19 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   const control = async (action) => { const r = await call("control", action); if (!r.ok) showError(r.error); };
   $("meeting").addEventListener("click", () => control(status.listener === "meeting" ? "stop-meeting" : "start-meeting"));
   $("pause").addEventListener("click", () => control(status.listener === "paused" ? "resume" : "pause"));
+  $("dictate").addEventListener("click", async () => {
+    const live = status.dictation && status.dictation.active;
+    if (live) { finishing = true; $("dictate").className = "finishing"; }
+    const r = await call("control", live ? "dictate-stop" : "dictate-start");
+    if (!r.ok) showError(r.error);
+  });
+  const ACTIVITY_KEY = "buddy.activity";
+  const setActivity = (open) => {
+    document.body.classList.toggle("activity-closed", !open);
+    try { localStorage.setItem(ACTIVITY_KEY, open ? "open" : "closed"); } catch (e) {}
+  };
+  try { if (localStorage.getItem(ACTIVITY_KEY) === "closed") document.body.classList.add("activity-closed"); } catch (e) {}
+  $("activity-head").addEventListener("click", () => setActivity(document.body.classList.contains("activity-closed")));
   $("mic").addEventListener("click", async () => {
     const order = ["auto", "on", "off"];
     const current = (status.mic && status.mic.mode) || "auto";
