@@ -110,13 +110,22 @@ listen:
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150
   echo_window_seconds: 8       # drop microphone lines that only echo the speakers; 0 turns it off
-  wake_phrase: true            # false: the microphone opens only during a meeting (no "Hey Buddy" between meetings)
+  wake_phrase: false           # true: listen for "Hey Buddy" between meetings too (false: only meetings and the 🎤)
+  board_ticket_url: ""         # work board ticket links, e.g. "https://example.atlassian.net/browse/{key}"
+  dictation_grace_seconds: 2.5 # the window's 🎤: how long the last words are awaited after the second click
   screen_capture: false        # macOS: save a screenshot every interval during a meeting (whole screen)
   screen_interval_seconds: 60
   screen_max_width: 1600       # captures are scaled down to this width
   screen_max_per_meeting: 240
   mic_follows_mute: false      # macOS: keep your meeting lines only while Teams/Meet/Zoom can hear you (Accessibility)
   mic_when_unknown: keep       # no meeting app read: keep or drop your lines
+  speaker_names: "off"         # "screen", "voice" or "both": who on the other side said each line (see README)
+  speaker_screen_seconds: 2    # at most one look at the screen this often while the other side talks
+  voice_threshold: 0.6         # cosine similarity for "the same voice"
+  speaker_votes_needed: 2      # screen sightings before a voice's name is settled
+  remember_voices: false       # keep named voices (embeddings only) for later meetings
+  voice_model: ""              # empty: the model `buddy voices setup` downloads
+  speaker_self_names: []       # your own tile's name, e.g. ["Sam Ortiz"]
   auto_brain: true             # no Claude Code session following? Buddy's own brain (copilot.claude_*) suggests and writes the summary
   question_alerts: true        # a question from the other side sends the current batch at once
   question_names: []           # your names, e.g. [Vinicius, Vinny]: these always count, even "Vinny, you?"

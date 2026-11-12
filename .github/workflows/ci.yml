@@ -52,7 +52,7 @@ jobs:
 
       - name: Check the macOS helpers parse
         if: runner.os == 'macOS'
-        run: swiftc -parse native/macos/MeetingAudioCapture.swift && swiftc -parse native/macos/MicState.swift
+        run: swiftc -parse native/macos/MeetingAudioCapture.swift && swiftc -parse native/macos/ScreenText.swift && swiftc -parse native/macos/MicState.swift
 
       - name: Run tests with coverage
         run: pytest -q --cov --cov-report=term-missing --cov-fail-under=80

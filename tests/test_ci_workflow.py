@@ -13,4 +13,5 @@ def test_ci_covers_supported_operating_systems_and_quality_gates():
     assert {"ubuntu-latest", "windows-latest", "macos-15"} <= operating_systems
     assert "--cov-fail-under=80" in steps
     assert "MeetingAudioCapture.swift" in steps
+    assert "ScreenText.swift" in steps
     assert "MicState.swift" in steps

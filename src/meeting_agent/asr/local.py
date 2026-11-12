@@ -4,6 +4,7 @@ import asyncio
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 import re
 
 import numpy as np
@@ -11,8 +12,11 @@ from faster_whisper import WhisperModel
 
 from ..audio import AudioFrame
 from ..config import Settings
-from ..events import EventBus, StatusEvent, TranscriptEvent
+from ..events import EventBus, SpeechEvent, StatusEvent, TranscriptEvent
 from .selection import ASRSelection
+
+# Below this a voice embedding is mostly noise; the screen alone names such a line.
+MIN_VOICE_SECONDS = 1.0
 
 
 # A calibration window is only a noise-floor estimate, so it must never gate the
@@ -127,8 +131,16 @@ async def run_local_asr(
     settings: Settings,
     bus: EventBus,
     stop: asyncio.Event,
+    voice: Callable[[np.ndarray], np.ndarray | None] | None = None,
 ) -> None:
+    """Segment one side's audio at pauses and transcribe each segment.
+
+    With `voice` (listen.speaker_names), each line also carries the voice embedding of
+    its audio, and the start of speech is announced so the screen can be looked at while
+    the person is still talking: the outline follows whoever is speaking now.
+    """
     frame_ms = settings.audio.chunk_ms
+    announce_every = max(1, 2000 // frame_ms)
     silence_frames_needed = max(1, settings.asr.silence_ms // frame_ms)
     min_frames = max(1, settings.asr.min_speech_ms // frame_ms)
     max_frames = max(1, int(settings.asr.max_segment_seconds * 1000 / frame_ms))
@@ -138,6 +150,7 @@ async def run_local_asr(
     speech_frames = 0
     start_consecutive = 0
     segment_started = 0.0
+    last_speech_at = 0.0  # the last frame with voice in it, on the frames' own clock
     speaker = "REMOTE"
     calibration: list[float] = []
     adaptive_threshold = settings.asr.vad_threshold
@@ -150,7 +163,7 @@ async def run_local_asr(
     bus.publish(StatusEvent("asr-local", "connected", f"{pool.selection.model}/{pool.selection.compute_type}"))
 
     async def flush() -> None:
-        nonlocal segment, silence_frames, speech_frames, start_consecutive, segment_started
+        nonlocal segment, silence_frames, speech_frames, start_consecutive, segment_started, last_speech_at
         if speech_frames < min_frames:
             segment = []
             silence_frames = 0
@@ -158,12 +171,14 @@ async def run_local_asr(
             start_consecutive = 0
             return
         audio = np.concatenate(segment)
+        speech_seconds = speech_frames * frame_ms / 1000  # the pause that closed it is not voice
         captured_end = time.monotonic()
         utterance_id = uuid.uuid4().hex
         segment = []
         silence_frames = 0
         speech_frames = 0
         start_consecutive = 0
+        spoken_from = segment_started
         audio16 = resample_linear(audio, settings.audio.sample_rate)
         text, processing = await pool.transcribe(audio16)
         tokens = re.findall(r"[a-z0-9']+", text.lower())
@@ -173,6 +188,12 @@ async def run_local_asr(
             repeated = len(set(trigrams)) / max(1, len(trigrams)) < 0.35
             repeated = repeated or max(tokens.count(token) for token in set(tokens)) / len(tokens) > 0.32
         if text and not repeated:
+            embedding = None
+            if voice is not None and speech_seconds >= MIN_VOICE_SECONDS:
+                try:
+                    embedding = await asyncio.to_thread(voice, audio16)
+                except Exception as exc:  # a voice model problem must not lose the line
+                    bus.publish(StatusEvent("voice", "warning", f"{type(exc).__name__}: {exc}"))
             # User-visible latency includes the silence required to decide that a
             # turn ended, not only model inference time.
             latency = max(processing, time.monotonic() - captured_end) + settings.asr.silence_ms / 1000
@@ -183,6 +204,10 @@ async def run_local_asr(
                     final=True,
                     utterance_id=utterance_id,
                     latency_seconds=latency,
+                    embedding=embedding,
+                    spoken_from=spoken_from,
+                    # When the voice stopped, on the same clock as spoken_from: the frames'.
+                    spoken_to=max(spoken_from, last_speech_at + frame_ms / 1000),
                 )
             )
         bus.publish(StatusEvent("asr-lag", "ok" if processing < len(audio16) / 16_000 else "warning", f"{processing:.2f}s"))
@@ -210,15 +235,21 @@ async def run_local_asr(
                     start_consecutive += 1
                     if start_consecutive >= 2:
                         segment_started = frame.captured_monotonic
+                        last_speech_at = frame.captured_monotonic
                         segment.extend(preroll)
                         speech_frames = start_consecutive
                         preroll.clear()
+                        if voice is not None:
+                            bus.publish(SpeechEvent(frame.speaker, frame.captured_monotonic))
                 else:
                     start_consecutive = 0
                 continue
             segment.append(frame.samples)
+            if voice is not None and speech and len(segment) % announce_every == 0:
+                bus.publish(SpeechEvent(frame.speaker, frame.captured_monotonic))  # still talking
             if speech:
                 speech_frames += 1
+                last_speech_at = frame.captured_monotonic
             silence_frames = 0 if speech else silence_frames + 1
             if silence_frames >= silence_frames_needed or len(segment) >= max_frames:
                 await flush()

@@ -288,7 +288,10 @@ class SessionMirror:
 class LiveView:
     """Everything on screen, merged in time order, from the moment the view opens."""
 
-    def __init__(self, runtime_dir: Path, show: str = "buddy", home: Path | None = None, keep: int = 3) -> None:
+    def __init__(
+        self, runtime_dir: Path, show: str = "buddy", home: Path | None = None, keep: int = 3, ticket_url: str | None = None
+    ) -> None:
+        self._ticket_url = ticket_url  # None: read listen.board_ticket_url on first use
         self.runtime_dir = runtime_dir
         self.show = show
         self.home = home
@@ -357,6 +360,10 @@ class LiveView:
             "meeting": listener.get("meeting_id", "") if listener else "",
             # listen.mic_follows_mute: whether your microphone's lines are being kept now.
             "mic": listener.get("mic") if listener else None,
+            # The window's 🎤: on, and the words heard so far; `id` grows when one is done.
+            "dictation": listener.get("dictation") if listener else None,
+            # Without the wake phrase, "paused" between meetings is just being ready.
+            "wake_phrase": bool(listener.get("wake_phrase", True)) if listener else True,
             # watching: a session follows Buddy. idle: it did, but its monitor is down, so
             # commands wait on disk until it re-arms. none: no session has ever connected.
             "brain": ("watching" if brain["watching"] else "idle") if brain else "none",
@@ -364,7 +371,34 @@ class LiveView:
             # How many of them, at the end, are the newest set: the window highlights those.
             "suggestions_latest": len(self.suggestion_sets[-1]) if self.suggestion_sets else 0,
             "show": self.show,
+            # Cards the session proposed (buddy propose), newest last; see actions.py.
+            "actions": self.actions(),
+            # The work board (buddy board): now, next, blocked, done today.
+            "board": self.board(),
         }
+
+    def board(self) -> dict[str, Any]:
+        from .board import Board
+
+        if self._ticket_url is None:
+            try:
+                from .config import load_settings
+
+                self._ticket_url = load_settings().listen.board_ticket_url
+            except Exception:
+                self._ticket_url = ""
+        try:
+            return Board(self.runtime_dir).view(self._ticket_url)
+        except OSError:
+            return {}
+
+    def actions(self) -> list[dict[str, Any]]:
+        from .actions import ActionStore
+
+        try:
+            return [action.to_dict() for action in ActionStore(self.runtime_dir).visible()][-20:]
+        except OSError:
+            return []
 
 
 # ------------------------------------------------------------------ terminal

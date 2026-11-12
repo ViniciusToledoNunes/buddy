@@ -13,7 +13,9 @@ Use the `buddy` MCP tools for meeting data and the host agent's native tools for
 - Status, saved-meeting reads, bounded live-transcript reads, and searches are read-only and may be used when relevant.
 - Call `stop_meeting` or `request_suggestion` only when the user asks or when stopping is unambiguously the active task.
 - Never expose API keys, `.env` contents, credentials, or unrelated private files.
-- Speakers are only `ME` and `REMOTE`. Do not infer names or identities without explicit transcript evidence.
+- Speakers are `ME` and `REMOTE`. With `listen.speaker_names` on, a REMOTE line may carry the name Buddy read from
+  the meeting app or the voice, `REMOTE (Dana Reyes)` (a trailing `?` is not settled; `REMOTE (voice B)` is an
+  unnamed voice). Use those; do not infer other names or identities without explicit transcript evidence.
 
 ## Workflow
 

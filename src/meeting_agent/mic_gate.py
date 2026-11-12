@@ -70,6 +70,8 @@ class MicGate:
         self.app: str | None = None
         self.error: str | None = None
         self.dropped = 0
+        # The call's participants as the app labels them (Teams), newest list; see speakers.
+        self.participant_labels: list[str] = []
         self._spawn = spawn or self._start_helper
         self._process: Any = None
         self._thread: threading.Thread | None = None
@@ -80,7 +82,7 @@ class MicGate:
         if sys.platform != "darwin" or helper is None:
             return None
         return subprocess.Popen(
-            [helper, "--interval", "1"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1
+            [helper, "--interval", "1", "--participants"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1
         )
 
     def start(self) -> bool:
@@ -105,6 +107,9 @@ class MicGate:
         try:
             item = json.loads(line)
         except ValueError:
+            return
+        if isinstance(item.get("participants"), list):
+            self.participant_labels = [str(label) for label in item["participants"]]
             return
         state = item.get("state")
         if state in ("muted", "open", "none"):
@@ -147,4 +152,5 @@ class MicGate:
         return {"mode": self.mode, "state": self.state, "app": self.app, "heard": self.heard()}
 
     def describe(self) -> dict[str, Any]:
-        return {"mode": self.mode, "state": self.state, "app": self.app, "dropped": self.dropped, "error": self.error}
+        return {"mode": self.mode, "state": self.state, "app": self.app, "dropped": self.dropped, "error": self.error,
+                "participants_seen": len(self.participant_labels)}
