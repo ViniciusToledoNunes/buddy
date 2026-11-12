@@ -362,7 +362,7 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #brain-panel .state.ok { color: var(--ok); }
 #brain-panel .state.warning, #brain-panel .state.failed { color: var(--warn); }
 #actions { display: none; margin: 10px 12px 0; }
-#actions h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+#actions h2, #board h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 6px; }
 .card .top { display: flex; gap: 6px; align-items: baseline; }
 .card .num { color: var(--muted); font: 11px var(--mono); }
@@ -384,6 +384,15 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 .card.failed .state { color: var(--rec); }
 .card.finished .detail, .card.finished .buttons { display: none; }
 .card.finished { opacity: .8; padding: 6px 10px; }
+/* A finished card is one line (number, title, ✓/✗); a click on it shows the result and its links. */
+.card.finished:not(.open) .link, .card.finished:not(.open) .state { display: none; }
+.card.finished .top { cursor: pointer; }
+#actions.folded > :not(h2), #suggestions.folded > :not(h2), #board.folded > :not(h2) { display: none !important; }
+.board-collapse { cursor: pointer; color: var(--muted); font-size: 11px; text-align: right; margin-bottom: 4px; }
+#board-full .col-title { cursor: pointer; }
+.card .mark { margin-left: auto; padding-left: 6px; flex: none; }
+.card.done .mark { color: var(--ok); }
+.card.failed .mark { color: var(--rec); }
 #suggestions { display: none; margin: 10px 12px 0; padding: 10px 12px; background: var(--accent-soft);
   border: 1px solid var(--accent); border-radius: var(--radius); }
 #suggestions h2 { margin: 0 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
@@ -396,8 +405,6 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #activity-head { display: flex; align-items: center; gap: 6px; margin: 8px 12px 0; padding: 0; border: 0;
   color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; background: none; }
 #activity-head:hover { background: none; color: var(--text); }
-#activity-head .chev { transition: transform .15s; }
-body.activity-closed #activity-head .chev { transform: rotate(-90deg); }
 body.activity-closed #feed, body.activity-closed #jump { display: none !important; }
 #panels { overflow-y: auto; max-height: 58vh; flex: none; }
 body.activity-closed #panels { flex: 1; max-height: none; }
@@ -433,6 +440,20 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 #dictate.finishing { opacity: .6; }
 #input.listening { outline: 2px solid var(--rec); outline-offset: -1px; }
 #error { color: var(--rec); font-size: 12px; min-height: 0; }
+/* One look for every section: Actions, Work, Suggestions and Activity. The same head line outside any box
+   (small caps, muted, ▾ open / ▸ folded, counts in brackets); each section's content keeps its own box. */
+#actions, #board, #suggestions { margin: 10px 12px 0; padding: 0; background: none; border: 0; border-radius: 0; }
+#actions h2, #board h2, #suggestions h2, #activity-head {
+  display: block; width: auto; margin: 0 0 6px; padding: 0; border: 0; background: none; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  cursor: pointer; user-select: none; }
+#actions h2:hover, #board h2:hover, #suggestions h2:hover, #activity-head:hover { color: var(--text); background: none; }
+#actions h2::before, #board h2::before, #suggestions h2::before, #activity-head::before { content: "▾"; display: inline-block; width: 12px; }
+section.folded h2 { margin-bottom: 0; }
+section.folded h2::before, body.activity-closed #activity-head::before { content: "▸"; }
+#activity-head { margin: 10px 12px 6px; }
+#board .compact, #board .full { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; }
+#suggestions ol { background: var(--accent-soft); border-radius: var(--radius); padding: 8px 10px; }
 </style>
 </head>
 <body>
@@ -461,10 +482,10 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     <div id="brain-state" class="state"></div>
   </section>
   <section id="actions"><h2 id="actions-title">Actions</h2><div id="action-list"></div></section>
-  <section id="board" title="Your work: now, next, blocked"><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
+  <section id="board" title="Your work: now, next, blocked"><h2 id="board-title">Work</h2><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
 </div>
-<section id="suggestions"><h2>Suggestions</h2><ol id="suggestion-list"></ol></section>
-<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> Activity</button>
+<section id="suggestions"><h2 id="suggestions-title">Suggestions</h2><ol id="suggestion-list"></ol></section>
+<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span id="activity-label">Activity</span></button>
 <main id="feed"><div id="empty">Type below, or press 🎤 to talk to Buddy.<br>The meeting shows here as it is said.</div></main>
 <button id="jump">↓ New</button>
 <footer>
@@ -599,6 +620,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       return li;
     }));
     list.scrollTop = list.scrollHeight;
+    $("suggestions-title").textContent = all.length ? `Suggestions (${all.length})` : "Suggestions";
     $("suggestions").style.display = all.length ? "block" : "none";
   }
 
@@ -631,11 +653,11 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 
   // Action cards. Rebuilt only when an action changes, and never while you edit it.
   const KIND = {reply: "Reply", review: "Review", investigate: "Look into", merge: "Merge", post: "Post", ticket: "Jira", run: "Run", other: "Action"};
-  const cards = new Map(), editing = new Set();
+  const cards = new Map(), editing = new Set(), opened = new Set();
   function card(a) {
     const el = document.createElement("div");
     const finished = ["done", "failed"].includes(a.status);
-    el.className = "card " + a.status + (finished ? " finished" : "");
+    el.className = "card " + a.status + (finished ? " finished" : "") + (opened.has(a.id) ? " open" : "");
     const top = document.createElement("div");
     top.className = "top";
     const num = document.createElement("span"); num.className = "num"; num.textContent = "#" + a.id;
@@ -643,6 +665,14 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const title = document.createElement("span"); title.className = "title"; title.textContent = a.title;
     top.append(num, kind, title);
     if (a.stale) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "from yesterday"; top.append(b); }
+    if (finished) {
+      const mark = document.createElement("span"); mark.className = "mark"; mark.textContent = a.status === "done" ? "✓" : "✗";
+      top.append(mark);
+      top.addEventListener("click", () => {
+        if (opened.has(a.id)) opened.delete(a.id); else opened.add(a.id);
+        el.classList.toggle("open", opened.has(a.id));
+      });
+    }
     el.append(top);
     let detailEl = null;
     if (a.detail) {
@@ -712,13 +742,22 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       cards.set(a.id, {el, key});
       list.appendChild(el);
     }
-    $("actions-title").textContent = open.length ? `Actions · ${open.filter((a) => a.status === "proposed").length} to approve` : "Actions";
-    $("actions").style.display = wanted.length ? "block" : "none";
+    const every = actions || [];
+    const count = (st) => every.filter((a) => st.includes(a.status)).length;
+    const parts = [[count(["proposed", "approved", "running"]), "open"], [count(["done"]), "completed"],
+      [count(["failed"]), "failed"], [count(["dismissed"]), "dismissed"]].filter(([n]) => n).map(([n, w]) => `${n} ${w}`);
+    $("actions-title").textContent = parts.length ? `Actions (${parts.join(", ")})` : "Actions";
+    $("actions").style.display = every.length ? "block" : "none";
   }
 
   // The work board. Small during a meeting (one line: what is being done now); a click opens it.
   let boardOpenInMeeting = false;
   $("board-compact").addEventListener("click", () => { boardOpenInMeeting = true; setStatus(status); });
+  // Opened during a meeting, it closes again from its "collapse" control or any column title.
+  $("board-full").addEventListener("click", (e) => {
+    if (!boardOpenInMeeting || !e.target.closest(".col-title, .board-collapse")) return;
+    boardOpenInMeeting = false; setStatus(status);
+  });
   function ticketChip(item) {
     const chip = document.createElement(item.link ? "a" : "span");
     chip.className = "tk";
@@ -765,7 +804,14 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const lead = document.createElement("b"); lead.textContent = "Now: ";
     compact.append(lead, document.createTextNode(now.map((i) => i.title).join(" · ") || "—"));
     if (blocked.length) { const k = document.createElement("span"); k.className = "blk"; k.textContent = `● ${blocked.length} blocked`; compact.append(k); }
+    const tally = [[b.now, "now"], [b.blocked, "blocked"], [b.next, "next"], [b.done, "done"]]
+      .filter(([xs]) => xs && xs.length).map(([xs, w]) => `${xs.length} ${w}`);
+    $("board-title").textContent = tally.length ? `Work (${tally.join(", ")})` : "Work";
     if (!inMeeting) boardOpenInMeeting = false;
+    if (inMeeting && boardOpenInMeeting && full.children.length) {
+      const fold = document.createElement("div"); fold.className = "board-collapse"; fold.textContent = "▴ collapse";
+      full.prepend(fold);
+    }
     $("board").classList.toggle("small", inMeeting && !boardOpenInMeeting);
     $("board").style.display = full.children.length ? "block" : "none";
   }
@@ -810,6 +856,23 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const r = await call("control", live ? "dictate-stop" : "dictate-start");
     if (!r.ok) showError(r.error);
   });
+  // Actions, Suggestions and Work fold to their title line (with counts); each remembers its state.
+  const FOLD_KEY = "buddy.fold.";
+  for (const id of ["actions", "suggestions", "board"]) {
+    const sec = $(id), head = sec.querySelector("h2");
+    head.classList.add("fold-head");
+    try { if (localStorage.getItem(FOLD_KEY + id) === "1") sec.classList.add("folded"); } catch (e) {}
+    head.addEventListener("click", () => {
+      const folded = sec.classList.toggle("folded");
+      try { localStorage.setItem(FOLD_KEY + id, folded ? "1" : "0"); } catch (e) {}
+    });
+  }
+  const countActivity = () => {
+    const n = [...$("feed").children].filter((c) => c.id !== "empty").length;
+    $("activity-label").textContent = n ? `Activity (${n})` : "Activity";
+  };
+  new MutationObserver(countActivity).observe($("feed"), {childList: true});
+  countActivity();
   const ACTIVITY_KEY = "buddy.activity";
   const setActivity = (open) => {
     document.body.classList.toggle("activity-closed", !open);
