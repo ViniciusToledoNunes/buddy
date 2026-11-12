@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-KINDS = ("reply", "review", "investigate", "merge", "post", "run", "other")
+KINDS = ("reply", "review", "investigate", "merge", "post", "ticket", "run", "other")
 STATUSES = ("proposed", "approved", "running", "done", "failed", "dismissed")
 OPEN = ("proposed", "approved", "running")
 MODES = ("run", "copy", "send")
@@ -128,7 +128,7 @@ class ActionStore:
         if not title:
             raise ValueError("an action needs a title")
         if outward is None:
-            outward = kind in ("reply", "merge", "post") or mode == "send"
+            outward = kind in ("reply", "merge", "post", "ticket") or mode == "send"
         action = Action(
             id=self._next_id(), kind=kind, title=title[:MAX_TITLE], detail=detail[:MAX_DETAIL].strip(),
             link=link.strip(), mode=mode, outward=outward, source=source,

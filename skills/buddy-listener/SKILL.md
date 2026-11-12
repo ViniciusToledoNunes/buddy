@@ -89,7 +89,7 @@ review, an investigation, a merge, a comment, a ticket), also put it on Buddy's 
 so the user approves it with one click instead of typing "approve N":
 
 ```
-BUDDY_COMMAND propose "<what, in a few words>" --kind reply|review|investigate|merge|post|run|other \
+BUDDY_COMMAND propose "<what, in a few words>" --kind reply|review|investigate|merge|post|ticket|run|other \
   [--detail "<exactly what will be sent or done>" | --detail-file <file>] [--link <thread/PR/ticket>] \
   [--mode run|copy|send] [--source slack|meeting|session]
 ```
@@ -112,6 +112,15 @@ Keep it current as things happen in this session, not in batches: a task picked 
 (`BUDDY_COMMAND board set <n|KEY-1> --status blocked --blocker "<why, in a few words>"`), something
 finished (`BUDDY_COMMAND board done <n>`). Titles of a few words, one short `--note` at most (the
 next step, a PR number): it is a glance, not a log. `BUDDY_COMMAND board` prints it.
+
+When work tied to a ticket reaches a step that has a Jira status (a PR opened → Code Review, merged →
+Ready for Deploy or Done, started → In Progress), propose the move as a card:
+`BUDDY_COMMAND board move-ticket <n|KEY-1> "<Jira status>" --reason "<PR #18 open>"`. `board done`
+and moving an item to now propose Done / In Progress by themselves. Never move a ticket without
+the user's approval: on `ACTION_APPROVED kind=ticket`, read the ticket's transitions
+(Atlassian `getTransitionsForJiraIssue`), apply the one whose target matches the card
+(`transitionJiraIssue`), then `BUDDY_COMMAND board set <KEY-1> --ticket-status "<new status>"` and
+report the card done; if no transition leads there, report failed with the ones that exist.
 
 ## Buddy's window
 

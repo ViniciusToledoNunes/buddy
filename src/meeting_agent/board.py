@@ -180,3 +180,43 @@ class Board:
         if len(kept) != len(items):
             self._write(kept)
         return len(items) - len(kept)
+
+
+# A ticket in one of these is finished: nothing to move when its work is done.
+DONE_LIKE = ("done", "closed", "resolved", "complete", "completed", "released", "deployed", "cancelled", "canceled")
+# Starting work on a ticket still in one of these suggests moving it to In Progress.
+NOT_STARTED = ("new", "to do", "todo", "open", "backlog", "selected for development", "ready")
+
+
+def ticket_move(runtime_dir: Path, item: Item, target: str, reason: str = "", ticket_url: str = "") -> Any:
+    """Put a card on Buddy's window asking to move the item's ticket to `target` in Jira.
+
+    Moving a ticket changes shared state, so it is only a proposal: the user approves it on
+    the card and the session moves it. None when there is no ticket, the ticket is already
+    there, or the same move is already waiting on a card.
+    """
+    from .actions import OPEN, ActionStore
+
+    target = " ".join(target.split())
+    if not item.ticket or not target or item.ticket_status.lower() == target.lower():
+        return None
+    title = f"Move {item.ticket} to {target} in Jira"
+    store = ActionStore(runtime_dir)
+    if any(a.title == title and a.status in OPEN for a in store.all()):
+        return None
+    now = f" (Jira says {item.ticket_status})" if item.ticket_status else ""
+    detail = f"{item.title}{now}." + (f" {reason.strip()}" if reason.strip() else "")
+    link = item.link or (ticket_url.replace("{key}", item.ticket) if ticket_url else "")
+    return store.propose("ticket", title, detail, link, source="board")
+
+
+def suggested_move(item: Item, previous: str) -> str | None:
+    """The Jira status a board change suggests for its ticket, if any."""
+    status = item.ticket_status.lower()
+    if not item.ticket:
+        return None
+    if item.status == "done" and previous != "done" and status not in DONE_LIKE:
+        return "Done"
+    if item.status == "now" and previous != "now" and status in NOT_STARTED:
+        return "In Progress"
+    return None
