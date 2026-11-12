@@ -308,6 +308,14 @@ it; the brain that answers your commands also keeps it, and updates it from each
 coding agents at the same folder (for Claude Code, a symlink from its project memory to `memory/work` and an
 `@` import of `memory/global/MEMORY.md` in `~/.claude/CLAUDE.md`) and they all share one memory.
 
+**Slack.** Buddy holds no Slack credential. A separate watcher (launchd or cron) appends each round of new
+messages to a dated log, and with `slack.enabled` the listener follows it: each round, minus
+`ignore_channels` and `ignore_authors`, shows in the window and goes to the brain, which reads the
+conversation when it needs to and proposes a reply card (`--mode copy`: approving copies the text and opens
+the thread; you send it). A round in the log is a `=== ... ===` line, one `MM-DD HH:MM  author  #channel|DM:id
+[em thread]  ts=<ts>` line per message with its text indented four spaces, and `(N mensagens novas)` or
+`(nada novo)`. `slack.instructions` tells the brain how to read a thread and what it must never run.
+
 **Other providers.** `openai`, `anthropic` and `ollama` still work, with the older engine: preloaded context, a
 project index and a background investigator. None of them knows you the way your own agent session does, and
 `auto` never picks `harness` — spending the subscription is an explicit choice.

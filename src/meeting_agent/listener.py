@@ -306,6 +306,14 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
         # A dictation that closed on silence or length: the user may not have finished.
         note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
         return f'{head} said="{record.get("text", "")}"{note}'
+    if kind == "SLACK":
+        lines = " | ".join(
+            f'{m.get("at")} {m.get("who")} in {m.get("channel")}{" (thread)" if m.get("thread") else ""} '
+            f'ts={m.get("ts")}: {m.get("text", "")}'
+            for m in record.get("messages", [])
+        )
+        text = f"{head} {record.get('text', '')} | {lines}"
+        return text if len(text) <= max_chars else text[: max_chars - 3].rstrip() + "..."
     if kind == "ACTION_APPROVED":
         # The user clicked Approve on this card: do exactly this, then report back.
         outward = " outward=yes" if record.get("outward") else ""
@@ -453,6 +461,8 @@ class ListenDaemon:
         # The user's working memory (memory.py): created if missing, committed while running.
         self._memory_dir = settings.memory.directory() if keep_memory else None
         self._memory_committed = 0.0
+        self._slack: Any = None
+        self._slack_polled = 0.0
         self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
         self._brain_off = False  # unavailable this meeting; said once
         self._summary_task: asyncio.Task[None] | None = None
@@ -822,6 +832,38 @@ class ListenDaemon:
         except Exception as exc:  # the memory is a help; listening must go on without it
             self.events.append("NOTICE", text=f"Could not start the working memory: {type(exc).__name__}: {exc}")
             self._memory_dir = None
+
+    # ------------------------------------------------------------------ slack
+
+    def _start_slack(self) -> None:
+        slack = self.settings.slack
+        if not (self._answer_commands and slack.enabled and slack.log.strip()):
+            return
+        from .slack_watch import SlackFollower
+
+        self._slack = SlackFollower(slack.log.strip())
+
+    async def _poll_slack(self) -> None:
+        from .slack_watch import keep
+
+        slack = self.settings.slack
+        try:
+            rounds = await asyncio.to_thread(self._slack.poll)
+        except Exception as exc:  # an unreadable log must never stop the listening
+            self.events.append("NOTICE", text=f"Could not read the Slack log: {type(exc).__name__}: {exc}")
+            return
+        for messages in rounds:
+            messages = keep(messages, slack.ignore_channels, slack.ignore_authors)
+            if messages:
+                self._on_slack(messages)
+
+    def _on_slack(self, messages: list[Any]) -> None:
+        from .claude_code import buddy_tool_command
+        from .slack_watch import slack_prompt
+
+        who = ", ".join(dict.fromkeys(f"{m.who} ({m.channel})" for m in messages))
+        self.events.append("SLACK", text=f"{len(messages)} new: {who}", messages=[m.to_dict() for m in messages])
+        self._hand_to_brain(slack_prompt(messages, buddy_tool_command(), self.settings.slack.instructions), quiet=True)
 
     async def _commit_memory(self) -> None:
         from .working_memory import commit_memory
@@ -1233,6 +1275,9 @@ class ListenDaemon:
         if self._memory_dir is not None and every and now - self._memory_committed >= every:
             self._memory_committed = now
             await self._commit_memory()
+        if self._slack is not None and now - self._slack_polled >= self.settings.slack.poll_seconds:
+            self._slack_polled = now
+            await self._poll_slack()
         if self.storage is None:
             return
         if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:
@@ -1291,6 +1336,7 @@ class ListenDaemon:
         reason = "stopped"
         try:
             await self._start_memory()
+            self._start_slack()
             if self.settings.listen.wake_phrase:
                 await self.start_listening()
                 self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")

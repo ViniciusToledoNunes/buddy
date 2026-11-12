@@ -103,6 +103,8 @@ def item_from_event(record: dict[str, Any]) -> LiveItem | None:
         return LiveItem("state", STATES[kind], at=at)
     if kind == "NOTICE":
         return LiveItem("notice", str(record.get("text", "")), at=at)
+    if kind == "SLACK":
+        return LiveItem("notice", f"Slack: {record.get('text', '')}", at=at)
     return None  # MEETING_BATCH: its lines were already shown as they were said
 
 

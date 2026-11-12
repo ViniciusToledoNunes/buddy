@@ -258,6 +258,21 @@ class MemoryConfig(BaseModel):
         return path if path.is_absolute() else project_root() / path
 
 
+class SlackConfig(BaseModel):
+    """New Slack messages, from the log a separate Slack watcher writes (see slack_watch.py)."""
+
+    enabled: bool = False
+    # The watcher's log, one file per day: {date} becomes YYYY-MM-DD.
+    log: str = ""
+    # Bots and busy channels that never need the user; everything else goes to the brain,
+    # which decides with the user's memory what deserves a card.
+    ignore_channels: list[str] = []
+    ignore_authors: list[str] = []
+    # How the brain reads a conversation, builds a link to a message, and what it must never run.
+    instructions: str = ""
+    poll_seconds: float = Field(15.0, ge=2, le=600)
+
+
 # Configuration written before the harness could be chosen named Claude Code's settings.
 LEGACY_BRAIN_KEYS = {"claude_workdir": "workdir", "claude_model": "model", "claude_effort": "effort"}
 
@@ -273,6 +288,7 @@ class Settings(BaseModel):
     env_files: list[str] = []
     brain: BrainConfig = BrainConfig()
     memory: MemoryConfig = MemoryConfig()
+    slack: SlackConfig = SlackConfig()
     audio: AudioConfig = AudioConfig()
     asr: ASRConfig = ASRConfig()
     copilot: CopilotConfig = CopilotConfig()

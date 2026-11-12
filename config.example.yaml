@@ -27,6 +27,17 @@ memory:
   dir: memory                # relative to the Buddy folder
   autocommit_seconds: 60     # commits any agent's changes while listening; 0 turns it off
 
+# New Slack messages, read from the log a separate Slack watcher writes (Buddy holds no
+# Slack credential). Each new round goes to the brain, which proposes a reply card when a
+# message needs you; you send it. See "Slack" in the README for the log format.
+slack:
+  enabled: false
+  log: ''                    # e.g. ~/.cache/slack-watch-log/{date}.log ({date}: YYYY-MM-DD)
+  ignore_channels: []        # e.g. ['#general', '#deploys']
+  ignore_authors: []         # bots, e.g. ['GitHub']
+  instructions: ''           # how to read a thread and link a message; what never to run
+  poll_seconds: 15
+
 audio:
   sample_rate: 24000
   chunk_ms: 100
