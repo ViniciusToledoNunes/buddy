@@ -96,7 +96,8 @@ to Buddy:
 - the suggestions from its latest reply to meeting speech, pinned on top;
 - a box to type commands, and a 🎤 to dictate one into it (click, speak, click again; the words land in the box to
   read, fix and send);
-- buttons to record a meeting and turn Buddy off;
+- a button to record a meeting and end it. Closing the window turns Buddy off (it ends a meeting being recorded,
+  which still gets its summary);
 - during a meeting, **💡 Suggest**: a suggestion for what to say now, as a question would get, for the moments
   the transcript has no "?" (the batch goes out at once, or the last lines again if one just left).
 
@@ -106,7 +107,7 @@ disk. That format belongs to Claude Code and may change; if it does, the window 
 commands, and the replies stay in the chat. By default only the turns Buddy started are shown ("Only Buddy"); the
 rest of the session stays out of the window unless you switch to "All turns".
 
-`buddy window` reopens it; `buddy live` shows the same in a terminal — next to the Claude chat in your editor, for
+`buddy listen --detach` opens Buddy and its window again; `buddy live` shows the same in a terminal — next to the Claude chat in your editor, for
 example — and `buddy say "review PR 123"` sends a typed command from any shell. The window needs the `window`
 extra, which the installers include (`pip install -e ".[window]"`); on Linux, pywebview also needs GTK or Qt.
 
@@ -118,7 +119,7 @@ extra, which the installers include (`pip install -e ".[window]"`); on Linux, py
 |---|---|---|
 | `the meeting is starting` (or the ⏺ Meeting button) | Buddy, in ~2s | records microphone and system audio |
 | `the meeting is over` (or ⏹ End meeting) | Buddy | ends it; the agent writes the summary and the follow-ups |
-| `stop` / `shut down` / `turn off` (or ⏻) | Buddy | ends the process |
+| `stop` / `shut down` / `turn off` (or close the window) | Buddy | ends the process |
 | `review PR 123` | the agent | investigates and answers in the session |
 | `post the update on Slack` | the agent | drafts it and waits for you to approve the text |
 | `approve 4` | the agent | carries out proposal 4 exactly as proposed |

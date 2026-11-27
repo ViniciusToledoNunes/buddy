@@ -408,6 +408,20 @@ def test_the_window_sends_typed_commands_and_controls(tmp_path):
     assert controlled == ["start-meeting", "dictate-start", "dictate-stop"]
 
 
+def test_closing_the_window_turns_buddy_off(tmp_path):
+    from meeting_agent.window import window_closed
+
+    runtime = tmp_path / "runtime"
+    asked = []
+
+    assert window_closed(runtime, lambda r, a: asked.append(a)) is False  # already off: nothing to ask
+    _alive(runtime)
+    assert window_closed(runtime, lambda r, a: asked.append(a)) is True
+    assert asked == ["shutdown"]
+    # Turning off is closing the window; ending a meeting is its Meeting button.
+    assert 'id="power"' not in PAGE and 'id="pause"' not in PAGE and 'id="mic"' not in PAGE
+
+
 async def test_the_window_sees_the_dictation_as_it_is_said(tmp_path):
     daemon = _daemon(tmp_path)
     view = LiveView(daemon.runtime_dir)

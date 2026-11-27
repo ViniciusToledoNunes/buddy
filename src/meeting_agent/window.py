@@ -53,7 +53,7 @@ def open_link(url: str) -> bool:
         return False
 
 
-CONTROLS = {"start-meeting", "stop-meeting", "shutdown", "dictate-start", "dictate-stop", "suggest"}
+CONTROLS = {"start-meeting", "stop-meeting", "dictate-start", "dictate-stop", "suggest"}
 MAX_TYPED = 4000
 
 
@@ -231,6 +231,15 @@ class Pump:
         return True
 
 
+def window_closed(runtime_dir: Path, send_control: Callable[[Path, str], None] = request) -> bool:
+    """Closing the window turns Buddy off: the window is Buddy, and a listener left running
+    unseen would keep recording a meeting nobody watches. True when a shutdown was asked."""
+    if listener_state(runtime_dir) is None:
+        return False  # already off (`buddy listen --stop`, or it crashed)
+    send_control(runtime_dir, "shutdown")
+    return True
+
+
 def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep: int = 3) -> None:  # pragma: no cover
     """Open the window and block until it is closed. Needs a display and pywebview."""
     import webview
@@ -270,6 +279,8 @@ def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep
     finally:
         if _read_json(runtime_dir / "window.json").get("pid") == os.getpid():
             (runtime_dir / "window.json").unlink(missing_ok=True)
+        if closed.is_set():
+            window_closed(runtime_dir)
 
 
 PAGE = r"""<!doctype html>
@@ -300,7 +311,6 @@ button { font: inherit; color: inherit; background: none; border: 1px solid var(
   padding: 4px 8px; cursor: pointer; }
 button:hover { background: var(--accent-soft); }
 button.on { background: var(--accent-soft); border-color: var(--accent); }
-button.danger.armed { background: var(--rec); color: #fff; border-color: var(--rec); }
 /* 💡 asks for a suggestion now; shown only during a meeting, it dims while the request goes out. */
 #suggest { display: none; }
 #suggest.sent { opacity: .5; }
@@ -455,7 +465,6 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
     <button id="show" title="Show only what Buddy started, or the whole Claude session">Only Buddy</button>
     <button id="brain-button" title="Brain: harness and model">🧠</button>
     <button id="pin" class="on" title="Keep this window above the others">📌</button>
-    <button id="power" class="danger" title="Turn Buddy off">⏻</button>
   </span>
 </header>
 <div id="panels">
@@ -573,7 +582,6 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
     const on = state !== "off";
     $("meeting").textContent = state === "meeting" ? "⏹ End meeting" : "⏺ Meeting";
     $("meeting").disabled = !on;
-    $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
     $("suggest").style.display = state === "meeting" ? "inline-block" : "none";
     showDictation(next.dictation, on);
@@ -867,15 +875,6 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
     pinned = !pinned;
     await call("set_on_top", pinned);
     $("pin").classList.toggle("on", pinned);
-  });
-  let armedAt = 0;
-  $("power").addEventListener("click", () => {
-    // Two clicks within four seconds: turning Buddy off by accident mid-meeting is costly.
-    if (Date.now() - armedAt < 4000) { armedAt = 0; $("power").classList.remove("armed"); control("shutdown"); return; }
-    armedAt = Date.now();
-    $("power").classList.add("armed");
-    $("power").title = "Click again to turn Buddy off";
-    setTimeout(() => { $("power").classList.remove("armed"); $("power").title = "Turn Buddy off"; }, 4000);
   });
   // 🧠: pick the harness and model of Buddy's own brain. Saved to config.yaml; the
   // listener reads it when the next meeting starts its brain.
