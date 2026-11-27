@@ -24,5 +24,8 @@ swiftc -O -framework Vision "$REPO_ROOT/native/macos/ScreenText.swift" -o "$REPO
 # Reads whether you are muted in the meeting app, for listen.mic_follows_mute (Accessibility).
 swiftc -O "$REPO_ROOT/native/macos/MicState.swift" -o "$REPO_ROOT/.venv/bin/buddy-mic-state"
 "$REPO_ROOT/.venv/bin/python" "$SCRIPT_DIR/install_agent_integrations.py" --project-root "$REPO_ROOT"
+# Buddy.app in ~/Applications: double-click to start Buddy and open its window.
+"$REPO_ROOT/.venv/bin/buddy" app
 "$REPO_ROOT/.venv/bin/python" -m meeting_agent.cli doctor
-echo "Buddy installed. Grant Screen Recording and Microphone permissions when macOS prompts. macOS 15+ is required."
+echo "Buddy installed. Open it from Buddy.app (Spotlight, Launchpad, or drag it to the Dock)."
+echo "Grant Screen Recording and Microphone permissions when macOS prompts. macOS 15+ is required."

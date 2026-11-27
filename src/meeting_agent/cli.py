@@ -278,29 +278,11 @@ def listen(
         if listener_state(runtime):
             console.print("Buddy is already listening.")
             return
-        runtime.mkdir(parents=True, exist_ok=True)
-        log = (runtime / "listen.log").open("a", encoding="utf-8")
-        kwargs: dict = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL, "cwd": str(project_root())}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = (
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            )
-        else:
-            kwargs["start_new_session"] = True
-        subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "listen"], **kwargs)
-        for _ in range(60):
-            state = listener_state(runtime)
-            if state:
-                settings = load_settings()
-                console.print(f"Buddy is ready; the microphone opens for meetings and the 🎤 (pid {state['pid']}).")
-                if settings.listen.window:
-                    _open_window(runtime)
-                return
-            time.sleep(0.5)
-        console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
-        raise typer.Exit(code=1)
+        if not _start_listener(runtime):
+            raise typer.Exit(code=1)
+        if load_settings().listen.window:
+            _open_window(runtime)
+        return
     settings = load_settings()
     daemon = ListenDaemon(settings, runtime, brain_settings=load_settings, answer_commands=True, keep_memory=True)
     console.print("Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
@@ -608,6 +590,66 @@ def live(
             time.sleep(0.3)
     except KeyboardInterrupt:
         pass
+
+
+def _start_listener(runtime: Path) -> bool:
+    """Start the listener in the background and wait until it is up."""
+    from .listener import listener_state
+
+    runtime.mkdir(parents=True, exist_ok=True)
+    log = (runtime / "listen.log").open("a", encoding="utf-8")
+    kwargs: dict = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL, "cwd": str(project_root())}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "listen"], **kwargs)
+    for _ in range(60):
+        state = listener_state(runtime)
+        if state:
+            console.print(f"Buddy is ready; the microphone opens for meetings and the 🎤 (pid {state['pid']}).")
+            return True
+        time.sleep(0.5)
+    console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
+    return False
+
+
+@app.command("open")
+def open_buddy() -> None:
+    """What Buddy.app runs: start Buddy if it is off, and show its window (opened, or brought to the front)."""
+    from .listener import listener_state
+    from .window import bring_to_front, window_state
+
+    runtime = _runtime_dir()
+    if not listener_state(runtime) and not _start_listener(runtime):
+        raise typer.Exit(code=1)
+    if window_state(runtime):
+        bring_to_front(runtime)
+        console.print("Buddy's window is already open: brought to the front.")
+        return
+    _open_window(runtime)
+
+
+@app.command("app")
+def make_app(
+    dest: Path = typer.Option(None, "--dest", help="Where to write Buddy.app (default ~/Applications/Buddy.app)."),
+) -> None:
+    """Make Buddy.app (macOS): double-click it to start Buddy and open its window."""
+    from .app_bundle import DEFAULT_APP, build_app
+
+    if sys.platform != "darwin":
+        console.print("Buddy.app is macOS only for now; run `buddy open` instead.")
+        raise typer.Exit(code=2)
+    buddy = Path(sys.executable).with_name("buddy")
+    if not buddy.exists():
+        console.print(f"[red]No buddy command next to {sys.executable}; install Buddy first.[/red]")
+        raise typer.Exit(code=1)
+    path = build_app(buddy, dest or DEFAULT_APP)
+    console.print(f"Made {path}. Find it in Spotlight or Launchpad, or drag it to the Dock.")
 
 
 def _open_window(runtime: Path) -> None:
