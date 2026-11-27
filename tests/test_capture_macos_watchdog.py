@@ -16,6 +16,7 @@ from meeting_agent.config import AudioConfig
 # read_frame waits on the helper's pipe with select(), which Windows supports only on
 # sockets. The macOS capture never runs there, so these pipe tests are POSIX-only.
 posix_pipes = pytest.mark.skipif(sys.platform == "win32", reason="select() on a pipe is POSIX-only")
+posix_helpers = pytest.mark.skipif(sys.platform == "win32", reason="the fake helper is a shebang script, which Windows cannot run")
 
 
 @posix_pipes
@@ -90,6 +91,7 @@ def capture(speaker: str, config: AudioConfig) -> tuple[MacOSAudioCapture, threa
     return MacOSAudioCapture(speaker, config, asyncio.Queue(maxsize=100), stop, Bus(), loop), stop
 
 
+@posix_helpers
 def test_a_silent_system_helper_is_restarted(tmp_path, monkeypatch):
     starts = tmp_path / "starts"
     monkeypatch.setenv("BUDDY_MACOS_HELPER", fake_helper(tmp_path, f"open({str(starts)!r}, 'a').write('x')\ntime.sleep(60)"))
@@ -103,6 +105,7 @@ def test_a_silent_system_helper_is_restarted(tmp_path, monkeypatch):
     assert len(starts.read_text()) >= 2
 
 
+@posix_helpers
 def test_join_ends_a_helper_blocked_on_read(tmp_path, monkeypatch):
     pid_file = tmp_path / "pid"
     body = f"import os\nopen({str(pid_file)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)"
@@ -161,6 +164,7 @@ def test_the_capture_service_restart_never_prompts_and_is_rate_limited(monkeypat
     assert "moments ago" in second
 
 
+@posix_helpers
 def test_a_helper_failing_in_a_loop_reports_failing(tmp_path, monkeypatch):
     monkeypatch.setenv("BUDDY_MACOS_HELPER", fake_helper(tmp_path, "sys.stderr.write('capture stopped: -3805\\n')\nsys.exit(1)"))
     published = []
