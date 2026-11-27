@@ -256,10 +256,10 @@ def listen(
     detach: bool = typer.Option(False, "--detach", help="Run in the background and return."),
     stop_listener: bool = typer.Option(False, "--stop", help="Shut down a running listener."),
 ) -> None:
-    """Keep the microphone attentive for "Hey Buddy"; record meetings when asked.
+    """Run Buddy: record meetings when asked, take commands from the window.
 
-    Speech is kept only when it opens with the wake phrase or a meeting is being
-    recorded. Events go to the log that `buddy watch` follows.
+    The microphone opens only while a meeting is recorded or the window's 🎤 is on.
+    Events go to the log that `buddy watch` follows.
     """
     from .listener import ListenDaemon, listener_state, request
 
@@ -294,8 +294,7 @@ def listen(
             state = listener_state(runtime)
             if state:
                 settings = load_settings()
-                ready = "listening for \"Hey Buddy\"" if settings.listen.wake_phrase else "ready; the microphone opens for meetings and the 🎤"
-                console.print(f"Buddy is {ready} (pid {state['pid']}).")
+                console.print(f"Buddy is ready; the microphone opens for meetings and the 🎤 (pid {state['pid']}).")
                 if settings.listen.window:
                     _open_window(runtime)
                 return
@@ -304,8 +303,7 @@ def listen(
         raise typer.Exit(code=1)
     settings = load_settings()
     daemon = ListenDaemon(settings, runtime, brain_settings=load_settings, answer_commands=True, keep_memory=True)
-    console.print('Listening for "Hey Buddy". Ctrl+C stops.' if settings.listen.wake_phrase
-                  else "Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
+    console.print("Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
     try:
         asyncio.run(daemon.run(asyncio.Event()))
     except KeyboardInterrupt:
@@ -380,8 +378,8 @@ def watch(
 
 
 @app.command()
-def say(text: list[str] = typer.Argument(..., help="The command, as you would say it after \"Hey Buddy\".")) -> None:
-    """Send Buddy a typed command. It reaches the session exactly like a spoken one."""
+def say(text: list[str] = typer.Argument(..., help="The command, as you would type it in Buddy's window.")) -> None:
+    """Send Buddy a typed command, as if typed in its window."""
     from .listener import submit
 
     _require_listener()
@@ -676,26 +674,6 @@ def meeting(action: str = typer.Argument(..., help="start or stop")) -> None:
     _require_listener()
     request(_runtime_dir(), f"{action}-meeting")
     console.print(f"Meeting {action} requested.")
-
-
-@app.command()
-def pause() -> None:
-    """Close the microphone until `buddy resume`."""
-    from .listener import request
-
-    _require_listener()
-    request(_runtime_dir(), "pause")
-    console.print("Pause requested.")
-
-
-@app.command()
-def resume() -> None:
-    """Reopen the microphone after a pause."""
-    from .listener import request
-
-    _require_listener()
-    request(_runtime_dir(), "resume")
-    console.print("Resume requested.")
 
 
 # ------------------------------------------------------------------- voices

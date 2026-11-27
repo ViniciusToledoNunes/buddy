@@ -184,16 +184,6 @@ async def test_the_window_learns_the_microphone_state_when_it_changes(tmp_path):
     assert state["mic"] == {"mode": "auto", "state": "open", "app": "Google Meet", "heard": True}
 
 
-def test_the_window_button_sets_the_mode(tmp_path):
-    from meeting_agent.window import WindowApi
-
-    api = WindowApi(tmp_path, view=None)
-
-    assert api.set_mic("off") == {"ok": True, "mode": "off"}
-    assert read_mode(tmp_path / "listen" / "mic.json") == "off"
-    assert api.set_mic("loud")["ok"] is False
-
-
 def test_the_participants_line_is_kept_apart_from_the_microphone_state(tmp_path):
     gate = _gate(tmp_path)
     gate.update('{"state": "open", "app": "Microsoft Teams"}')

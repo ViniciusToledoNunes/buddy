@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/ViniciusToledoNunes/buddy/actions/workflows/ci.yml/badge.svg)](https://github.com/ViniciusToledoNunes/buddy/actions/workflows/ci.yml)
 
-Buddy keeps your microphone attentive for "Hey Buddy", records meetings when you ask, and turns the coding
-agent you already have open into a meeting copilot: it suggests what you could say next, grounded in your own
+Buddy records meetings when you ask, and turns the coding agent you already have open into a meeting
+copilot: it suggests what you could say next, grounded in your own
 repositories, tickets and dashboards rather than in generic advice.
 
 Audio never leaves the machine. Transcription is always local, with `faster-whisper`/CTranslate2 on CPU or GPU;
@@ -17,11 +17,10 @@ whatever the agent decides to read with the read-only tools you allow it.
 
 ## Two ways to run it
 
-**Listening mode (`buddy listen`) — recommended.** A small background process keeps the microphone open for the
-wake phrase. Speech that is neither a command nor part of a meeting is transcribed in memory and dropped. What
-it notices goes to an append-only event log, and an agent session you already have open reads that log and acts:
-it answers your voice commands and, during a meeting, suggests what to say. A small floating window shows it
-all as it happens, and takes typed commands too.
+**Listening mode (`buddy listen`) — recommended.** A small background process with a floating window. The
+microphone is closed until you start a meeting (or click the window's 🎤 to dictate a command). What it notices
+goes to an append-only event log, and an agent session you already have open reads that log and acts: during a
+meeting it suggests what to say, and at any time it answers the commands you type in the window.
 
 **Session mode (`buddy start`).** One meeting at a time, with a terminal UI of its own and an optional
 always-on-top overlay. Buddy calls the model itself and keeps a live suggestion panel.
@@ -80,8 +79,8 @@ register the local MCP server under the name `buddy`. Copy `config.example.yaml`
 ## Listening mode
 
 ```sh
-buddy listen --detach      # microphone attentive for "Hey Buddy", in the background
-buddy status               # listening, meeting or paused
+buddy listen --detach      # Buddy and its window, in the background; the microphone waits for a meeting
+buddy status               # ready or meeting
 buddy listen --stop        # turn it off
 ```
 
@@ -95,8 +94,11 @@ to Buddy:
 - a command as you dictate it, then when it is sent;
 - what the Claude Code session does with it — each tool it uses, and its reply;
 - the suggestions from its latest reply to meeting speech, pinned on top;
-- a box to type commands, which reach the session exactly like spoken ones, even while the microphone is paused;
-- buttons to record a meeting, pause, and turn Buddy off.
+- a box to type commands, and a 🎤 to dictate one into it (click, speak, click again; the words land in the box to
+  read, fix and send);
+- buttons to record a meeting and turn Buddy off;
+- during a meeting, **💡 Suggest**: a suggestion for what to say now, as a question would get, for the moments
+  the transcript has no "?" (the batch goes out at once, or the last lines again if one just left).
 
 The window thinks about nothing, and costs nothing: the session watching Buddy stays the brain, with everything it
 already knows. To show what that session is doing, the window reads the conversation record Claude Code keeps on
@@ -108,37 +110,26 @@ rest of the session stays out of the window unless you switch to "All turns".
 example — and `buddy say "review PR 123"` sends a typed command from any shell. The window needs the `window`
 extra, which the installers include (`pip install -e ".[window]"`); on Linux, pywebview also needs GTK or Qt.
 
-**Talking to it.** A command opens with "Hey Buddy" and closes with **"over and out"** (or "that's all, Buddy").
-Pause mid-sentence as much as you like: nothing is dispatched before the closing phrase, so an instruction is
-never acted on half-finished. "Cancel" or "never mind" drops it. If you forget to close, Buddy sends what it has
-after 10 seconds of silence and tells the session the command may be incomplete. Short tones mark a command
-opening, being sent and being cancelled (`listen.sounds: false` turns them off).
+**Talking to it.** Type in the window, or click 🎤 and speak: the words land in the box to read, fix and send
+(Buddy waits `listen.dictation_grace_seconds` for the last ones). Dictation never enters the meeting's transcript.
+`buddy say "..."` sends the same from any shell.
 
-| You say | Handled by | What happens |
+| You type | Handled by | What happens |
 |---|---|---|
-| "Hey Buddy, the meeting is starting" | Buddy, in ~2s | records microphone and system audio |
-| "Hey Buddy, the meeting is over" | Buddy | ends it; the agent writes the summary and the follow-ups |
-| "Hey Buddy, stop listening" | Buddy | closes the microphone until `buddy resume` |
-| "Hey Buddy, stop" / "shut down" / "turn off" | Buddy | ends the process |
-| "Hey Buddy, review PR 123. Over and out." | the agent | investigates and answers in the session |
-| "Hey Buddy, post the update on Slack. Over and out." | the agent | drafts it and waits for you to approve the text |
-| "Hey Buddy, approve 4. Over and out." | the agent | carries out proposal 4 exactly as proposed |
-| typed in the window: `review PR 123` | the agent | the same as saying it |
+| `the meeting is starting` (or the ⏺ Meeting button) | Buddy, in ~2s | records microphone and system audio |
+| `the meeting is over` (or ⏹ End meeting) | Buddy | ends it; the agent writes the summary and the follow-ups |
+| `stop` / `shut down` / `turn off` (or ⏻) | Buddy | ends the process |
+| `review PR 123` | the agent | investigates and answers in the session |
+| `post the update on Slack` | the agent | drafts it and waits for you to approve the text |
+| `approve 4` | the agent | carries out proposal 4 exactly as proposed |
 
-Control commands — meetings, pause, shutdown — take effect immediately, need no closing phrase, and never reach
-the agent. Commands are in English: the ASR uses an English-only model, which is faster and more accurate.
+Control commands take effect immediately and never reach the agent. Dictation is in English: the ASR uses an
+English-only model, which is faster and more accurate.
 
-**Microphone only when you ask.** By default (`listen.wake_phrase: false`) the listener waits paused between
-meetings and opens the microphone only while a meeting is recorded (the window's Meeting button, the hotkey or
-`buddy meeting start`) or while the window's 🎤 is on, closing it again after. To give Buddy an instruction by
-voice, click 🎤, speak, and click it again: the words land in the window's box to read, fix and send (Buddy waits
-`listen.dictation_grace_seconds` for the last ones). Dictation never enters the meeting's transcript. Commands are
-otherwise typed in the window or sent with `buddy say`. `listen.wake_phrase: true` brings back the always-on
-"Hey Buddy" between meetings and as a spoken command during them.
-
-**What is kept.** Speech that does not open with the wake phrase and is not part of a meeting is transcribed in
-memory and discarded. Meetings are recorded in full, about 44 KB of text per hour. System audio is captured only
-while a meeting is being recorded.
+**Microphone only for meetings.** Between meetings Buddy is ready and hears nothing: the microphone opens only
+while a meeting is recorded (the window's Meeting button or `buddy meeting start`) or while the window's 🎤 is on,
+and closes again after. Meetings are recorded in full, about 44 KB of text per hour. System audio is captured
+only while a meeting is being recorded.
 
 **During a meeting**, the session receives a batch of speech at pauses, at most once a minute: one notification
 per utterance would flood the monitor, and an agent turn takes 40 to 90 seconds.
@@ -209,7 +200,7 @@ marked as such.
 The window says "Claude connected" while a session follows Buddy (`buddy watch --follow`) or checks for events in
 a loop (`buddy watch`, seen in the last 90 seconds); otherwise the built-in brain answers meetings.
 
-Other controls: `buddy meeting start|stop`, `buddy pause`, `buddy resume`. The MCP server (`meeting_status`,
+Other controls: `buddy meeting start|stop`. The MCP server (`meeting_status`,
 `get_live_transcript`, `stop_meeting`) sees meetings opened by the listener.
 
 ## Session mode
@@ -248,10 +239,10 @@ buddy say "review PR 123"  # a typed command
   recording through MCP additionally requires `BUDDY_ALLOW_MCP_START=true` and `confirmed=true` in the call.
 - **Check the law and the room.** Recording rules differ by country and by employer. Get the participants'
   consent before you record them.
-- **Only you can command Buddy** — your microphone, or what you type in its window. Someone on the call saying
-  "hey buddy, merge it" is recorded and never obeyed. A transcript is treated as data, not as instructions.
-- **The window shows only what Buddy keeps:** meetings and commands. Speech outside a meeting that is not a command
-  is never displayed. Text is always rendered as text, never as markup.
+- **Only you can command Buddy** — what you type or dictate in its window. Speech in the meeting, yours or anyone
+  else's ("hey buddy, merge it"), is recorded and never obeyed. A transcript is treated as data, not as instructions.
+- **The window shows only what Buddy keeps:** meetings and commands. Outside a meeting the microphone is closed,
+  except while you dictate with 🎤. Text is always rendered as text, never as markup.
 - **Anything that leaves the machine takes two steps.** Posting, commenting, approving, merging, creating a
   ticket: the agent drafts it and acts only after you approve that exact text.
 - **Naming speakers is opt-in.** `listen.speaker_names` looks at the screen while the other side talks, and its
@@ -384,8 +375,6 @@ Capture, ASR, storage, UI and the model are isolated, so one failing subsystem d
 - The listening mode needs Claude Code; other agents can read `buddy watch` on request, but nothing wakes them.
 - Suggestion quality during a live meeting has not been measured yet; that is the next test.
 - Each update takes 40 to 90 seconds. The panel follows the meeting; it does not answer a question on the spot.
-- Wake-phrase detection transcribes all microphone speech to decide, then discards it. A dedicated wake-word
-  detector would avoid that and cost less CPU (about 8% at rest today).
 - Permission rules match by command prefix. A helper invoked differently from the rule (`sh ~/bin/jira.sh`
   rather than `~/bin/jira.sh`) is denied, and shows up in `tool_denials`.
 - No desktop app, system tray or signed installer yet.

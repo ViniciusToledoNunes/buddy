@@ -185,3 +185,16 @@ async def test_a_batch_that_arrives_mid_call_goes_out_next_with_its_question():
     assert len(provider.prompts) == 2  # never more than one call in flight
     assert "REMOTE: second\nREMOTE: third" in provider.prompts[1][1]
     assert 'question: "Who owns it?"' in provider.prompts[1][1]
+
+
+async def test_a_suggest_click_asks_the_brain_for_a_reply_to_the_last_line():
+    provider = FakeProvider()
+    brain = AutoBrain(None, provider_factory=lambda: provider)
+
+    out = await brain.suggest(["REMOTE: The vendor sync is the blocker."],
+                              {"trigger": "asked", "recap": True, "last": "REMOTE: The vendor sync is the blocker."})
+
+    prompt = provider.prompts[0][1]
+    assert out == ["1. Say we ship on Friday."]
+    assert 'pressed "Suggest"' in prompt and "already sent" in prompt
+    assert 'someone else: "REMOTE: The vendor sync is the blocker."' in prompt

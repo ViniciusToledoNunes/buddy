@@ -5,8 +5,8 @@ the room, reading aloud, the call itself through the speakers. Those are not par
 meeting. With `listen.mic_follows_mute`, a small helper (`buddy-mic-state`, macOS) reads the
 microphone button of the meeting app through the accessibility tree — "Unmute mic" means
 muted in Teams, "Turn on microphone" in Google Meet — and a ME line said while muted is not
-kept. Commands to Buddy ("Hey Buddy ...") still work while muted: that is when you would
-talk to it. `buddy mic on|off|auto` overrides the app.
+kept. A 🎤 dictation to Buddy still works while muted: that is when you would talk to it.
+`buddy mic on|off|auto` overrides the app.
 """
 
 from __future__ import annotations

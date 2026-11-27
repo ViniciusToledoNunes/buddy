@@ -81,10 +81,8 @@ def item_from_feed(record: dict[str, Any]) -> LiveItem | None:
 
 
 STATES = {
-    "LISTENER_UP": 'Listening for "Hey Buddy".',
+    "LISTENER_UP": "Ready: the microphone opens when a meeting starts.",
     "LISTENER_DOWN": "Buddy is off.",
-    "PAUSED": "Paused: the microphone is closed.",
-    "RESUMED": "Listening again.",
     "MEETING_START": "Meeting started: recording.",
 }
 
@@ -376,14 +374,12 @@ class LiveView:
         listener = listener_state(self.runtime_dir)
         brain = brain_state(self.runtime_dir)
         return {
-            "listener": listener.get("state", "listening") if listener else "off",
+            "listener": listener.get("state", "ready") if listener else "off",
             "meeting": listener.get("meeting_id", "") if listener else "",
             # listen.mic_follows_mute: whether your microphone's lines are being kept now.
             "mic": listener.get("mic") if listener else None,
             # The window's 🎤: on, and the words heard so far; `id` grows when one is done.
             "dictation": listener.get("dictation") if listener else None,
-            # Without the wake phrase, "paused" between meetings is just being ready.
-            "wake_phrase": bool(listener.get("wake_phrase", True)) if listener else True,
             # watching: a session follows Buddy. idle: it did, but its monitor is down, so
             # commands wait on disk until it re-arms. none: no session has ever connected.
             "brain": ("watching" if brain["watching"] else "idle") if brain else "none",

@@ -111,15 +111,11 @@ class CopilotConfig(BaseModel):
 
 
 class ListenConfig(BaseModel):
-    """`buddy listen`: an always-attentive microphone that keeps only what matters."""
+    """`buddy listen`: the meeting assistant. The microphone opens only for a meeting or the 🎤."""
 
-    # A command stays open after "Hey Buddy" until one of these closing phrases, so a
-    # pause mid-sentence no longer sends half an instruction.
-    end_phrases: list[str] = ["over and out", "that's all buddy", "that is all buddy"]
-    # Fallbacks for a forgotten closing phrase; the session is told the command may be cut.
-    command_silence_seconds: float = Field(10.0, ge=2, le=120)
-    command_max_seconds: float = Field(120.0, ge=10, le=900)
-    # A short tone when a command opens, is sent, or is cancelled (Windows).
+    # The longest a 🎤 dictation runs before it closes by itself.
+    dictation_max_seconds: float = Field(120.0, ge=10, le=900)
+    # A short tone when a dictation opens, is sent, or comes back empty (Windows).
     sounds: bool = True
     # Buddy's floating window: the meeting as it is said, commands, and what the Claude
     # Code session watching Buddy does with them. It opens with `buddy listen --detach`.
@@ -139,11 +135,6 @@ class ListenConfig(BaseModel):
     # the microphone is held this long and dropped if the same words arrive as system
     # audio around it. 0 keeps every line and writes it at once.
     echo_window_seconds: float = Field(8.0, ge=0, le=30)
-    # On: between meetings the microphone waits for "Hey Buddy", and "Hey Buddy ..." is a
-    # command in a meeting too. Off (the default): the microphone opens only while a
-    # meeting is recorded (the Meeting button, the hotkey or `buddy meeting start`) or
-    # while the window's 🎤 is on, and closes again after; commands are typed or dictated.
-    wake_phrase: bool = False
     # The window's 🎤 button: speech while it is on becomes text in the window's box, to
     # read and send. How long after the second click the last words are still awaited.
     dictation_grace_seconds: float = Field(2.5, ge=0, le=10)

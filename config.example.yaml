@@ -122,16 +122,11 @@ copilot:
   datadog_enabled: true       # activates when DD_SITE, DD_API_KEY and DD_APP_KEY exist
   ollama_model: qwen3:4b
 
-# `buddy listen`: the microphone stays attentive for "Hey Buddy"; meetings are recorded
-# only when asked. Speech outside a meeting that does not open with the phrase is dropped.
+# `buddy listen`: the meeting assistant. The microphone opens only while a meeting is recorded
+# or the window's 🎤 takes a dictation; between meetings nothing is heard.
 listen:
-  end_phrases:                 # a command stays open after "Hey Buddy" until one of these
-    - over and out
-    - that's all buddy
-    - that is all buddy
-  command_silence_seconds: 10  # a forgotten closing phrase: sent anyway, marked "may be incomplete"
-  command_max_seconds: 120
-  sounds: true                 # short tones when a command opens, is sent, or is cancelled (Windows)
+  dictation_max_seconds: 120   # the window's 🎤: the longest a dictation runs
+  sounds: true                 # short tones when a dictation opens, is sent, or comes back empty (Windows)
   window: true                 # Buddy's floating window opens with `buddy listen --detach`
   window_on_top: true
   window_shows: buddy          # the Claude session's turns to show: buddy (only those Buddy started) or all
@@ -140,7 +135,6 @@ listen:
   batch_pause_seconds: 3
   batch_max_wait_seconds: 150
   echo_window_seconds: 8       # drop microphone lines that only echo the speakers; 0 turns it off
-  wake_phrase: false           # true: listen for "Hey Buddy" between meetings too (false: only meetings and the 🎤)
   board_ticket_url: ""         # work board ticket links, e.g. "https://example.atlassian.net/browse/{key}"
   dictation_grace_seconds: 2.5 # the window's 🎤: how long the last words are awaited after the second click
   screen_capture: false        # macOS: save a screenshot every interval during a meeting (whole screen)
