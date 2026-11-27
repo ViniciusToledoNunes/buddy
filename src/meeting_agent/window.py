@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -53,7 +54,7 @@ def open_link(url: str) -> bool:
         return False
 
 
-CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown", "dictate-start", "dictate-stop"}
+CONTROLS = {"start-meeting", "stop-meeting", "dictate-start", "dictate-stop", "suggest"}
 MAX_TYPED = 4000
 
 
@@ -74,6 +75,7 @@ class WindowApi:
         announce: Callable[[Path, int], None] = approve_action,
         copy: Callable[[str], bool] = copy_text,
         open_url: Callable[[str], bool] = open_link,
+        config_file: Path | None = None,
     ) -> None:
         self._runtime_dir = runtime_dir
         self._view = view
@@ -82,6 +84,8 @@ class WindowApi:
         self._announce = announce
         self._copy = copy
         self._open = open_url
+        self._config_file = config_file
+        self._models: dict[str, list[tuple[str, str]]] = {}
         self._window: Any = None
 
     def _off(self) -> dict[str, Any] | None:
@@ -109,15 +113,6 @@ class WindowApi:
             return refusal
         self._send_control(self._runtime_dir, action)
         return {"ok": True}
-
-    def set_mic(self, mode: str) -> dict[str, Any]:
-        """The microphone button: follow the meeting app (auto), always keep (on), never (off)."""
-        from .mic_gate import MODES, write_mode
-
-        if mode not in MODES:
-            return {"ok": False, "error": f"Unknown microphone mode: {mode}"}
-        write_mode(self._runtime_dir / "listen" / "mic.json", mode)
-        return {"ok": True, "mode": mode}
 
     def decide_action(self, action_id: int, approve: bool, detail: str | None = None) -> dict[str, Any]:
         """A click on a card. Approve hands it to the session; a copy-only reply is done here."""
@@ -161,6 +156,53 @@ class WindowApi:
             self._window.on_top = bool(on_top)
         return {"ok": True, "on_top": bool(on_top)}
 
+    def get_brain(self) -> dict[str, Any]:
+        """The 🧠 panel: which harness and model the brain runs, and whether it can."""
+        from .config import load_settings
+        from .harness import HARNESSES, harness_for
+
+        try:
+            settings = load_settings(self._config_file)
+        except Exception as exc:  # a config caught mid-edit
+            return {"ok": False, "error": f"Could not read the configuration: {exc}"}
+        harness = harness_for(settings)
+        readiness = harness.readiness(settings)
+        return {
+            "ok": True,
+            "harness": harness.name,
+            "model": settings.brain.model,
+            "harnesses": [{"name": h.name, "label": h.label} for h in HARNESSES.values()],
+            "readiness": {"state": readiness.state, "detail": readiness.detail},
+            # Off, nobody answers a command when no session follows Buddy.
+            "auto_brain": settings.listen.auto_brain,
+        }
+
+    def brain_models(self, harness: str) -> dict[str, Any]:
+        from .harness import HARNESSES
+
+        chosen = HARNESSES.get(str(harness or ""))
+        if chosen is None:
+            return {"ok": False, "error": f"Unknown harness: {harness}"}
+        if chosen.name not in self._models:
+            self._models[chosen.name] = chosen.models()
+        return {"ok": True, "models": [{"id": i, "label": label} for i, label in self._models[chosen.name]]}
+
+    def set_brain(self, harness: str, model: str = "") -> dict[str, Any]:
+        """Switch from the window; the listener picks it up when the next meeting starts its brain."""
+        from .config import choose_brain
+        from .harness import HARNESSES
+
+        harness, model = str(harness or ""), str(model or "").strip()
+        if harness not in HARNESSES:
+            return {"ok": False, "error": f"Unknown harness: {harness}"}
+        if len(model) > 200 or any(ch.isspace() for ch in model):
+            return {"ok": False, "error": "A model name is one word, as the harness lists it."}
+        try:
+            choose_brain(harness, model, self._config_file)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        return self.get_brain()
+
 
 class Pump:
     """Moves what is new from the view to the page."""
@@ -190,6 +232,46 @@ class Pump:
         return True
 
 
+FRONT_FLAG = "window-front.flag"
+
+
+def bring_to_front(runtime_dir: Path) -> None:
+    """Ask the open window to come to the front; it checks a few times a second."""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / FRONT_FLAG).touch()
+
+
+def _set_dock_icon() -> None:  # pragma: no cover - needs a macOS display
+    """Show Buddy's icon in the Dock rather than Python's while the window is open."""
+    from .app_bundle import ICON_PNG
+
+    try:
+        from AppKit import NSApplication, NSImage
+        from PyObjCTools import AppHelper
+    except ImportError:
+        return
+    image = NSImage.alloc().initWithContentsOfFile_(str(ICON_PNG))
+    if image is not None:
+        AppHelper.callAfter(NSApplication.sharedApplication().setApplicationIconImage_, image)
+
+
+# Closing the window turns Buddy off, so it asks first: a click by mistake would end a meeting.
+CLOSE_TEXT = {
+    "global.quitConfirmation": "Turn Buddy off? A meeting being recorded ends here and gets its summary.",
+    "global.quit": "Turn off",
+    "global.cancel": "Keep running",
+}
+
+
+def window_closed(runtime_dir: Path, send_control: Callable[[Path, str], None] = request) -> bool:
+    """Closing the window turns Buddy off: the window is Buddy, and a listener left running
+    unseen would keep recording a meeting nobody watches. True when a shutdown was asked."""
+    if listener_state(runtime_dir) is None:
+        return False  # already off (`buddy listen --stop`, or it crashed)
+    send_control(runtime_dir, "shutdown")
+    return True
+
+
 def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep: int = 3) -> None:  # pragma: no cover
     """Open the window and block until it is closed. Needs a display and pywebview."""
     import webview
@@ -207,6 +289,7 @@ def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep
     window = webview.create_window(
         "Buddy", html=PAGE, js_api=api, width=width, height=height, x=x, y=y,
         min_size=(320, 360), on_top=on_top, text_select=True,
+        confirm_close=True, localization=CLOSE_TEXT,
     )
     api._window = window
     loaded, closed = threading.Event(), threading.Event()
@@ -216,10 +299,18 @@ def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep
     def pump() -> None:
         loaded.wait()
         window.evaluate_js(f"window.buddy && window.buddy.setPinned({json.dumps(on_top)})")
+        if sys.platform == "darwin":
+            _set_dock_icon()
         feeder = Pump(view, window.evaluate_js)
+        front = runtime_dir / FRONT_FLAG
+        front.unlink(missing_ok=True)
         while not closed.is_set():
             try:
                 feeder.step()
+                if front.exists():  # `buddy open` (Buddy.app) while the window is already open
+                    front.unlink(missing_ok=True)
+                    window.restore()
+                    window.show()
             except Exception:  # the page reloading or closing mid-call
                 pass
             closed.wait(0.3)
@@ -229,6 +320,8 @@ def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep
     finally:
         if _read_json(runtime_dir / "window.json").get("pid") == os.getpid():
             (runtime_dir / "window.json").unlink(missing_ok=True)
+        if closed.is_set():
+            window_closed(runtime_dir)
 
 
 PAGE = r"""<!doctype html>
@@ -259,20 +352,15 @@ button { font: inherit; color: inherit; background: none; border: 1px solid var(
   padding: 4px 8px; cursor: pointer; }
 button:hover { background: var(--accent-soft); }
 button.on { background: var(--accent-soft); border-color: var(--accent); }
-button.danger.armed { background: var(--rec); color: #fff; border-color: var(--rec); }
-/* The microphone button glows while your lines are kept, dims while you are muted in the
-   meeting app, and turns amber when no app could be read. */
-#mic { display: none; }
-#mic.heard { color: #fff; background: var(--rec); border-color: var(--rec); box-shadow: 0 0 10px var(--rec);
-  animation: glow 1.6s ease-in-out infinite; }
-#mic.muted { opacity: .45; }
-#mic.unknown { border-color: #d9a400; color: #d9a400; }
+/* 💡 asks for a suggestion now; shown only during a meeting, it dims while the request goes out. */
+#suggest { display: none; }
+#suggest.sent { opacity: .5; }
 @keyframes glow { 50% { box-shadow: 0 0 3px var(--rec); } }
 
 header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel);
   border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--tool); flex: none; }
-.dot.listening { background: var(--ok); }
+.dot.ready { background: var(--ok); }
 .dot.meeting { background: var(--rec); animation: pulse 1.6s infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
 #state { font-weight: 600; }
@@ -304,8 +392,15 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #board .compact .blk { color: var(--rec); margin-left: 6px; }
 #board.small .compact { display: block; }
 #board.small .full { display: none; }
+#brain-panel { display: none; margin: 10px 12px 0; }
+#brain-panel .brain-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+#brain-panel label { width: 56px; color: var(--muted); font-size: 12px; flex: none; }
+#brain-panel select, #brain-panel input { flex: 1; min-width: 0; font: inherit; color: inherit; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+#brain-panel .state.ok { color: var(--ok); }
+#brain-panel .state.warning, #brain-panel .state.failed { color: var(--warn); }
 #actions { display: none; margin: 10px 12px 0; }
-#actions h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+#actions h2, #board h2, .panel-title { margin: 0 0 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; margin-bottom: 6px; }
 .card .top { display: flex; gap: 6px; align-items: baseline; }
 .card .num { color: var(--muted); font: 11px var(--mono); }
@@ -327,6 +422,15 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 .card.failed .state { color: var(--rec); }
 .card.finished .detail, .card.finished .buttons { display: none; }
 .card.finished { opacity: .8; padding: 6px 10px; }
+/* A finished card is one line (number, title, ✓/✗); a click on it shows the result and its links. */
+.card.finished:not(.open) .link, .card.finished:not(.open) .state { display: none; }
+.card.finished .top { cursor: pointer; }
+#actions.folded > :not(h2), #suggestions.folded > :not(h2), #board.folded > :not(h2) { display: none !important; }
+.board-collapse { cursor: pointer; color: var(--muted); font-size: 11px; text-align: right; margin-bottom: 4px; }
+#board-full .col-title { cursor: pointer; }
+.card .mark { margin-left: auto; padding-left: 6px; flex: none; }
+.card.done .mark { color: var(--ok); }
+.card.failed .mark { color: var(--rec); }
 #suggestions { display: none; margin: 10px 12px 0; padding: 10px 12px; background: var(--accent-soft);
   border: 1px solid var(--accent); border-radius: var(--radius); }
 #suggestions h2 { margin: 0 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent); }
@@ -339,8 +443,6 @@ header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; backg
 #activity-head { display: flex; align-items: center; gap: 6px; margin: 8px 12px 0; padding: 0; border: 0;
   color: var(--muted); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; background: none; }
 #activity-head:hover { background: none; color: var(--text); }
-#activity-head .chev { transition: transform .15s; }
-body.activity-closed #activity-head .chev { transform: rotate(-90deg); }
 body.activity-closed #feed, body.activity-closed #jump { display: none !important; }
 #panels { overflow-y: auto; max-height: 58vh; flex: none; }
 body.activity-closed #panels { flex: 1; max-height: none; }
@@ -376,6 +478,20 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 #dictate.finishing { opacity: .6; }
 #input.listening { outline: 2px solid var(--rec); outline-offset: -1px; }
 #error { color: var(--rec); font-size: 12px; min-height: 0; }
+/* One look for every section: Actions, Work, Suggestions and Activity. The same head line outside any box
+   (small caps, muted, ▾ open / ▸ folded, counts in brackets); each section's content keeps its own box. */
+#actions, #board, #suggestions { margin: 10px 12px 0; padding: 0; background: none; border: 0; border-radius: 0; }
+#actions h2, #board h2, #suggestions h2, #activity-head {
+  display: block; width: auto; margin: 0 0 6px; padding: 0; border: 0; background: none; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+  cursor: pointer; user-select: none; }
+#actions h2:hover, #board h2:hover, #suggestions h2:hover, #activity-head:hover { color: var(--text); background: none; }
+#actions h2::before, #board h2::before, #suggestions h2::before, #activity-head::before { content: "▾"; display: inline-block; width: 12px; }
+section.folded h2 { margin-bottom: 0; }
+section.folded h2::before, body.activity-closed #activity-head::before { content: "▸"; }
+#activity-head { margin: 10px 12px 6px; }
+#board .compact, #board .full { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; }
+#suggestions ol { background: var(--accent-soft); border-radius: var(--radius); padding: 8px 10px; }
 </style>
 </head>
 <body>
@@ -385,20 +501,27 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   <span id="brain"></span>
   <span class="spacer"></span>
   <span class="tools">
-    <button id="mic" title="Your microphone">🎙</button>
+    <button id="suggest" title="Suggest what to say now, even when nobody asked a question">💡 Suggest</button>
     <button id="meeting" title="Start or end recording a meeting">⏺ Meeting</button>
-    <button id="pause" title="Close or reopen the microphone">⏸</button>
     <button id="show" title="Show only what Buddy started, or the whole Claude session">Only Buddy</button>
+    <button id="brain-button" title="Brain: harness and model">🧠</button>
     <button id="pin" class="on" title="Keep this window above the others">📌</button>
-    <button id="power" class="danger" title="Turn Buddy off">⏻</button>
   </span>
 </header>
 <div id="panels">
+  <section id="brain-panel" class="card">
+    <div class="panel-title">Brain</div>
+    <div class="brain-row"><label for="brain-harness">Harness</label><select id="brain-harness"></select></div>
+    <div class="brain-row"><label for="brain-model">Model</label>
+      <input id="brain-model" list="brain-models" placeholder="its default" spellcheck="false"><datalist id="brain-models"></datalist></div>
+    <div class="buttons"><button id="brain-save" class="approve">Save</button><button id="brain-close">Close</button></div>
+    <div id="brain-state" class="state"></div>
+  </section>
   <section id="actions"><h2 id="actions-title">Actions</h2><div id="action-list"></div></section>
-  <section id="board" title="Your work: now, next, blocked"><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
+  <section id="board" title="Your work: now, next, blocked"><h2 id="board-title">Work</h2><div class="compact" id="board-compact"></div><div class="full" id="board-full"></div></section>
 </div>
-<section id="suggestions"><h2>Suggestions</h2><ol id="suggestion-list"></ol></section>
-<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span class="chev">▾</span> Activity</button>
+<section id="suggestions"><h2 id="suggestions-title">Suggestions</h2><ol id="suggestion-list"></ol></section>
+<button id="activity-head" title="Show or hide what Buddy and Claude are doing"><span id="activity-label">Activity</span></button>
 <main id="feed"><div id="empty">Type below, or press 🎤 to talk to Buddy.<br>The meeting shows here as it is said.</div></main>
 <button id="jump">↓ New</button>
 <footer>
@@ -415,6 +538,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   const feed = $("feed"), input = $("input"), errorBox = $("error");
   const MAX_ROWS = 600;
   let status = {listener: "off", brain: "none", suggestions: [], show: "buddy"};
+  let answering = "";  // the harness that answers commands when no session follows
   let pinned = true;
 
   const api = () => (window.pywebview && window.pywebview.api) || null;
@@ -444,6 +568,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     body.className = "body";
     let label = LABELS[item.kind] || "";
     if (item.kind === "said") label = item.who;
+    if (item.kind === "claude" && item.who) label = item.who;
     if (item.kind === "command") label = item.who === "typed" ? "Sent ➜" : "Sent by voice ➜";
     if (label) {
       const who = document.createElement("span");
@@ -481,38 +606,25 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     status = next;
     const state = next.listener;
     $("dot").className = "dot " + state;
-    const ready = state === "paused" && next.wake_phrase === false;  // waiting for a meeting or the 🎤
-    let label = ready ? "Ready" : ({listening: "Listening", meeting: "Recording", paused: "Paused", off: "Buddy is off"}[state] || state);
+    // Between meetings Buddy is ready: the microphone opens for a meeting or the 🎤.
+    let label = {ready: "Ready", meeting: "Recording", off: "Buddy is off"}[state] || state;
     if (state === "meeting") {
       const minutes = minutesSince(next.meeting);
       if (minutes !== null) label += " · " + minutes + " min";
     }
     $("state").textContent = label;
-    $("brain").textContent = {
-      watching: "· Claude connected",
-      idle: "· Claude's monitor is off",
-      none: "· no Claude session yet",
-    }[next.brain] || "";
+    $("brain").textContent = next.brain !== "watching" && answering && state !== "off"
+      ? "· " + answering + " answers"
+      : {
+        watching: "· Claude connected",
+        idle: "· Claude's monitor is off",
+        none: "· no Claude session yet",
+      }[next.brain] || "";
     const on = state !== "off";
     $("meeting").textContent = state === "meeting" ? "⏹ End meeting" : "⏺ Meeting";
     $("meeting").disabled = !on;
-    $("pause").textContent = state === "paused" ? "▶" : "⏸";
-    $("pause").disabled = !on;
-    $("pause").style.display = ready ? "none" : "";
-    $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
-    const mic = next.mic;
-    const micButton = $("mic");
-    micButton.style.display = mic && state === "meeting" ? "inline-block" : "none";
-    if (mic) {
-      const look = mic.mode !== "auto" ? (mic.heard ? "heard" : "muted")
-        : mic.state === "none" ? "unknown" : (mic.heard ? "heard" : "muted");
-      micButton.className = look;
-      micButton.textContent = mic.mode === "auto" ? "🎙" : (mic.mode === "on" ? "🎙 on" : "🎙 off");
-      const app = mic.app || "no meeting app read";
-      micButton.title = (mic.heard ? "Your lines are kept" : "Your lines are not kept") +
-        ` · ${mic.mode === "auto" ? "following " + app : "set by hand"} · click: auto → on → off`;
-    }
+    $("suggest").style.display = state === "meeting" ? "inline-block" : "none";
     showDictation(next.dictation, on);
     showActions(next.actions);
     showBoard(next.board, state === "meeting");
@@ -529,6 +641,7 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       return li;
     }));
     list.scrollTop = list.scrollHeight;
+    $("suggestions-title").textContent = all.length ? `Suggestions (${all.length})` : "Suggestions";
     $("suggestions").style.display = all.length ? "block" : "none";
   }
 
@@ -561,11 +674,11 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 
   // Action cards. Rebuilt only when an action changes, and never while you edit it.
   const KIND = {reply: "Reply", review: "Review", investigate: "Look into", merge: "Merge", post: "Post", ticket: "Jira", run: "Run", other: "Action"};
-  const cards = new Map(), editing = new Set();
+  const cards = new Map(), editing = new Set(), opened = new Set();
   function card(a) {
     const el = document.createElement("div");
     const finished = ["done", "failed"].includes(a.status);
-    el.className = "card " + a.status + (finished ? " finished" : "");
+    el.className = "card " + a.status + (finished ? " finished" : "") + (opened.has(a.id) ? " open" : "");
     const top = document.createElement("div");
     top.className = "top";
     const num = document.createElement("span"); num.className = "num"; num.textContent = "#" + a.id;
@@ -573,6 +686,14 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const title = document.createElement("span"); title.className = "title"; title.textContent = a.title;
     top.append(num, kind, title);
     if (a.stale) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "from yesterday"; top.append(b); }
+    if (finished) {
+      const mark = document.createElement("span"); mark.className = "mark"; mark.textContent = a.status === "done" ? "✓" : "✗";
+      top.append(mark);
+      top.addEventListener("click", () => {
+        if (opened.has(a.id)) opened.delete(a.id); else opened.add(a.id);
+        el.classList.toggle("open", opened.has(a.id));
+      });
+    }
     el.append(top);
     let detailEl = null;
     if (a.detail) {
@@ -642,13 +763,22 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
       cards.set(a.id, {el, key});
       list.appendChild(el);
     }
-    $("actions-title").textContent = open.length ? `Actions · ${open.filter((a) => a.status === "proposed").length} to approve` : "Actions";
-    $("actions").style.display = wanted.length ? "block" : "none";
+    const every = actions || [];
+    const count = (st) => every.filter((a) => st.includes(a.status)).length;
+    const parts = [[count(["proposed", "approved", "running"]), "open"], [count(["done"]), "completed"],
+      [count(["failed"]), "failed"], [count(["dismissed"]), "dismissed"]].filter(([n]) => n).map(([n, w]) => `${n} ${w}`);
+    $("actions-title").textContent = parts.length ? `Actions (${parts.join(", ")})` : "Actions";
+    $("actions").style.display = every.length ? "block" : "none";
   }
 
   // The work board. Small during a meeting (one line: what is being done now); a click opens it.
   let boardOpenInMeeting = false;
   $("board-compact").addEventListener("click", () => { boardOpenInMeeting = true; setStatus(status); });
+  // Opened during a meeting, it closes again from its "collapse" control or any column title.
+  $("board-full").addEventListener("click", (e) => {
+    if (!boardOpenInMeeting || !e.target.closest(".col-title, .board-collapse")) return;
+    boardOpenInMeeting = false; setStatus(status);
+  });
   function ticketChip(item) {
     const chip = document.createElement(item.link ? "a" : "span");
     chip.className = "tk";
@@ -695,7 +825,14 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     const lead = document.createElement("b"); lead.textContent = "Now: ";
     compact.append(lead, document.createTextNode(now.map((i) => i.title).join(" · ") || "—"));
     if (blocked.length) { const k = document.createElement("span"); k.className = "blk"; k.textContent = `● ${blocked.length} blocked`; compact.append(k); }
+    const tally = [[b.now, "now"], [b.blocked, "blocked"], [b.next, "next"], [b.done, "done"]]
+      .filter(([xs]) => xs && xs.length).map(([xs, w]) => `${xs.length} ${w}`);
+    $("board-title").textContent = tally.length ? `Work (${tally.join(", ")})` : "Work";
     if (!inMeeting) boardOpenInMeeting = false;
+    if (inMeeting && boardOpenInMeeting && full.children.length) {
+      const fold = document.createElement("div"); fold.className = "board-collapse"; fold.textContent = "▴ collapse";
+      full.prepend(fold);
+    }
     $("board").classList.toggle("small", inMeeting && !boardOpenInMeeting);
     $("board").style.display = full.children.length ? "block" : "none";
   }
@@ -733,13 +870,29 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
 
   const control = async (action) => { const r = await call("control", action); if (!r.ok) showError(r.error); };
   $("meeting").addEventListener("click", () => control(status.listener === "meeting" ? "stop-meeting" : "start-meeting"));
-  $("pause").addEventListener("click", () => control(status.listener === "paused" ? "resume" : "pause"));
   $("dictate").addEventListener("click", async () => {
     const live = status.dictation && status.dictation.active;
     if (live) { finishing = true; $("dictate").className = "finishing"; }
     const r = await call("control", live ? "dictate-stop" : "dictate-start");
     if (!r.ok) showError(r.error);
   });
+  // Actions, Suggestions and Work fold to their title line (with counts); each remembers its state.
+  const FOLD_KEY = "buddy.fold.";
+  for (const id of ["actions", "suggestions", "board"]) {
+    const sec = $(id), head = sec.querySelector("h2");
+    head.classList.add("fold-head");
+    try { if (localStorage.getItem(FOLD_KEY + id) === "1") sec.classList.add("folded"); } catch (e) {}
+    head.addEventListener("click", () => {
+      const folded = sec.classList.toggle("folded");
+      try { localStorage.setItem(FOLD_KEY + id, folded ? "1" : "0"); } catch (e) {}
+    });
+  }
+  const countActivity = () => {
+    const n = [...$("feed").children].filter((c) => c.id !== "empty").length;
+    $("activity-label").textContent = n ? `Activity (${n})` : "Activity";
+  };
+  new MutationObserver(countActivity).observe($("feed"), {childList: true});
+  countActivity();
   const ACTIVITY_KEY = "buddy.activity";
   const setActivity = (open) => {
     document.body.classList.toggle("activity-closed", !open);
@@ -747,11 +900,13 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
   };
   try { if (localStorage.getItem(ACTIVITY_KEY) === "closed") document.body.classList.add("activity-closed"); } catch (e) {}
   $("activity-head").addEventListener("click", () => setActivity(document.body.classList.contains("activity-closed")));
-  $("mic").addEventListener("click", async () => {
-    const order = ["auto", "on", "off"];
-    const current = (status.mic && status.mic.mode) || "auto";
-    const r = await call("set_mic", order[(order.indexOf(current) + 1) % order.length]);
+  $("suggest").addEventListener("click", async () => {
+    const button = $("suggest");
+    if (button.classList.contains("sent")) return;  // one request at a time
+    button.classList.add("sent");
+    const r = await call("control", "suggest");
     if (!r.ok) showError(r.error);
+    setTimeout(() => button.classList.remove("sent"), 3000);
   });
   $("show").addEventListener("click", async () => {
     const r = await call("set_show", status.show === "all" ? "buddy" : "all");
@@ -762,16 +917,52 @@ footer { padding: 10px 12px; background: var(--panel); border-top: 1px solid var
     await call("set_on_top", pinned);
     $("pin").classList.toggle("on", pinned);
   });
-  let armedAt = 0;
-  $("power").addEventListener("click", () => {
-    // Two clicks within four seconds: turning Buddy off by accident mid-meeting is costly.
-    if (Date.now() - armedAt < 4000) { armedAt = 0; $("power").classList.remove("armed"); control("shutdown"); return; }
-    armedAt = Date.now();
-    $("power").classList.add("armed");
-    $("power").title = "Click again to turn Buddy off";
-    setTimeout(() => { $("power").classList.remove("armed"); $("power").title = "Turn Buddy off"; }, 4000);
+  // 🧠: pick the harness and model of Buddy's own brain. Saved to config.yaml; the
+  // listener reads it when the next meeting starts its brain.
+  const brainPanel = $("brain-panel");
+  const option = (value, text) => { const o = document.createElement("option"); o.value = value; o.textContent = text; return o; };
+  async function loadModels(harness) {
+    const list = $("brain-models");
+    list.replaceChildren();
+    $("brain-model").placeholder = "loading models…";
+    const r = await call("brain_models", harness);
+    $("brain-model").placeholder = "its default";
+    if (r.ok && $("brain-harness").value === harness) list.replaceChildren(...r.models.map((m) => option(m.id, m.label)));
+  }
+  function showBrain(r, saved) {
+    $("brain-harness").replaceChildren(...r.harnesses.map((h) => option(h.name, h.label)));
+    $("brain-harness").value = r.harness;
+    $("brain-model").value = r.model;
+    const label = (r.harnesses.find((h) => h.name === r.harness) || {}).label || r.harness;
+    $("brain-button").title = `Brain: ${label}${r.model ? " · " + r.model : ""}`;
+    answering = r.auto_brain ? label : "";
+    if (status) setStatus(status);
+    const state = $("brain-state");
+    state.className = "state " + r.readiness.state;
+    state.textContent = (saved ? "Saved: applies from the next command or meeting. " : "") + (r.readiness.state === "ok" ? "✓ " : "⚠ ") + r.readiness.detail;
+  }
+  $("brain-button").addEventListener("click", async () => {
+    if (brainPanel.style.display === "block") { brainPanel.style.display = "none"; return; }
+    const r = await call("get_brain");
+    if (!r.ok) { showError(r.error); return; }
+    showBrain(r, false);
+    brainPanel.style.display = "block";
+    loadModels(r.harness);
   });
-  window.addEventListener("pywebviewready", () => input.focus());
+  $("brain-harness").addEventListener("change", () => { $("brain-model").value = ""; loadModels($("brain-harness").value); });
+  $("brain-close").addEventListener("click", () => { brainPanel.style.display = "none"; });
+  $("brain-save").addEventListener("click", async () => {
+    $("brain-save").disabled = true;
+    const r = await call("set_brain", $("brain-harness").value, $("brain-model").value.trim());
+    $("brain-save").disabled = false;
+    if (!r.ok) { showError(r.error); return; }
+    showBrain(r, true);
+  });
+  window.addEventListener("pywebviewready", async () => {
+    input.focus();
+    const r = await call("get_brain");
+    if (r.ok) showBrain(r, false);
+  });
 })();
 </script>
 </body>

@@ -12,7 +12,7 @@ before writing code is to open an issue describing what you want to change and w
   next milestone; see item 0 of [the roadmap](docs/ROADMAP.md). Deliver into the session the user already has
   open, rather than opening a window of Buddy's own.
 - **A dedicated wake-word detector**, so speech that will be discarded is not transcribed at all.
-- **Bug fixes**, especially anything that makes Buddy miss speech, misfire on the wake phrase, or fail silently.
+- **Bug fixes**, especially anything that makes Buddy miss speech, miss a suggestion, or fail silently.
 
 ## What will not be merged
 

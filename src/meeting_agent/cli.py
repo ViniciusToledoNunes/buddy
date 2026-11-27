@@ -133,6 +133,36 @@ def config_command(path_only: bool = typer.Option(False, "--path", help="Print o
 
 
 @app.command()
+def brain(
+    harness: str = typer.Argument("", help="claude-code or cursor; empty shows the brain in use."),
+    model: str = typer.Option("", "--model", "-m", help="The harness's model; empty uses its default."),
+) -> None:
+    """Show or switch the agent Buddy runs as its brain; a switch applies from the next meeting."""
+    from .config import choose_brain
+    from .harness import HARNESSES, harness_for
+
+    if harness:
+        if harness not in HARNESSES:
+            console.print(f"[red]Unknown harness {harness!r}.[/red] Choose one of: {', '.join(HARNESSES)}")
+            raise typer.Exit(1)
+        try:
+            backup = choose_brain(harness, model)
+        except ValueError as exc:
+            console.print(f"[red]Not switched:[/red] {exc}")
+            raise typer.Exit(1)
+        if backup is not None:
+            console.print(f"Previous configuration saved to {backup}")
+    settings = load_settings()
+    chosen = harness_for(settings)
+    readiness = chosen.readiness(settings)
+    colors = {"ok": "green", "warning": "yellow", "failed": "red"}
+    console.print(f"Brain: [bold]{chosen.label}[/bold] ({chosen.name}), model: {settings.brain.model or 'its default'}")
+    console.print(f"[{colors[readiness.state]}]{readiness.state}[/{colors[readiness.state]}] {readiness.detail}")
+    if settings.llm_provider != "harness":
+        console.print(f"It runs when no Claude Code session follows the listener; llm_provider is {settings.llm_provider}.")
+
+
+@app.command()
 def hotkeys() -> None:
     """Run a small listener so the configured toggle hotkey can start/stop sessions."""
     settings = load_settings()
@@ -226,10 +256,10 @@ def listen(
     detach: bool = typer.Option(False, "--detach", help="Run in the background and return."),
     stop_listener: bool = typer.Option(False, "--stop", help="Shut down a running listener."),
 ) -> None:
-    """Keep the microphone attentive for "Hey Buddy"; record meetings when asked.
+    """Run Buddy: record meetings when asked, take commands from the window.
 
-    Speech is kept only when it opens with the wake phrase or a meeting is being
-    recorded. Events go to the log that `buddy watch` follows.
+    The microphone opens only while a meeting is recorded or the window's 🎤 is on.
+    Events go to the log that `buddy watch` follows.
     """
     from .listener import ListenDaemon, listener_state, request
 
@@ -248,34 +278,14 @@ def listen(
         if listener_state(runtime):
             console.print("Buddy is already listening.")
             return
-        runtime.mkdir(parents=True, exist_ok=True)
-        log = (runtime / "listen.log").open("a", encoding="utf-8")
-        kwargs: dict = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL, "cwd": str(project_root())}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = (
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            )
-        else:
-            kwargs["start_new_session"] = True
-        subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "listen"], **kwargs)
-        for _ in range(60):
-            state = listener_state(runtime)
-            if state:
-                settings = load_settings()
-                ready = "listening for \"Hey Buddy\"" if settings.listen.wake_phrase else "ready; the microphone opens for meetings and the 🎤"
-                console.print(f"Buddy is {ready} (pid {state['pid']}).")
-                if settings.listen.window:
-                    _open_window(runtime)
-                return
-            time.sleep(0.5)
-        console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
-        raise typer.Exit(code=1)
+        if not _start_listener(runtime):
+            raise typer.Exit(code=1)
+        if load_settings().listen.window:
+            _open_window(runtime)
+        return
     settings = load_settings()
-    daemon = ListenDaemon(settings, runtime)
-    console.print('Listening for "Hey Buddy". Ctrl+C stops.' if settings.listen.wake_phrase
-                  else "Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
+    daemon = ListenDaemon(settings, runtime, brain_settings=load_settings, answer_commands=True, keep_memory=True)
+    console.print("Ready: the microphone opens for meetings and the window's 🎤. Ctrl+C stops.")
     try:
         asyncio.run(daemon.run(asyncio.Event()))
     except KeyboardInterrupt:
@@ -350,8 +360,8 @@ def watch(
 
 
 @app.command()
-def say(text: list[str] = typer.Argument(..., help="The command, as you would say it after \"Hey Buddy\".")) -> None:
-    """Send Buddy a typed command. It reaches the session exactly like a spoken one."""
+def say(text: list[str] = typer.Argument(..., help="The command, as you would type it in Buddy's window.")) -> None:
+    """Send Buddy a typed command, as if typed in its window."""
     from .listener import submit
 
     _require_listener()
@@ -582,6 +592,66 @@ def live(
         pass
 
 
+def _start_listener(runtime: Path) -> bool:
+    """Start the listener in the background and wait until it is up."""
+    from .listener import listener_state
+
+    runtime.mkdir(parents=True, exist_ok=True)
+    log = (runtime / "listen.log").open("a", encoding="utf-8")
+    kwargs: dict = {"stdout": log, "stderr": log, "stdin": subprocess.DEVNULL, "cwd": str(project_root())}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([sys.executable, "-m", "meeting_agent.cli", "listen"], **kwargs)
+    for _ in range(60):
+        state = listener_state(runtime)
+        if state:
+            console.print(f"Buddy is ready; the microphone opens for meetings and the 🎤 (pid {state['pid']}).")
+            return True
+        time.sleep(0.5)
+    console.print(f"[red]The listener did not start; see {runtime / 'listen.log'}.[/red]")
+    return False
+
+
+@app.command("open")
+def open_buddy() -> None:
+    """What Buddy.app runs: start Buddy if it is off, and show its window (opened, or brought to the front)."""
+    from .listener import listener_state
+    from .window import bring_to_front, window_state
+
+    runtime = _runtime_dir()
+    if not listener_state(runtime) and not _start_listener(runtime):
+        raise typer.Exit(code=1)
+    if window_state(runtime):
+        bring_to_front(runtime)
+        console.print("Buddy's window is already open: brought to the front.")
+        return
+    _open_window(runtime)
+
+
+@app.command("app")
+def make_app(
+    dest: Path = typer.Option(None, "--dest", help="Where to write Buddy.app (default ~/Applications/Buddy.app)."),
+) -> None:
+    """Make Buddy.app (macOS): double-click it to start Buddy and open its window."""
+    from .app_bundle import DEFAULT_APP, build_app
+
+    if sys.platform != "darwin":
+        console.print("Buddy.app is macOS only for now; run `buddy open` instead.")
+        raise typer.Exit(code=2)
+    buddy = Path(sys.executable).with_name("buddy")
+    if not buddy.exists():
+        console.print(f"[red]No buddy command next to {sys.executable}; install Buddy first.[/red]")
+        raise typer.Exit(code=1)
+    path = build_app(buddy, dest or DEFAULT_APP)
+    console.print(f"Made {path}. Find it in Spotlight or Launchpad, or drag it to the Dock.")
+
+
 def _open_window(runtime: Path) -> None:
     """Start the window in its own process, so it outlives the command that opened it."""
     from .window import window_state
@@ -648,27 +718,96 @@ def meeting(action: str = typer.Argument(..., help="start or stop")) -> None:
     console.print(f"Meeting {action} requested.")
 
 
-@app.command()
-def pause() -> None:
-    """Close the microphone until `buddy resume`."""
-    from .listener import request
-
-    _require_listener()
-    request(_runtime_dir(), "pause")
-    console.print("Pause requested.")
-
-
-@app.command()
-def resume() -> None:
-    """Reopen the microphone after a pause."""
-    from .listener import request
-
-    _require_listener()
-    request(_runtime_dir(), "resume")
-    console.print("Resume requested.")
-
-
 # ------------------------------------------------------------------- voices
+
+memory_app = typer.Typer(help="The working memory Buddy and your coding agents share: what was done, is being done, comes next.")
+app.add_typer(memory_app, name="memory")
+# Onboarding reads a whole machine; the refresh checks pull requests, tickets and meetings.
+MEMORY_CHORE_SECONDS = 1800
+
+
+@memory_app.callback(invoke_without_command=True)
+def memory_show(ctx: typer.Context) -> None:
+    """Where the memory is, what it holds and its last changes (with no subcommand)."""
+    if ctx.invoked_subcommand is not None:
+        return
+    settings = load_settings()
+    folder = settings.memory.directory()
+    if not folder.is_dir():
+        console.print(f"No working memory yet at {folder}: `buddy listen` starts it, `buddy memory onboard` fills it.")
+        return
+    for part in ("global", "work"):
+        files = sorted((folder / part).glob("*.md")) if (folder / part).is_dir() else []
+        console.print(f"{part}/: {len(files)} files", markup=False)
+    log = subprocess.run(
+        ["git", "-C", str(folder), "log", "-5", "--format=%cs %h %s"], capture_output=True, text=True, check=False,
+    )
+    if log.stdout.strip():
+        console.print("Last changes:\n" + log.stdout.rstrip(), markup=False)
+    memory = settings.memory
+    found = {path.as_posix() for path in memory.source_paths()}
+    for source in memory.sources:
+        state = "ok" if Path(source).expanduser().as_posix() in found else "missing"
+        console.print(f"source {state}: {source}", markup=False)
+    console.print(f"Refresh at: {', '.join(memory.refresh_at) or 'off (memory.refresh_at)'}", markup=False)
+
+
+def _memory_chore(prompt: str, quiet: bool = False) -> None:
+    from .autobrain import CommandRunner
+    from .memory_tasks import for_chores
+
+    settings = load_settings()
+    meetings = Path(settings.meetings_dir)
+    meetings = meetings if meetings.is_absolute() else project_root() / meetings
+
+    async def run() -> None:
+        runner = CommandRunner(
+            lambda: for_chores(load_settings()),
+            meetings,
+            reply=lambda label, text: console.print(f"{label}: {text}", markup=False),
+            notice=lambda text: console.print(text, markup=False),
+            working=lambda label: console.print(f"{label} is on it (this can take minutes)…", markup=False),
+        )
+        runner.submit(prompt, quiet=quiet)
+        await runner.finish(MEMORY_CHORE_SECONDS)
+
+    asyncio.run(run())
+    from .working_memory import commit_memory
+
+    committed = commit_memory(settings.memory.directory())
+    if committed:
+        console.print(f"Committed: {committed}", markup=False)
+
+
+@memory_app.command("onboard")
+def memory_onboard(
+    probe_only: bool = typer.Option(False, "--probe", help="Only print what Buddy found on this machine."),
+) -> None:
+    """Fill the memory from this machine: tools and logins, agent folders, repositories (reads only)."""
+    from .memory_tasks import onboard_prompt, probe_machine
+    from .working_memory import ensure_memory
+
+    probe = probe_machine()
+    if probe_only:
+        console.print_json(json.dumps(probe))
+        return
+    folder = load_settings().memory.directory()
+    if ensure_memory(folder):
+        console.print(f"Started the working memory in {folder}.", markup=False)
+    _memory_chore(onboard_prompt(probe))
+
+
+@memory_app.command("refresh")
+def memory_refresh() -> None:
+    """Check the memory against the real state of the work now, as the scheduled refresh does."""
+    from .claude_code import buddy_tool_command
+    from .memory_tasks import refresh_prompt
+
+    settings = load_settings()
+    meetings = Path(settings.meetings_dir)
+    meetings = meetings if meetings.is_absolute() else project_root() / meetings
+    _memory_chore(refresh_prompt(time.strftime("%H:%M, asked"), meetings, buddy_tool_command()))
+
 
 voices_app = typer.Typer(no_args_is_help=True, help="Voices Buddy remembers for listen.speaker_names (this machine only).")
 app.add_typer(voices_app, name="voices")

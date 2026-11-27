@@ -11,6 +11,7 @@ htmlcov/
 .ruff_cache/
 meetings/*
 !meetings/.gitkeep
+memory/
 .meeting-agent
 benchmark-results.json
 tools/

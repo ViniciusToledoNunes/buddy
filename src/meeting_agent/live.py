@@ -73,16 +73,16 @@ def item_from_feed(record: dict[str, Any]) -> LiveItem | None:
         return LiveItem("cancelled", "Command dropped.", at=at)
     if kind == "SUGGEST":  # Buddy's own brain, when no session follows
         return LiveItem("claude", "\n".join(str(item) for item in record.get("items", [])), at=at)
+    if kind == "REPLY":  # Buddy's own brain answering a command, named after its harness
+        return LiveItem("claude", str(record.get("text", "")), who=str(record.get("by", "")), at=at)
     if kind == "BRAIN":
         return LiveItem("state", str(record.get("text", "")), at=at)
     return None
 
 
 STATES = {
-    "LISTENER_UP": 'Listening for "Hey Buddy".',
+    "LISTENER_UP": "Ready: the microphone opens when a meeting starts.",
     "LISTENER_DOWN": "Buddy is off.",
-    "PAUSED": "Paused: the microphone is closed.",
-    "RESUMED": "Listening again.",
     "MEETING_START": "Meeting started: recording.",
 }
 
@@ -101,6 +101,8 @@ def item_from_event(record: dict[str, Any]) -> LiveItem | None:
         return LiveItem("state", STATES[kind], at=at)
     if kind == "NOTICE":
         return LiveItem("notice", str(record.get("text", "")), at=at)
+    if kind == "SLACK":
+        return LiveItem("notice", f"Slack: {record.get('text', '')}", at=at)
     return None  # MEETING_BATCH: its lines were already shown as they were said
 
 
@@ -372,14 +374,12 @@ class LiveView:
         listener = listener_state(self.runtime_dir)
         brain = brain_state(self.runtime_dir)
         return {
-            "listener": listener.get("state", "listening") if listener else "off",
+            "listener": listener.get("state", "ready") if listener else "off",
             "meeting": listener.get("meeting_id", "") if listener else "",
             # listen.mic_follows_mute: whether your microphone's lines are being kept now.
             "mic": listener.get("mic") if listener else None,
             # The window's 🎤: on, and the words heard so far; `id` grows when one is done.
             "dictation": listener.get("dictation") if listener else None,
-            # Without the wake phrase, "paused" between meetings is just being ready.
-            "wake_phrase": bool(listener.get("wake_phrase", True)) if listener else True,
             # watching: a session follows Buddy. idle: it did, but its monitor is down, so
             # commands wait on disk until it re-arms. none: no session has ever connected.
             "brain": ("watching" if brain["watching"] else "idle") if brain else "none",
@@ -436,6 +436,8 @@ def terminal_line(item: LiveItem) -> str:
         label = item.who
     elif item.kind == "command":
         label = f"{item.who} ➜"
+    elif item.kind == "claude" and item.who:
+        label = item.who
     else:
         label = LABELS.get(item.kind, item.kind)
     head = f"{label} " if label else ""

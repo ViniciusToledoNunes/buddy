@@ -96,6 +96,9 @@ class LLMProvider:
     def __init__(self) -> None:
         self.last_usage = None
 
+    def available(self) -> bool:
+        return True
+
     def session_fresh(self) -> bool:
         return True
 
@@ -232,10 +235,10 @@ def choose_provider(
     requested = settings.llm_provider
     if requested == "disabled" or not settings.copilot.enabled:
         return None
-    if requested == "claude-code":
-        from .claude_code import ClaudeCodeProvider
+    if requested == "harness":
+        from .harness import harness_for
 
-        brain = ClaudeCodeProvider(settings, meetings_dir)
+        brain = harness_for(settings).provider(settings, meetings_dir)
         return brain if brain.available() else None
     timeout = settings.copilot.request_timeout_seconds
     if requested in {"auto", "openai"} and os.getenv("OPENAI_API_KEY"):
@@ -692,7 +695,7 @@ Output language for speakable suggestions: {self.settings.copilot.output_languag
         if self.provider is None:
             return (
                 REPORT_SECTIONS
-                + "\n\nLLM summary unavailable. Set llm_provider (claude-code, openai, anthropic or ollama).\n"
+                + "\n\nLLM summary unavailable. Set llm_provider (harness, openai, anthropic or ollama).\n"
                 + "\n## Meeting memory captured\n\n"
                 + (self.memory.compact or "No structured memory was produced.")
             )

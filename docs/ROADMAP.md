@@ -17,12 +17,11 @@ central rule: recording is explicit.
   the working directory, with the `CLAUDE.md`, the memory and the helpers already in daily use — one session per
   meeting, read-only, isolated from the user's permission rules. BigQuery and Datadog stay guarded in code,
   reached through `buddy tool`.
-- **Listening mode.** `buddy listen` keeps the microphone attentive for "Hey Buddy", records meetings on request
-  and publishes events to a log on disk; the `buddy-listener` skill makes a Claude Code session the brain, in the
+- **Listening mode.** `buddy listen` records meetings on request and publishes events to a log on disk; the `buddy-listener` skill makes a Claude Code session the brain, in the
   pattern of a chat monitor: a cursor on disk, a monitor, free investigation, and writes only after approval.
-- **Commands that wait for you to finish.** A command opens with the wake phrase and is dispatched only on a
-  closing phrase ("over and out"), with cancel phrases, a silence fallback marked as possibly incomplete, and
-  tones for opened, sent and cancelled. Voice shutdown ends the process, and the watch exits with it.
+- **No always-on microphone.** The "Hey Buddy" wake phrase (with closing and cancel phrases) was tried and
+  removed in November 2026: the microphone now opens only for a meeting or the window's 🎤 dictation, and
+  commands are typed or dictated into the window.
 - **Buddy's window.** One floating window to follow and talk to Buddy: the meeting as it is said, commands as
   they are dictated or typed, and what the Claude Code session does with them, read from the session's own
   record — so the session stays the brain, with its context, and showing costs no model turn. The same view runs
@@ -33,7 +32,7 @@ central rule: recording is explicit.
 ### 0. Any agent, not only Claude Code
 
 The listening mode depends on Claude Code's monitor tool to wake a session when an event arrives. No other agent
-has an equivalent today (Codex has an open feature request, openai/codex#29922). The goal is for "Hey Buddy" to
+has an equivalent today (Codex has an open feature request, openai/codex#29922). The goal is for Buddy to
 work wherever the user already codes.
 
 - The session stays the brain, because it holds the user's context. Delivering events to it is the open problem
@@ -47,13 +46,10 @@ work wherever the user already codes.
 - Detect a meeting from the system signal: Windows reports which apps hold the microphone (Zoom, Chrome, Teams).
   Ask whether to record when a call starts unannounced, and end when the app releases the microphone. Needs an
   app list: a VDI client can hold the microphone all day.
-- A dedicated wake-word detector, so speech that will be discarded is not transcribed at all.
-- Validate "Hey Buddy" in real meetings: false-trigger rate, missed commands, and mistranscribed closing phrases.
-  If closing fails often, add a hotkey that sends the open command.
 
 ### 2. Reduce brain latency
 
-- It takes 40 to 90s per update today. Measure `claude_model: sonnet` and `claude_effort: medium` in a real
+- It takes 40 to 90s per update today. Measure `brain.model: sonnet` and `brain.effort: medium` in a real
   meeting.
 - End a forgotten session by itself, so it does not keep calling the model while the computer plays audio.
 - Test the overlay (`ui.overlay: true`) as the main surface during calls: it already shows the current set, but

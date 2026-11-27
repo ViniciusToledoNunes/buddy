@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,12 +24,12 @@ from .speakers import VOICE_MODEL_FILE, SpeakerTracker, VoiceBook, VoiceModel, p
 
 DEFAULT_RUNTIME_DIR = project_root() / ".meeting-agent"
 
-# "Hey Buddy" opens the utterance. Whisper spells the name a few ways, and "buddy" alone
-# is too common in English conversation to be trusted without the "hey".
-WAKE = re.compile(
-    r"^\W*(?:hey|hi|ok|okay)\W+(?:buddy|buddie|budy|bodie|body)\b\W*(.*)$",
-    re.IGNORECASE | re.DOTALL,
-)
+MEMORY_AFTER_MEETING = """The meeting {meeting} has ended: its summary is {summary} and its transcript \
+{transcript}. Update the user's working memory from it, following CONVENTIONS.md: decisions, what the \
+user committed to or was asked to do, changes in their plan (work/project_open_items.md), and new facts \
+about people or projects. Keep only what will matter later. Then reply with one line saying what you \
+changed, or exactly NOTHING when nothing was worth keeping."""
+
 MEETING_WORD = r"(?:meeting|call|recording)"
 START_MEETING = re.compile(
     rf"\b(?:start|starts|starting|begin|begins|beginning)\b.*\b{MEETING_WORD}\b"
@@ -40,16 +41,14 @@ STOP_MEETING = re.compile(
     rf"|\b{MEETING_WORD}\b.*\b(?:over|ended|end|ending|done|finished|stopped)\b",
     re.IGNORECASE,
 )
-PAUSE = re.compile(r"\b(?:stop|pause)\s+listening\b|\bgo to sleep\b|^\W*pause\W*$", re.IGNORECASE)
-# "Hey Buddy, stop" was the natural way to turn it off in the first real test, and it
-# went to Claude as an unknown command while the process kept running.
+# "stop" alone was the natural way to turn it off in the first real test, and it went to
+# Claude as an unknown command while the process kept running.
 SHUTDOWN = re.compile(
     r"\bshut\s*(?:yourself\s+)?down\b|\bturn\s+(?:yourself\s+)?off\b|\bswitch\s+(?:yourself\s+)?off\b"
     r"|\bpower\s+off\b|^\W*stop(?:\W+(?:buddy|now|please))*\W*$",
     re.IGNORECASE,
 )
-CANCEL = re.compile(r"^\W*(?:cancel(?:\W+that)?|never\s*mind|forget\s+(?:it|that)|scratch\s+that)\W*$", re.IGNORECASE)
-LOCAL_COMMANDS = {"start_meeting", "stop_meeting", "pause", "shutdown"}
+LOCAL_COMMANDS = {"start_meeting", "stop_meeting", "shutdown"}
 
 SUMMARY_PENDING = (
     "# Summary\n\n_Pending: the Claude Code session following Buddy writes this when the "
@@ -61,22 +60,12 @@ PREP_PLACEHOLDER = (
 )
 
 
-def parse_wake(text: str) -> tuple[bool, str]:
-    """Whether an utterance opens with the wake phrase, and what followed it."""
-    match = WAKE.match(text or "")
-    if not match:
-        return False, ""
-    return True, match.group(1).strip()
-
-
 def classify_command(text: str) -> str:
     """Commands Buddy settles itself, instantly, without waiting on Claude.
 
     Anything ambiguous goes to Claude, which can still run `buddy meeting start|stop`:
     starting or ending a recording by mistake is worse than taking a minute longer.
     """
-    if PAUSE.search(text):
-        return "pause"
     starts = bool(START_MEETING.search(text))
     if SHUTDOWN.search(text) and not STOP_MEETING.search(text):
         return "shutdown"
@@ -86,20 +75,6 @@ def classify_command(text: str) -> str:
     if stops and not starts:
         return "stop_meeting"
     return "other"
-
-
-def is_cancel(text: str) -> bool:
-    return bool(CANCEL.match(text or ""))
-
-
-def end_phrase_pattern(phrases: list[str]) -> re.Pattern[str]:
-    """Match a closing phrase at the end of an utterance, whatever Whisper did to punctuation."""
-    def word(text: str) -> str:
-        # Whisper writes "that's" with a straight or a curly apostrophe.
-        return "['\u2019]".join(re.escape(part) for part in re.split("['\u2019]", text))
-
-    alternatives = [r"\W+".join(word(w) for w in phrase.split()) for phrase in phrases if phrase.strip()]
-    return re.compile(rf"(?:^|\W)(?:{'|'.join(alternatives) or '(?!)'})\W*$", re.IGNORECASE)
 
 
 def names_pattern(names: list[str]) -> re.Pattern[str]:
@@ -119,14 +94,6 @@ def classify_question(text: str, names: re.Pattern[str]) -> tuple[bool, bool]:
     if "?" not in (text or ""):
         return False, addressed
     return addressed or len(re.findall(r"[\w']+", text)) > 3, addressed
-
-
-def split_end_phrase(text: str, pattern: re.Pattern[str]) -> tuple[str, bool]:
-    """The command text before a closing phrase, and whether the phrase was there."""
-    match = pattern.search(text or "")
-    if not match:
-        return (text or "").strip(), False
-    return text[: match.start()].strip(" ,.;:-"), True
 
 
 def _process_started(pid: int) -> str:
@@ -289,17 +256,25 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
             # Sent early because of this question; named first so truncation never hides it.
             to = " to=ME" if record.get("addressed") else ""
             shown = f' trigger=question{to} q="{record.get("question", "")}"' + shown
+        elif record.get("trigger") == "asked":
+            # The user pressed 💡: they want something to say now, question mark or not.
+            recap = " recap=yes" if record.get("recap") else ""
+            shown = f' trigger=asked{recap} last="{record.get("last", "")}"' + shown
         text = f"{head} lines={len(lines)}{shown} | {body}"
         if len(text) > max_chars:
             text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
         return text
     if kind == "COMMAND":
-        ended = record.get("ended", "phrase")
-        if ended == "typed":
-            return f'{head} typed="{record.get("text", "")}"'
-        # A dictation that closed on silence or length: the user may not have finished.
-        note = "" if ended == "phrase" else f" ended={ended} (may be incomplete)"
-        return f'{head} said="{record.get("text", "")}"{note}'
+        # Typed in the window (or dictated with 🎤, read and sent from it), or `buddy say`.
+        return f'{head} typed="{record.get("text", "")}"'
+    if kind == "SLACK":
+        lines = " | ".join(
+            f'{m.get("at")} {m.get("who")} in {m.get("channel")}{" (thread)" if m.get("thread") else ""} '
+            f'ts={m.get("ts")}: {m.get("text", "")}'
+            for m in record.get("messages", [])
+        )
+        text = f"{head} {record.get('text', '')} | {lines}"
+        return text if len(text) <= max_chars else text[: max_chars - 3].rstrip() + "..."
     if kind == "ACTION_APPROVED":
         # The user clicked Approve on this card: do exactly this, then report back.
         outward = " outward=yes" if record.get("outward") else ""
@@ -336,6 +311,9 @@ class MeetingBatcher:
         self.pause = pause
         self.max_wait = max_wait
         self.lines: list[str] = []
+        # The last lines whether sent or not: a suggestion asked for right after a batch
+        # went out still needs what was just said.
+        self.recent: deque[str] = deque(maxlen=12)
         self.first_at = 0.0
         self.last_at = 0.0
         self.last_emit = float("-inf")
@@ -344,6 +322,7 @@ class MeetingBatcher:
         if not self.lines:
             self.first_at = now
         self.lines.append(line)
+        self.recent.append(line)
         # A line held back for echo checking arrives with an older time; it must not
         # make the room look quiet while others are still talking.
         self.last_at = max(self.last_at, now)
@@ -413,12 +392,12 @@ class CaptureStream:
 
 
 class ListenDaemon:
-    """Buddy as an always-attentive sensor.
+    """Buddy as a meeting assistant.
 
-    The microphone is always open, but speech is only kept in two cases: it opens with
-    "Hey Buddy", or a meeting is being recorded. Everything else is transcribed in
-    memory and dropped. System audio is captured only during a meeting. What the
-    listener notices goes to the event log, where a Claude Code session picks it up.
+    The microphone and system audio are open only while a meeting is recorded, and the
+    microphone also while the window's 🎤 takes a dictation. Between meetings nothing is
+    heard. What the listener notices goes to the event log, where a Claude Code session
+    picks it up; commands are typed in the window or sent with `buddy say`.
 
     What is kept is also shown as it happens: every meeting utterance and every piece
     of a dictated command goes to a display feed that Buddy's window and `buddy live`
@@ -432,9 +411,26 @@ class ListenDaemon:
         stream_factory: Callable[[str], Stream] | None = None,
         clock: Callable[[], float] = time.monotonic,
         brain_factory: Callable[[], Any] | None = None,
+        brain_settings: Callable[[], Settings] | None = None,
+        answer_commands: bool = False,
+        keep_memory: bool = False,
     ) -> None:
         self.settings = settings
         self._brain_factory = brain_factory
+        # Rereads the configuration when a meeting starts its brain, so `buddy brain`
+        # switches harness or model without restarting the listener.
+        self._brain_settings = brain_settings
+        # The built-in brain also answers the user's commands when no session follows.
+        self._answer_commands = answer_commands
+        self._commands: Any = None
+        self._chores: Any = None
+        # The user's working memory (working_memory.py): created if missing, committed while running.
+        self._memory_dir = settings.memory.directory() if keep_memory else None
+        self._memory_committed = 0.0
+        self._refresh: Any = None
+        self._refresh_checked = 0.0
+        self._slack: Any = None
+        self._slack_polled = 0.0
         self.brain: BrainRunner | None = None  # Buddy's own brain, for this meeting only
         self._brain_off = False  # unavailable this meeting; said once
         self._summary_task: asyncio.Task[None] | None = None
@@ -455,7 +451,6 @@ class ListenDaemon:
         self.mic: Stream | None = None
         self.remote: Stream | None = None
         self.storage: Any = None
-        self.paused = False
         self.batcher = self._new_batcher()
         self.echo: EchoGuard[TranscriptEvent] = EchoGuard(listen.echo_window_seconds)
         self._names = names_pattern(listen.question_names)
@@ -477,16 +472,10 @@ class ListenDaemon:
         self.mic_gate_factory: Callable[[], MicGate] = lambda: MicGate(
             self.mic_mode_file, self.settings.listen.mic_when_unknown, clock=self.clock
         )
-        # An open command: what the user has said since "Hey Buddy", waiting for the
-        # closing phrase. None when no command is being dictated.
-        self.capture: list[str] | None = None
         # The window's 🎤: what has been said since it was pressed, and whether the
         # microphone was opened for it (closed again when it is done).
         self.dictation: dict[str, Any] | None = None
         self._dictation_last: dict[str, Any] = {"active": False, "text": "", "id": 0}
-        self._capture_started = 0.0
-        self._capture_last = 0.0
-        self._end_phrase = end_phrase_pattern(listen.end_phrases)
         self._shutdown_reason = ""
         self.chime: Callable[[str], None] = self._play_chime
         self._meeting_started = 0.0
@@ -516,9 +505,8 @@ class ListenDaemon:
 
     @property
     def state(self) -> str:
-        if self.paused:
-            return "paused"
-        return "meeting" if self.storage is not None else "listening"
+        """"meeting" while one is recorded; "ready" between meetings, the microphone closed."""
+        return "meeting" if self.storage is not None else "ready"
 
     def _write_listen_state(self) -> None:
         _write_json(
@@ -531,7 +519,6 @@ class ListenDaemon:
                 "meeting_dir": str(self.storage.directory) if self.storage is not None else "",
                 "mic": self.mic_gate.indicator() if self.mic_gate is not None else None,
                 "dictation": self._dictation_state(),
-                "wake_phrase": self.settings.listen.wake_phrase,
                 "updated": utc_now(),
             },
         )
@@ -566,31 +553,15 @@ class ListenDaemon:
 
     # --------------------------------------------------------------- listening
 
-    async def start_listening(self) -> None:
+    async def open_mic(self) -> None:
         if self.mic is None:
             self.mic = self._stream("ME")
             self.mic.start()
-        self.paused = False
-        self._write_listen_state()
 
-    async def stop_listening(self) -> None:
+    async def close_mic(self) -> None:
         if self.mic is not None:
             await self.mic.stop()
             self.mic = None
-
-    async def pause(self, reason: str) -> None:
-        if self.storage is not None:
-            await self.stop_meeting(f"paused ({reason})")
-        await self.stop_listening()
-        self.paused = True
-        self._write_listen_state()
-        self.events.append("PAUSED", reason=reason, text="Microphone closed; run `buddy resume` to listen again.")
-
-    async def resume(self, reason: str) -> None:
-        if not self.paused:
-            return
-        await self.start_listening()
-        self.events.append("RESUMED", reason=reason)
 
     # ---------------------------------------------------------------- meetings
 
@@ -598,8 +569,7 @@ class ListenDaemon:
         if self.storage is not None:
             self.events.append("NOTICE", meeting=self.meeting_id, text="Already recording this meeting.")
             return
-        if self.paused:
-            await self.resume(reason)
+        await self.open_mic()
         from .storage import MeetingStorage
 
         selection = self._selection
@@ -704,17 +674,35 @@ class ListenDaemon:
             summary=str(storage.summary_md),
             **speakers,
         )
-        if not self.settings.listen.wake_phrase:
-            await self._close_mic()
-
-    async def _close_mic(self) -> None:
-        """Without the wake phrase the microphone is open only during a meeting."""
-        await self.stop_listening()
-        self.paused = True
+        if self.dictation is None:  # a dictation still going keeps it until it is done
+            await self.close_mic()
         self._write_listen_state()
 
+    def request_suggestion(self) -> None:
+        """💡 in the window (and the MCP tool): answer now, even without a "?" in the transcript.
+
+        The batch goes out at once like a question's. When it is empty because one just
+        left, the last lines go again, marked as a recap, so there is always something to
+        answer to.
+        """
+        if self.storage is None:
+            return
+        now = self.clock()
+        recent = list(self.batcher.recent)
+        last = next((line for line in reversed(recent) if not line.startswith("ME:")), recent[-1] if recent else "")
+        trigger: dict[str, Any] = {"trigger": "asked", "last": last}
+        if self.batcher.lines:
+            self._flush_batch(now, **trigger)
+        elif recent:
+            self.batcher.last_emit = now
+            self._send_batch(recent[-8:], recap=True, **trigger)
+        else:
+            self.events.append("NOTICE", meeting=self.meeting_id, text="Suggestion asked, but nothing has been said yet.")
+
     def _flush_batch(self, now: float, **trigger: Any) -> None:
-        lines = self.batcher.take(now)
+        self._send_batch(self.batcher.take(now), **trigger)
+
+    def _send_batch(self, lines: list[str], **trigger: Any) -> None:
         if lines and self.storage is not None:
             # Captures taken since the last batch travel with it; without speech they wait.
             screens = self.screens.take() if self.screens is not None else []
@@ -742,17 +730,32 @@ class ListenDaemon:
         if self.brain is None:
             from .autobrain import AutoBrain, BrainRunner
 
-            brain = self._brain_factory() if self._brain_factory else AutoBrain(self.settings, self.storage.directory.parent)
+            from .harness import harness_for
+
+            settings = self._current_brain_settings()
+            label = harness_for(settings).label
+            brain = self._brain_factory() if self._brain_factory else AutoBrain(settings, self.storage.directory.parent)
             if not brain.available():
                 self._brain_off = True
                 self.events.append("NOTICE", meeting=self.meeting_id,
-                                   text="No Claude Code session is following and the built-in brain is unavailable: no suggestions this meeting.")
+                                   text=f"No Claude Code session is following and the built-in brain is unavailable ({label}): no suggestions this meeting.")
                 return
             self.brain = BrainRunner(brain, self._show_suggestions, self._brain_notice)
             self.events.append("NOTICE", meeting=self.meeting_id,
-                               text="No Claude Code session is following: Buddy's built-in brain is suggesting.")
+                               text=f"No Claude Code session is following: Buddy's built-in brain is suggesting ({label}).")
             self._show("BRAIN", text="Built-in brain on: suggestions come from Buddy itself.")
         self.brain.submit(lines, trigger)
+
+    def _current_brain_settings(self) -> Settings:
+        if self._brain_settings is None:
+            return self.settings
+        try:
+            brain = self._brain_settings().brain
+        except Exception as exc:  # a config caught mid-edit must not cost the meeting its brain
+            self.events.append("NOTICE", meeting=self.meeting_id,
+                               text=f"Could not reread the brain settings, keeping the ones loaded at start: {exc}")
+            return self.settings
+        return self.settings.model_copy(update={"brain": brain})
 
     def _show_suggestions(self, suggestions: list[str]) -> None:
         self._show("SUGGEST", meeting=self.meeting_id, items=suggestions)
@@ -770,6 +773,93 @@ class ListenDaemon:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain wrote the summary: {storage.summary_md}")
         except Exception as exc:
             self.events.append("NOTICE", meeting=storage.directory.name, text=f"Built-in brain could not write the summary: {type(exc).__name__}: {exc}")
+            return
+        if self._memory_dir is not None:
+            self._hand_to_brain(MEMORY_AFTER_MEETING.format(
+                meeting=storage.directory.name, summary=storage.summary_md, transcript=storage.transcript_txt,
+            ), quiet=True)
+
+    # ----------------------------------------------------------------- memory
+
+    async def _start_memory(self) -> None:
+        if self._memory_dir is None:
+            return
+        from .working_memory import ensure_memory
+
+        try:
+            created = await asyncio.to_thread(ensure_memory, self._memory_dir)
+        except Exception as exc:  # the memory is a help; listening must go on without it
+            self.events.append("NOTICE", text=f"Could not start the working memory: {type(exc).__name__}: {exc}")
+            self._memory_dir = None
+            return
+        if self._answer_commands and self.settings.memory.refresh_at:
+            from .memory_tasks import RefreshSchedule
+
+            self._refresh = RefreshSchedule(self.settings.memory.refresh_at, self.runtime_dir / "memory-refresh.json")
+        if created:
+            self.events.append("NOTICE", text=f"Started the working memory in {self._memory_dir}.")
+            await self._onboard()
+
+    async def _onboard(self) -> None:
+        """A new memory is empty: the brain fills it from what this machine has."""
+        from .memory_tasks import onboard_prompt, probe_machine
+
+        if not (self._answer_commands and self.settings.listen.auto_brain):
+            return
+        try:
+            probe = await asyncio.to_thread(probe_machine)
+        except Exception as exc:
+            self.events.append("NOTICE", text=f"Could not look around the machine: {type(exc).__name__}: {exc}")
+            return
+        self.events.append("NOTICE", text="Setting up the working memory from this machine; `buddy memory` shows it.")
+        self._hand_to_brain(onboard_prompt(probe), chore=True)
+
+    def _refresh_memory(self, slot: str) -> None:
+        from .claude_code import buddy_tool_command
+        from .memory_tasks import refresh_prompt
+
+        self.events.append("NOTICE", text=f"Checking the working memory against the real state of the work ({slot}).")
+        self._hand_to_brain(refresh_prompt(slot, self._meetings_dir(), buddy_tool_command()), quiet=True, chore=True)
+
+    # ------------------------------------------------------------------ slack
+
+    def _start_slack(self) -> None:
+        slack = self.settings.slack
+        if not (self._answer_commands and slack.enabled and slack.log.strip()):
+            return
+        from .slack_watch import SlackFollower
+
+        self._slack = SlackFollower(slack.log.strip())
+
+    async def _poll_slack(self) -> None:
+        from .slack_watch import keep
+
+        slack = self.settings.slack
+        try:
+            rounds = await asyncio.to_thread(self._slack.poll)
+        except Exception as exc:  # an unreadable log must never stop the listening
+            self.events.append("NOTICE", text=f"Could not read the Slack log: {type(exc).__name__}: {exc}")
+            return
+        for messages in rounds:
+            messages = keep(messages, slack.ignore_channels, slack.ignore_authors)
+            if messages:
+                self._on_slack(messages)
+
+    def _on_slack(self, messages: list[Any]) -> None:
+        from .claude_code import buddy_tool_command
+        from .slack_watch import slack_prompt
+
+        who = ", ".join(dict.fromkeys(f"{m.who} ({m.channel})" for m in messages))
+        self.events.append("SLACK", text=f"{len(messages)} new: {who}", messages=[m.to_dict() for m in messages])
+        self._hand_to_brain(slack_prompt(messages, buddy_tool_command(), self.settings.slack.instructions), quiet=True)
+
+    async def _commit_memory(self) -> None:
+        from .working_memory import commit_memory
+
+        try:
+            await asyncio.to_thread(commit_memory, self._memory_dir)
+        except Exception as exc:
+            self.events.append("NOTICE", text=f"Could not commit the working memory: {type(exc).__name__}: {exc}")
 
     # --------------------------------------------------------------- speakers
 
@@ -892,25 +982,12 @@ class ListenDaemon:
             return
         now = self.clock()
         if event.speaker == "ME" and self.dictation is not None:
-            # Talking to Buddy through the 🎤: not part of the meeting, and no wake phrase.
+            # Talking to Buddy through the 🎤: not part of the meeting.
             self.dictation["words"].append(text)
             self._write_listen_state()
             return
-        if event.speaker == "ME" and self.settings.listen.wake_phrase:
-            matched, remainder = parse_wake(text)
-            if self.capture is not None or matched:
-                # Shown as heard, closing phrase included, so the user can see it landed.
-                self._show("DICTATION", text=text)
-                if self.storage is not None:
-                    await asyncio.to_thread(self.storage.append, event)
-                if self.capture is None:
-                    await self.open_command(remainder, now)
-                else:
-                    # A second "Hey Buddy" while dictating just carries on.
-                    await self.continue_command(remainder if matched else text, now)
-                return
         if self.storage is None:
-            return  # speech outside a meeting is heard, not kept, and not shown
+            return  # nothing outside a meeting is kept or shown
         if event.speaker == "ME" and self.mic_gate is not None and not self.mic_gate.heard():
             self.mic_gate.dropped += 1  # muted in the meeting app: not part of the meeting
             return
@@ -971,88 +1048,19 @@ class ListenDaemon:
 
     # --------------------------------------------------------------- commands
 
-    async def open_command(self, remainder: str, now: float) -> None:
-        """"Hey Buddy" was heard: run a short control command at once, or start dictation.
-
-        Whisper closes a segment after a short silence, so the first real test sent
-        "just to let you know, item two" to Claude while the user was still talking. A
-        command now stays open until its closing phrase, however many pauses it takes.
-        """
-        body, _ = split_end_phrase(remainder, self._end_phrase)
-        kind = classify_command(body) if body else "other"
-        if kind in LOCAL_COMMANDS:
-            await self.run_local(kind)
-            return
-        self.capture = []
-        self._capture_started = now
-        self._capture_last = now
-        self.chime("open")
-        if remainder:
-            await self.continue_command(remainder, now)
-
-    async def continue_command(self, piece: str, now: float) -> None:
-        assert self.capture is not None
-        if is_cancel(piece):
-            self.capture = None
-            self.chime("cancel")
-            self._show("CANCELLED")
-            return
-        body, closed = split_end_phrase(piece, self._end_phrase)
-        kind = classify_command(body) if body and not self.capture else "other"
-        if kind in LOCAL_COMMANDS:
-            # "Hey Buddy." then "the meeting is starting": still a control command.
-            self.capture = None
-            await self.run_local(kind)
-            return
-        if body:
-            self.capture.append(body)
-        self._capture_last = now
-        if closed:
-            await self.send_command("phrase")
-
-    async def send_command(self, ended: str) -> None:
-        """Close the open command and hand it on.
-
-        `ended` records how it closed. Anything other than the closing phrase means the
-        user may not have finished, and the session is told so.
-        """
-        words, self.capture = self.capture or [], None
-        text = " ".join(words).strip()
-        if not text:
-            self.chime("cancel")
-            self._show("CANCELLED")
-            return
-        kind = classify_command(text)
-        if kind in LOCAL_COMMANDS:
-            await self.run_local(kind)
-            return
-        # Only the user's own wake-worded speech ever arrives here: REMOTE speech and
-        # anything said without "Hey Buddy" never becomes a command.
-        self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended=ended)
-        self.chime("sent")
-
-    async def run_local(self, kind: str, reason: str = "voice") -> None:
-        if reason == "voice":
-            self.chime("sent")
+    async def run_local(self, kind: str, reason: str) -> None:
         if kind == "start_meeting":
             await self.start_meeting(reason)
         elif kind == "stop_meeting":
             await self.stop_meeting(reason)
-        elif kind == "pause":
-            await self.pause(reason)
         elif kind == "shutdown":
             self._shutdown_reason = reason
-
-    async def command(self, text: str) -> None:
-        """Handle a complete command, as if it had been dictated and closed."""
-        self.capture = [text]
-        await self.send_command("phrase")
 
     async def typed(self, text: str) -> None:
         """A command typed in Buddy's window or `buddy say`: complete, so it goes at once.
 
-        It is the user at their own keyboard, so it is trusted like their microphone,
-        and it works while the microphone is paused.
+        It is the user at their own keyboard (or their own 🎤 dictation, read and sent from
+        the window), so it is trusted, and it works with the microphone closed.
         """
         text = text.strip()
         if not text:
@@ -1062,6 +1070,39 @@ class ListenDaemon:
             await self.run_local(kind, "typed")
             return
         self.events.append("COMMAND", meeting=self.meeting_id, text=text, ended="typed")
+        self._hand_to_brain(f'The user typed in Buddy\'s window: "{text}"')
+
+    def _meetings_dir(self) -> Path:
+        meetings = Path(self.settings.meetings_dir)
+        return meetings if meetings.is_absolute() else project_root() / meetings
+
+    def _hand_to_brain(self, prompt: str, quiet: bool = False, chore: bool = False) -> None:
+        """A command no session will read goes to Buddy's own brain, which replies in the window.
+
+        Chores (onboarding, the scheduled refresh) are Buddy's own work: they run even while a
+        session follows, in a queue of their own so a long one never holds up the user's commands.
+        """
+        if not self._answer_commands or not self.settings.listen.auto_brain:
+            return
+        if not chore and self.session_watching():
+            return
+        runner = self._chores if chore else self._commands
+        if runner is None:
+            from .autobrain import CommandRunner
+            from .memory_tasks import for_chores
+
+            runner = CommandRunner(
+                (lambda: for_chores(self._current_brain_settings())) if chore else self._current_brain_settings,
+                self._meetings_dir(),
+                reply=lambda label, text: self._show("REPLY", by=label, text=text),
+                notice=lambda text: self.events.append("NOTICE", meeting=self.meeting_id, text=text),
+                working=lambda label: self._show("BRAIN", text=f"{label} is on it…"),
+            )
+            if chore:
+                self._chores = runner
+            else:
+                self._commands = runner
+        runner.submit(prompt, quiet=quiet)
 
     # ---------------------------------------------------------------- actions
 
@@ -1075,7 +1116,8 @@ class ListenDaemon:
             return
         if action is None or action.status != "approved":
             return  # only an approved card is ever sent, and only once it is approved
-        self.events.append("ACTION_APPROVED", **approval_event(action))
+        record = self.events.append("ACTION_APPROVED", **approval_event(action))
+        self._hand_to_brain(format_event(record))
 
     # -------------------------------------------------------------- dictation
 
@@ -1088,11 +1130,8 @@ class ListenDaemon:
         """The window's 🎤 was pressed: what the user says next becomes text in the window."""
         if self.dictation is not None:
             return
-        opened = self.mic is None
-        if opened:
-            self.mic = self._stream("ME")
-            self.mic.start()
-        self.dictation = {"words": [], "started": self.clock(), "opened": opened, "stop_at": None}
+        await self.open_mic()
+        self.dictation = {"words": [], "started": self.clock(), "stop_at": None}
         self.chime("open")
         self._write_listen_state()
 
@@ -1104,14 +1143,17 @@ class ListenDaemon:
     async def _stop_dictation_async(self) -> None:
         self.stop_dictation()
 
+    async def _request_suggestion_async(self) -> None:
+        self.request_suggestion()
+
     async def _finish_dictation(self) -> None:
         dictation, self.dictation = self.dictation, None
         if dictation is None:
             return
         text = " ".join(dictation["words"]).strip()
         self._dictation_last = {"active": False, "text": text, "id": self._dictation_last["id"] + 1}
-        if dictation["opened"] and self.storage is None and self.paused and self.mic is not None:
-            await self.stop_listening()  # opened only for this: closed again
+        if self.storage is None:
+            await self.close_mic()  # between meetings the microphone was opened only for this
         self.chime("sent" if text else "cancel")
         self._write_listen_state()
 
@@ -1149,15 +1191,22 @@ class ListenDaemon:
     async def tick(self) -> None:
         now = self.clock()
         listen = self.settings.listen
-        if self.capture is not None:
-            if now - self._capture_last >= listen.command_silence_seconds:
-                await self.send_command("silence")
-            elif now - self._capture_started >= listen.command_max_seconds:
-                await self.send_command("limit")
         if self.dictation is not None:
             stop_at = self.dictation["stop_at"]
-            if (stop_at is not None and now >= stop_at) or now - self.dictation["started"] >= listen.command_max_seconds:
+            if (stop_at is not None and now >= stop_at) or now - self.dictation["started"] >= listen.dictation_max_seconds:
                 await self._finish_dictation()
+        every = self.settings.memory.autocommit_seconds
+        if self._memory_dir is not None and every and now - self._memory_committed >= every:
+            self._memory_committed = now
+            await self._commit_memory()
+        if self._slack is not None and now - self._slack_polled >= self.settings.slack.poll_seconds:
+            self._slack_polled = now
+            await self._poll_slack()
+        if self._refresh is not None and now - self._refresh_checked >= 30:
+            self._refresh_checked = now
+            slot = self._refresh.due()
+            if slot:
+                self._refresh_memory(slot)
         if self.storage is None:
             return
         if self.mic_gate is not None and self.mic_gate.indicator() != self._mic_shown:
@@ -1178,10 +1227,9 @@ class ListenDaemon:
         flags = {
             "start-meeting": lambda: self.start_meeting("requested"),
             "stop-meeting": lambda: self.stop_meeting("requested"),
-            "pause": lambda: self.pause("requested"),
-            "resume": lambda: self.resume("requested"),
             "dictate-start": self.start_dictation,
             "dictate-stop": self._stop_dictation_async,
+            "suggest": self._request_suggestion_async,
         }
         for name, action in flags.items():
             flag = self.control_dir / f"{name}.flag"
@@ -1193,7 +1241,7 @@ class ListenDaemon:
             await self.stop_meeting("stop requested")
         if self.suggest_file.exists():  # the MCP request_suggestion tool
             self.suggest_file.unlink(missing_ok=True)
-            self._flush_batch(self.clock())
+            self.request_suggestion()
         if self.control_dir.exists():
             for submitted in sorted(self.control_dir.glob("command-*.json")):
                 text = str(_read_json(submitted).get("text", ""))
@@ -1215,12 +1263,10 @@ class ListenDaemon:
         queue = self.bus.subscribe(maxsize=2048)
         reason = "stopped"
         try:
-            if self.settings.listen.wake_phrase:
-                await self.start_listening()
-                self.events.append("LISTENER_UP", text="Listening for \"Hey Buddy\".")
-            else:
-                await self._close_mic()
-                self.events.append("LISTENER_UP", text="Ready: the microphone opens when a meeting starts.")
+            await self._start_memory()
+            self._start_slack()
+            self._write_listen_state()
+            self.events.append("LISTENER_UP", text="Ready: the microphone opens when a meeting starts.")
             while not stop.is_set():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.5)
@@ -1242,7 +1288,7 @@ class ListenDaemon:
         finally:
             if self.storage is not None:
                 await self.stop_meeting("listener stopped")
-            await self.stop_listening()
+            await self.close_mic()
             self.bus.unsubscribe(queue)
             self.events.append("LISTENER_DOWN", reason=reason)
             self.release()
