@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -231,6 +232,37 @@ class Pump:
         return True
 
 
+FRONT_FLAG = "window-front.flag"
+
+
+def bring_to_front(runtime_dir: Path) -> None:
+    """Ask the open window to come to the front; it checks a few times a second."""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / FRONT_FLAG).touch()
+
+
+def _set_dock_icon() -> None:  # pragma: no cover - needs a macOS display
+    """Show Buddy's icon in the Dock rather than Python's while the window is open."""
+    from .app_bundle import ICON_PNG
+
+    try:
+        from AppKit import NSApplication, NSImage
+        from PyObjCTools import AppHelper
+    except ImportError:
+        return
+    image = NSImage.alloc().initWithContentsOfFile_(str(ICON_PNG))
+    if image is not None:
+        AppHelper.callAfter(NSApplication.sharedApplication().setApplicationIconImage_, image)
+
+
+# Closing the window turns Buddy off, so it asks first: a click by mistake would end a meeting.
+CLOSE_TEXT = {
+    "global.quitConfirmation": "Turn Buddy off? A meeting being recorded ends here and gets its summary.",
+    "global.quit": "Turn off",
+    "global.cancel": "Keep running",
+}
+
+
 def window_closed(runtime_dir: Path, send_control: Callable[[Path, str], None] = request) -> bool:
     """Closing the window turns Buddy off: the window is Buddy, and a listener left running
     unseen would keep recording a meeting nobody watches. True when a shutdown was asked."""
@@ -257,6 +289,7 @@ def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep
     window = webview.create_window(
         "Buddy", html=PAGE, js_api=api, width=width, height=height, x=x, y=y,
         min_size=(320, 360), on_top=on_top, text_select=True,
+        confirm_close=True, localization=CLOSE_TEXT,
     )
     api._window = window
     loaded, closed = threading.Event(), threading.Event()
@@ -266,10 +299,18 @@ def run_window(runtime_dir: Path, show: str = "buddy", on_top: bool = True, keep
     def pump() -> None:
         loaded.wait()
         window.evaluate_js(f"window.buddy && window.buddy.setPinned({json.dumps(on_top)})")
+        if sys.platform == "darwin":
+            _set_dock_icon()
         feeder = Pump(view, window.evaluate_js)
+        front = runtime_dir / FRONT_FLAG
+        front.unlink(missing_ok=True)
         while not closed.is_set():
             try:
                 feeder.step()
+                if front.exists():  # `buddy open` (Buddy.app) while the window is already open
+                    front.unlink(missing_ok=True)
+                    window.restore()
+                    window.show()
             except Exception:  # the page reloading or closing mid-call
                 pass
             closed.wait(0.3)

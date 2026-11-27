@@ -79,10 +79,15 @@ register the local MCP server under the name `buddy`. Copy `config.example.yaml`
 ## Listening mode
 
 ```sh
-buddy listen --detach      # Buddy and its window, in the background; the microphone waits for a meeting
+buddy open                 # Buddy and its window (starts Buddy if it is off, or brings the window to the front)
 buddy status               # ready or meeting
-buddy listen --stop        # turn it off
+buddy listen --stop        # turn it off (or close the window, which asks first)
 ```
+
+**As an app (macOS).** The installer makes `~/Applications/Buddy.app` (`buddy app` makes it again, for example
+after moving the checkout): double-click it, or find it in Spotlight or Launchpad, or keep it in the Dock. It runs
+`buddy open` through your login shell, so Buddy sees the same PATH and variables as in a terminal; its log is
+`~/Library/Logs/Buddy.log`. Closing the window asks "Turn Buddy off?" before it does.
 
 Then, in the Claude Code session you keep open, say "turn Buddy on". The `buddy-listener` skill arms a monitor
 over `buddy watch --follow --as claude-code` and starts handling events.
@@ -96,8 +101,8 @@ to Buddy:
 - the suggestions from its latest reply to meeting speech, pinned on top;
 - a box to type commands, and a 🎤 to dictate one into it (click, speak, click again; the words land in the box to
   read, fix and send);
-- a button to record a meeting and end it. Closing the window turns Buddy off (it ends a meeting being recorded,
-  which still gets its summary);
+- a button to record a meeting and end it. Closing the window turns Buddy off after a confirmation (it ends a
+  meeting being recorded, which still gets its summary);
 - during a meeting, **💡 Suggest**: a suggestion for what to say now, as a question would get, for the moments
   the transcript has no "?" (the batch goes out at once, or the last lines again if one just left).
 
@@ -107,7 +112,7 @@ disk. That format belongs to Claude Code and may change; if it does, the window 
 commands, and the replies stay in the chat. By default only the turns Buddy started are shown ("Only Buddy"); the
 rest of the session stays out of the window unless you switch to "All turns".
 
-`buddy listen --detach` opens Buddy and its window again; `buddy live` shows the same in a terminal — next to the Claude chat in your editor, for
+Buddy.app or `buddy open` opens Buddy and its window again; `buddy live` shows the same in a terminal — next to the Claude chat in your editor, for
 example — and `buddy say "review PR 123"` sends a typed command from any shell. The window needs the `window`
 extra, which the installers include (`pip install -e ".[window]"`); on Linux, pywebview also needs GTK or Qt.
 
@@ -229,6 +234,8 @@ buddy doctor
 buddy hotkeys
 buddy tool --list          # the read-only connectors the agent may call
 buddy watch --as name      # listening-mode events since this name last read
+buddy open                 # start Buddy if needed and show its window (what Buddy.app runs)
+buddy app                  # make ~/Applications/Buddy.app again (macOS)
 buddy window               # Buddy's floating window
 buddy live                 # the same, in a terminal
 buddy say "review PR 123"  # a typed command
@@ -236,7 +243,7 @@ buddy say "review PR 123"  # a typed command
 
 ## Privacy and consent
 
-- **Recording is explicit.** Buddy starts idle. It records only when you ask, by voice or by command. Starting a
+- **Recording is explicit.** Buddy starts idle. It records only when you ask, with the Meeting button or a command. Starting a
   recording through MCP additionally requires `BUDDY_ALLOW_MCP_START=true` and `confirmed=true` in the call.
 - **Check the law and the room.** Recording rules differ by country and by employer. Get the participants'
   consent before you record them.
