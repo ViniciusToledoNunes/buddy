@@ -39,7 +39,7 @@ class FakeStream:
 
 
 def _daemon(tmp_path):
-    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False, "wake_phrase": True}})
+    settings = Settings.model_validate({"meetings_dir": str(tmp_path / "meetings"), "listen": {"sounds": False, "auto_brain": False}})
     daemon = ListenDaemon(settings, tmp_path / "runtime", stream_factory=FakeStream)
     daemon.chime = lambda kind: None
     daemon.claim()
@@ -97,28 +97,6 @@ async def test_speech_outside_a_meeting_is_never_shown(tmp_path):
     assert _shown(daemon) == []
 
 
-async def test_a_dictated_command_is_shown_piece_by_piece(tmp_path):
-    daemon = _daemon(tmp_path)
-
-    await daemon.on_final(_said("ME", "Hey Buddy, review PR 123"))
-    await daemon.on_final(_said("ME", "and check the tests. Over and out."))
-
-    assert [text for _, _, text in _shown(daemon)] == [
-        "Hey Buddy, review PR 123",
-        "and check the tests. Over and out.",
-    ]
-    assert _events(daemon)[-1]["text"] == "review PR 123 and check the tests"
-
-
-async def test_a_cancelled_command_says_so_on_screen(tmp_path):
-    daemon = _daemon(tmp_path)
-
-    await daemon.on_final(_said("ME", "Hey Buddy, post that"))
-    await daemon.on_final(_said("ME", "Never mind."))
-
-    assert _shown(daemon)[-1][0] == "CANCELLED"
-
-
 async def test_a_full_display_feed_starts_over_instead_of_piling_up(tmp_path):
     log = EventLog(tmp_path / "live.jsonl", max_bytes=200, archive=False)
     for n in range(20):
@@ -142,9 +120,9 @@ async def test_a_typed_command_reaches_the_session_whole(tmp_path):
     assert "incomplete" not in format_event(command)
 
 
-async def test_typed_commands_arrive_in_order_and_work_while_paused(tmp_path):
+async def test_typed_commands_arrive_in_order_with_the_microphone_closed(tmp_path):
     daemon = _daemon(tmp_path)
-    await daemon.pause("test")
+    assert daemon.mic is None
 
     submit(daemon.runtime_dir, "first")
     submit(daemon.runtime_dir, "second")

@@ -53,7 +53,7 @@ def open_link(url: str) -> bool:
         return False
 
 
-CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown", "dictate-start", "dictate-stop", "suggest"}
+CONTROLS = {"start-meeting", "stop-meeting", "shutdown", "dictate-start", "dictate-stop", "suggest"}
 MAX_TYPED = 4000
 
 
@@ -309,7 +309,7 @@ button.danger.armed { background: var(--rec); color: #fff; border-color: var(--r
 header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel);
   border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--tool); flex: none; }
-.dot.listening { background: var(--ok); }
+.dot.ready { background: var(--ok); }
 .dot.meeting { background: var(--rec); animation: pulse 1.6s infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
 #state { font-weight: 600; }
@@ -452,7 +452,6 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
   <span class="tools">
     <button id="suggest" title="Suggest what to say now, even when nobody asked a question">💡 Suggest</button>
     <button id="meeting" title="Start or end recording a meeting">⏺ Meeting</button>
-    <button id="pause" title="Close or reopen the microphone">⏸</button>
     <button id="show" title="Show only what Buddy started, or the whole Claude session">Only Buddy</button>
     <button id="brain-button" title="Brain: harness and model">🧠</button>
     <button id="pin" class="on" title="Keep this window above the others">📌</button>
@@ -557,8 +556,8 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
     status = next;
     const state = next.listener;
     $("dot").className = "dot " + state;
-    const ready = state === "paused" && next.wake_phrase === false;  // waiting for a meeting or the 🎤
-    let label = ready ? "Ready" : ({listening: "Listening", meeting: "Recording", paused: "Paused", off: "Buddy is off"}[state] || state);
+    // Between meetings Buddy is ready: the microphone opens for a meeting or the 🎤.
+    let label = {ready: "Ready", meeting: "Recording", off: "Buddy is off"}[state] || state;
     if (state === "meeting") {
       const minutes = minutesSince(next.meeting);
       if (minutes !== null) label += " · " + minutes + " min";
@@ -574,9 +573,6 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
     const on = state !== "off";
     $("meeting").textContent = state === "meeting" ? "⏹ End meeting" : "⏺ Meeting";
     $("meeting").disabled = !on;
-    $("pause").textContent = state === "paused" ? "▶" : "⏸";
-    $("pause").disabled = !on;
-    $("pause").style.display = ready ? "none" : "";
     $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
     $("suggest").style.display = state === "meeting" ? "inline-block" : "none";
@@ -825,7 +821,6 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
 
   const control = async (action) => { const r = await call("control", action); if (!r.ok) showError(r.error); };
   $("meeting").addEventListener("click", () => control(status.listener === "meeting" ? "stop-meeting" : "start-meeting"));
-  $("pause").addEventListener("click", () => control(status.listener === "paused" ? "resume" : "pause"));
   $("dictate").addEventListener("click", async () => {
     const live = status.dictation && status.dictation.active;
     if (live) { finishing = true; $("dictate").className = "finishing"; }
