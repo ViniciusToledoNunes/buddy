@@ -53,7 +53,7 @@ def open_link(url: str) -> bool:
         return False
 
 
-CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown", "dictate-start", "dictate-stop"}
+CONTROLS = {"start-meeting", "stop-meeting", "pause", "resume", "shutdown", "dictate-start", "dictate-stop", "suggest"}
 MAX_TYPED = 4000
 
 
@@ -112,15 +112,6 @@ class WindowApi:
             return refusal
         self._send_control(self._runtime_dir, action)
         return {"ok": True}
-
-    def set_mic(self, mode: str) -> dict[str, Any]:
-        """The microphone button: follow the meeting app (auto), always keep (on), never (off)."""
-        from .mic_gate import MODES, write_mode
-
-        if mode not in MODES:
-            return {"ok": False, "error": f"Unknown microphone mode: {mode}"}
-        write_mode(self._runtime_dir / "listen" / "mic.json", mode)
-        return {"ok": True, "mode": mode}
 
     def decide_action(self, action_id: int, approve: bool, detail: str | None = None) -> dict[str, Any]:
         """A click on a card. Approve hands it to the session; a copy-only reply is done here."""
@@ -310,13 +301,9 @@ button { font: inherit; color: inherit; background: none; border: 1px solid var(
 button:hover { background: var(--accent-soft); }
 button.on { background: var(--accent-soft); border-color: var(--accent); }
 button.danger.armed { background: var(--rec); color: #fff; border-color: var(--rec); }
-/* The microphone button glows while your lines are kept, dims while you are muted in the
-   meeting app, and turns amber when no app could be read. */
-#mic { display: none; }
-#mic.heard { color: #fff; background: var(--rec); border-color: var(--rec); box-shadow: 0 0 10px var(--rec);
-  animation: glow 1.6s ease-in-out infinite; }
-#mic.muted { opacity: .45; }
-#mic.unknown { border-color: #d9a400; color: #d9a400; }
+/* 💡 asks for a suggestion now; shown only during a meeting, it dims while the request goes out. */
+#suggest { display: none; }
+#suggest.sent { opacity: .5; }
 @keyframes glow { 50% { box-shadow: 0 0 3px var(--rec); } }
 
 header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel);
@@ -463,7 +450,7 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
   <span id="brain"></span>
   <span class="spacer"></span>
   <span class="tools">
-    <button id="mic" title="Your microphone">🎙</button>
+    <button id="suggest" title="Suggest what to say now, even when nobody asked a question">💡 Suggest</button>
     <button id="meeting" title="Start or end recording a meeting">⏺ Meeting</button>
     <button id="pause" title="Close or reopen the microphone">⏸</button>
     <button id="show" title="Show only what Buddy started, or the whole Claude session">Only Buddy</button>
@@ -592,18 +579,7 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
     $("pause").style.display = ready ? "none" : "";
     $("power").disabled = !on;
     $("show").textContent = next.show === "all" ? "All turns" : "Only Buddy";
-    const mic = next.mic;
-    const micButton = $("mic");
-    micButton.style.display = mic && state === "meeting" ? "inline-block" : "none";
-    if (mic) {
-      const look = mic.mode !== "auto" ? (mic.heard ? "heard" : "muted")
-        : mic.state === "none" ? "unknown" : (mic.heard ? "heard" : "muted");
-      micButton.className = look;
-      micButton.textContent = mic.mode === "auto" ? "🎙" : (mic.mode === "on" ? "🎙 on" : "🎙 off");
-      const app = mic.app || "no meeting app read";
-      micButton.title = (mic.heard ? "Your lines are kept" : "Your lines are not kept") +
-        ` · ${mic.mode === "auto" ? "following " + app : "set by hand"} · click: auto → on → off`;
-    }
+    $("suggest").style.display = state === "meeting" ? "inline-block" : "none";
     showDictation(next.dictation, on);
     showActions(next.actions);
     showBoard(next.board, state === "meeting");
@@ -880,11 +856,13 @@ section.folded h2::before, body.activity-closed #activity-head::before { content
   };
   try { if (localStorage.getItem(ACTIVITY_KEY) === "closed") document.body.classList.add("activity-closed"); } catch (e) {}
   $("activity-head").addEventListener("click", () => setActivity(document.body.classList.contains("activity-closed")));
-  $("mic").addEventListener("click", async () => {
-    const order = ["auto", "on", "off"];
-    const current = (status.mic && status.mic.mode) || "auto";
-    const r = await call("set_mic", order[(order.indexOf(current) + 1) % order.length]);
+  $("suggest").addEventListener("click", async () => {
+    const button = $("suggest");
+    if (button.classList.contains("sent")) return;  // one request at a time
+    button.classList.add("sent");
+    const r = await call("control", "suggest");
     if (!r.ok) showError(r.error);
+    setTimeout(() => button.classList.remove("sent"), 3000);
   });
   $("show").addEventListener("click", async () => {
     const r = await call("set_show", status.show === "all" ? "buddy" : "all");

@@ -96,7 +96,9 @@ to Buddy:
 - what the Claude Code session does with it — each tool it uses, and its reply;
 - the suggestions from its latest reply to meeting speech, pinned on top;
 - a box to type commands, which reach the session exactly like spoken ones, even while the microphone is paused;
-- buttons to record a meeting, pause, and turn Buddy off.
+- buttons to record a meeting, pause, and turn Buddy off;
+- during a meeting, **💡 Suggest**: a suggestion for what to say now, as a question would get, for the moments
+  the transcript has no "?" (the batch goes out at once, or the last lines again if one just left).
 
 The window thinks about nothing, and costs nothing: the session watching Buddy stays the brain, with everything it
 already knows. To show what that session is doing, the window reads the conversation record Claude Code keeps on

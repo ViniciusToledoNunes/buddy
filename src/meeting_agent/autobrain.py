@@ -18,6 +18,12 @@ This update was sent early because of a question{to}: "{question}"
 Suggest an answer to it first, whoever it was asked of, in one or two lines the user
 could say out loud. Answer from what you already know; research only if it is quick."""
 
+ASKED_TRIGGER = """
+The user pressed "Suggest" (no question mark needed): they need something to say right now.
+{recap}The last thing said by someone else: "{last}"
+Suggest first what the user could say in reply to it, in one or two lines they could say
+out loud. Answer from what you already know; research only if it is quick."""
+
 REPORT_PROMPT = """The meeting has ended. Write the report with exactly these Markdown sections:
 {sections}
 
@@ -63,6 +69,9 @@ class AutoBrain:
         if trigger and trigger.get("trigger") == "question":
             to = " addressed to ME" if trigger.get("addressed") else ""
             cue = QUESTION_TRIGGER.format(to=to, question=trigger.get("question", ""))
+        elif trigger and trigger.get("trigger") == "asked":
+            recap = "These lines were already sent; they are repeated as the context.\n" if trigger.get("recap") else ""
+            cue = ASKED_TRIGGER.format(recap=recap, last=trigger.get("last", ""))
         prompt = UPDATE_PROMPT.format(count=len(lines), lines="\n".join(lines), trigger=cue)
         raw = await self.provider.complete(self._system(), prompt)
         data = _extract_json(raw)
@@ -101,8 +110,8 @@ class BrainRunner:
 
     def submit(self, lines: list[str], trigger: dict[str, Any] | None = None) -> None:
         self._pending.extend(lines)
-        if trigger and trigger.get("trigger") == "question":
-            self._trigger = trigger  # the latest question is the one worth answering
+        if trigger and trigger.get("trigger") in ("question", "asked"):
+            self._trigger = trigger  # the latest question (or 💡 click) is the one worth answering
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._drain())
 

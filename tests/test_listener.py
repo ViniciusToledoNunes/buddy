@@ -1012,3 +1012,63 @@ async def test_without_the_wake_phrase_hey_buddy_is_just_speech(tmp_path):
 
     assert daemon.storage is not None  # still recording
     assert daemon.capture is None
+
+
+async def test_the_suggest_button_sends_the_batch_without_a_question(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, echo_window_seconds=0, batch_min_seconds=60)
+    await daemon.start_meeting("test")
+    daemon.batcher.last_emit = clock.now
+
+    await daemon.on_final(_said("REMOTE", "So the vendor sync is the blocker for the release."))
+    await daemon.on_final(_said("ME", "Right."))
+    assert _batches(daemon) == []  # no "?", so it would wait for the interval
+    (daemon.control_dir / "suggest.flag").parent.mkdir(parents=True, exist_ok=True)
+    (daemon.control_dir / "suggest.flag").touch()
+    await daemon.check_controls()
+
+    batch = _batches(daemon)[-1]
+    assert batch["trigger"] == "asked" and "recap" not in batch
+    assert batch["last"] == "REMOTE: So the vendor sync is the blocker for the release."
+    assert batch["lines"] == ["REMOTE: So the vendor sync is the blocker for the release.", "ME: Right."]
+    assert daemon.batcher.lines == []
+
+
+async def test_the_suggest_button_resends_recent_lines_when_the_batch_just_left(tmp_path):
+    clock = Clock()
+    daemon, _ = _daemon(tmp_path, clock, echo_window_seconds=0)
+    await daemon.start_meeting("test")
+    await daemon.on_final(_said("REMOTE", "Does anyone know where the PVendor lives?"))  # sent at once
+    assert daemon.batcher.lines == []
+
+    daemon.request_suggestion()
+
+    batch = _batches(daemon)[-1]
+    assert batch["trigger"] == "asked" and batch["recap"] is True
+    assert batch["lines"] == ["REMOTE: Does anyone know where the PVendor lives?"]
+
+
+async def test_the_suggest_button_before_anyone_spoke_only_notes_it(tmp_path):
+    daemon, _ = _daemon(tmp_path, echo_window_seconds=0)
+    await daemon.start_meeting("test")
+
+    daemon.request_suggestion()
+
+    assert _batches(daemon) == []
+    assert any("nothing has been said yet" in e.get("text", "") for e in _events(daemon))
+
+
+def test_an_asked_batch_says_so_before_the_speech():
+    line = format_event(
+        {
+            "time": "2026-11-27T15:00:00+00:00",
+            "type": "MEETING_BATCH",
+            "meeting": "m",
+            "trigger": "asked",
+            "recap": True,
+            "last": "REMOTE: The vendor sync is the blocker.",
+            "lines": ["REMOTE: The vendor sync is the blocker."],
+            "transcript": "/m/transcript.txt",
+        }
+    )
+    assert ' lines=1 trigger=asked recap=yes last="REMOTE: The vendor sync is the blocker." | REMOTE:' in line

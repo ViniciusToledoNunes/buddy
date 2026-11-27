@@ -57,7 +57,11 @@ Each notification is one line: time, type, then fields.
   it names the user. Suggest an answer to that question whoever it was asked of, `to=ME`
   first, within seconds: **from `prep.md` and what this session already knows, without
   researching**, one or two lines the user could say out loud. If a better answer needs a
-  lookup, say so in the same reply and do it afterwards. With `listen.screen_capture` on, the
+  lookup, say so in the same reply and do it afterwards. A batch with `trigger=asked last="..."`
+  comes from the window's 💡 Suggest button: the user needs something to say **now**, question
+  mark or not. Treat it like a question addressed to them, about `last` (the latest line from
+  someone else) and the lines before it, same speed and form. `recap=yes` means these lines
+  were already sent; they are repeated as context. With `listen.screen_capture` on, the
   line also carries `screens=N latest_screen=<path>`: screenshots taken since the last batch. Open the latest
   one when the talk refers to something on screen ("as you can see", a demo, a diagram);
   the earlier ones are in the same `screens/` folder. A screenshot is the whole display,

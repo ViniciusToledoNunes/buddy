@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -295,6 +296,10 @@ def format_event(record: dict[str, Any], max_chars: int = 6000) -> str:
             # Sent early because of this question; named first so truncation never hides it.
             to = " to=ME" if record.get("addressed") else ""
             shown = f' trigger=question{to} q="{record.get("question", "")}"' + shown
+        elif record.get("trigger") == "asked":
+            # The user pressed 💡: they want something to say now, question mark or not.
+            recap = " recap=yes" if record.get("recap") else ""
+            shown = f' trigger=asked{recap} last="{record.get("last", "")}"' + shown
         text = f"{head} lines={len(lines)}{shown} | {body}"
         if len(text) > max_chars:
             text = text[: max_chars - 60].rstrip() + f" ... (full text in {record.get('transcript', 'transcript.txt')})"
@@ -350,6 +355,9 @@ class MeetingBatcher:
         self.pause = pause
         self.max_wait = max_wait
         self.lines: list[str] = []
+        # The last lines whether sent or not: a suggestion asked for right after a batch
+        # went out still needs what was just said.
+        self.recent: deque[str] = deque(maxlen=12)
         self.first_at = 0.0
         self.last_at = 0.0
         self.last_emit = float("-inf")
@@ -358,6 +366,7 @@ class MeetingBatcher:
         if not self.lines:
             self.first_at = now
         self.lines.append(line)
+        self.recent.append(line)
         # A line held back for echo checking arrives with an older time; it must not
         # make the room look quiet while others are still talking.
         self.last_at = max(self.last_at, now)
@@ -744,8 +753,31 @@ class ListenDaemon:
         self.paused = True
         self._write_listen_state()
 
+    def request_suggestion(self) -> None:
+        """💡 in the window (and the MCP tool): answer now, even without a "?" in the transcript.
+
+        The batch goes out at once like a question's. When it is empty because one just
+        left, the last lines go again, marked as a recap, so there is always something to
+        answer to.
+        """
+        if self.storage is None:
+            return
+        now = self.clock()
+        recent = list(self.batcher.recent)
+        last = next((line for line in reversed(recent) if not line.startswith("ME:")), recent[-1] if recent else "")
+        trigger: dict[str, Any] = {"trigger": "asked", "last": last}
+        if self.batcher.lines:
+            self._flush_batch(now, **trigger)
+        elif recent:
+            self.batcher.last_emit = now
+            self._send_batch(recent[-8:], recap=True, **trigger)
+        else:
+            self.events.append("NOTICE", meeting=self.meeting_id, text="Suggestion asked, but nothing has been said yet.")
+
     def _flush_batch(self, now: float, **trigger: Any) -> None:
-        lines = self.batcher.take(now)
+        self._send_batch(self.batcher.take(now), **trigger)
+
+    def _send_batch(self, lines: list[str], **trigger: Any) -> None:
         if lines and self.storage is not None:
             # Captures taken since the last batch travel with it; without speech they wait.
             screens = self.screens.take() if self.screens is not None else []
@@ -1273,6 +1305,9 @@ class ListenDaemon:
     async def _stop_dictation_async(self) -> None:
         self.stop_dictation()
 
+    async def _request_suggestion_async(self) -> None:
+        self.request_suggestion()
+
     async def _finish_dictation(self) -> None:
         dictation, self.dictation = self.dictation, None
         if dictation is None:
@@ -1353,6 +1388,7 @@ class ListenDaemon:
             "resume": lambda: self.resume("requested"),
             "dictate-start": self.start_dictation,
             "dictate-stop": self._stop_dictation_async,
+            "suggest": self._request_suggestion_async,
         }
         for name, action in flags.items():
             flag = self.control_dir / f"{name}.flag"
@@ -1364,7 +1400,7 @@ class ListenDaemon:
             await self.stop_meeting("stop requested")
         if self.suggest_file.exists():  # the MCP request_suggestion tool
             self.suggest_file.unlink(missing_ok=True)
-            self._flush_batch(self.clock())
+            self.request_suggestion()
         if self.control_dir.exists():
             for submitted in sorted(self.control_dir.glob("command-*.json")):
                 text = str(_read_json(submitted).get("text", ""))
